@@ -1,12 +1,24 @@
 import { ArrowLeft, Check, FolderPlus, Trash2 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
 import { homeDir } from "@tauri-apps/api/path";
 import { useEffect, useState } from "react";
 import type { LocalConfig, SupportedExt } from "../lib/localConfig";
 import { saveConfig } from "../lib/localConfig";
 import { PageHeader } from "../components/PageHeader";
 import { Button } from "../components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "../components/ui/alert-dialog";
 import {
   Combobox,
   ComboboxContent,
@@ -51,6 +63,11 @@ export function SettingsPage({
   hasPendingEmbeds,
   embedProgress,
   extOptions,
+  needsEmbedding,
+  embedPlan,
+  embedPromptDismissed,
+  onContinueEmbedding,
+  onCancelEmbeddingPrompt,
 }: {
   cfg: LocalConfig;
   setCfg: (next: LocalConfig) => void;
@@ -62,14 +79,42 @@ export function SettingsPage({
     status: string;
   };
   extOptions: SupportedExt[];
+  needsEmbedding: boolean;
+  embedPlan: {
+    totalSelected: number | null;
+    pending: number | null;
+    warning: string | null;
+  };
+  embedPromptDismissed: boolean;
+  onContinueEmbedding: () => Promise<void>;
+  onCancelEmbeddingPrompt: () => void;
 }) {
   const [homePath, setHomePath] = useState("");
+  const [clearingIndex, setClearingIndex] = useState(false);
+  const [clearIndexError, setClearIndexError] = useState<string | null>(null);
+  const [confirmClearOpen, setConfirmClearOpen] = useState(false);
+  const [continueError, setContinueError] = useState<string | null>(null);
   const selectedSearchModeOption: SearchModeOption | null =
     SEARCH_MODE_OPTIONS.find((option) => option.value === cfg.searchMode) ?? null;
 
   function updateConfig(next: LocalConfig) {
     setCfg(next);
     saveConfig(next);
+  }
+
+  async function deleteAllVectors() {
+    setClearIndexError(null);
+    setClearingIndex(true);
+    try {
+      await invoke("qdrant_delete_all_points", { args: { sourceId: cfg.sourceId } });
+      // Bump sourceId to force a clean re-index cycle + avoid any stale per-source caches.
+      updateConfig({ ...cfg, sourceId: crypto.randomUUID() });
+      setConfirmClearOpen(false);
+    } catch (e) {
+      setClearIndexError(String(e));
+    } finally {
+      setClearingIndex(false);
+    }
   }
 
   async function pickFolder(label: string): Promise<string | null> {
@@ -331,6 +376,53 @@ export function SettingsPage({
 
         </div>
       </div>
+
+      <div className="mt-8">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-sm font-semibold tracking-tight text-rose-700">Delete all vectors</div>
+            <div className="mt-0.5 text-sm text-black/60">
+              Clears the local Qdrant index for this profile (embeddings only). Your files stay on disk.
+            </div>
+            {clearIndexError ? (
+              <div className="mt-2 text-sm font-medium text-rose-700">Error: {clearIndexError}</div>
+            ) : null}
+          </div>
+
+          <AlertDialog open={confirmClearOpen} onOpenChange={setConfirmClearOpen}>
+            <AlertDialogTrigger asChild>
+              <Button variant="destructive" disabled={clearingIndex || embedding || hasPendingEmbeds}>
+                <Trash2 className="mr-2 h-4 w-4" aria-hidden="true" />
+                {clearingIndex ? "Deleting…" : "Delete all vectors"}
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete all vectors?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This removes embeddings from your local Qdrant index{typeof embedPlan.totalSelected === "number"
+                    ? ` (up to ${embedPlan.totalSelected} selected file(s)).`
+                    : "."}{" "}
+                  Your files won’t be deleted, but search will return no results until you re-embed.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel disabled={clearingIndex}>Cancel</AlertDialogCancel>
+                <AlertDialogAction
+                  variant="destructive"
+                  disabled={clearingIndex}
+                  onClick={async (e) => {
+                    e.preventDefault();
+                    await deleteAllVectors();
+                  }}
+                >
+                  Delete vectors
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+        </div>
+      </div>
       <div className="mt-8 flex min-h-24 items-center justify-center">
         {embedding || hasPendingEmbeds ? (
           <div className="w-full max-w-sm">
@@ -344,6 +436,67 @@ export function SettingsPage({
               {embedProgress.status}
             </div>
           </div>
+        ) : needsEmbedding ? (
+          <div className="w-full max-w-xl rounded-lg border border-black/10 bg-white p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold tracking-tight">Embedding paused</div>
+                <div className="mt-1 text-sm text-black/60">
+                  Your selections changed. Click Continue when you're ready to (re)embed files.
+                </div>
+                {typeof embedPlan.totalSelected === "number" ? (
+                  <div className="mt-2 text-sm text-black/60 tabular-nums">
+                    Planned:{" "}
+                    <span className="font-medium text-black/80">
+                      {embedPlan.pending ?? embedPlan.totalSelected}
+                    </span>{" "}
+                    file(s) to embed
+                    {embedPlan.pending === null ? (
+                      <span className="text-black/50"> (estimate)</span>
+                    ) : (
+                      <span className="text-black/50"> (exact)</span>
+                    )}
+                  </div>
+                ) : null}
+                {embedPlan.warning ? (
+                  <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                    <div className="font-semibold">Warning</div>
+                    <div className="mt-1 text-amber-900/90">{embedPlan.warning}</div>
+                  </div>
+                ) : null}
+                {continueError ? (
+                  <div className="mt-2 text-sm font-medium text-rose-700">Error: {continueError}</div>
+                ) : null}
+              </div>
+              <div className="flex shrink-0 flex-col gap-2">
+                <Button
+                  disabled={embedding || clearingIndex}
+                  onClick={async () => {
+                    setContinueError(null);
+                    try {
+                      await onContinueEmbedding();
+                    } catch (e) {
+                      setContinueError(String(e));
+                    }
+                  }}
+                >
+                  Continue
+                </Button>
+                <Button
+                  variant="ghost"
+                  disabled={embedding || clearingIndex}
+                  onClick={() => {
+                    setContinueError(null);
+                    onCancelEmbeddingPrompt();
+                  }}
+                >
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          </div>
+        ) : embedPromptDismissed ? (
+          <div className="text-sm font-medium text-black/60">{embedProgress.status}</div>
         ) : hasEmbeddingIssue ? (
           <div className="text-sm font-medium text-rose-700">{embedProgress.status}</div>
         ) : (

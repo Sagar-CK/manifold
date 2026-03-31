@@ -4,14 +4,14 @@
   <img src="src/assets/manifold-icon.png" alt="Manifold logo" width="96" height="96" />
 </p>
 
-Native desktop app for **semantic search across your local files** using **Gemini multimodal embeddings** + **Convex vector search**.
+Native desktop app for **semantic search across your local files** using **Gemini embeddings** + a **local Qdrant vector database**.
 
 ## Features
 
 - **Local file access** (Tauri) with configurable **include/exclude** paths
 - **Supported types**: `png`, `jpg/jpeg`, `pdf`, `mp3`, `wav`, `mp4`, `mov`
 - **Embeddings**: Gemini `gemini-embedding-2-preview` (client-side API calls; cached locally)
-- **Index + search**: vectors + metadata stored in your **own Convex deployment**, searched via **Convex vector indexes**
+- **Index + search**: vectors stored locally in **Qdrant**, searched via **vector similarity**
 - **Results**: relevance score + local path + best-effort thumbnail for images
 
 ## Setup (developer)
@@ -32,14 +32,15 @@ pnpm install
 
 Create `.env.local` from `.env.example` and fill:
 
-- `VITE_CONVEX_URL`
-- `CONVEX_DEPLOYMENT` (used by Convex CLI)
 - `VITE_GOOGLE_GENERATIVE_AI_API_KEY`
+- `MANIFOLD_QDRANT_URL` (Docker Qdrant URL, e.g. `http://127.0.0.1:6333`)
 
-### Start Convex (dev)
+### Run Qdrant via Docker (dev)
+
+This follows the same idea as the Qdrant quickstart ([Qdrant Quickstart](https://qdrant.tech/documentation/quickstart/)).
 
 ```bash
-npx convex dev
+./scripts/qdrant-dev.sh up
 ```
 
 ### Run the desktop app
@@ -50,7 +51,8 @@ pnpm tauri dev
 
 ## Notes
 
-- **Your Gemini API key stays on-device** (the desktop app calls Gemini directly). Convex stores embeddings + metadata only.
+- **Your Gemini API key stays on-device** (the desktop app calls Gemini directly).
+- Qdrant runs as a **Docker container** (see `./scripts/qdrant-dev.sh`).
 - Don’t commit `.env.local`.
 
 ## Contributing

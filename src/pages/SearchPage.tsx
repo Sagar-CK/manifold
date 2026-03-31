@@ -1,10 +1,8 @@
-import { useAction } from "convex/react";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { Settings } from "lucide-react";
-import { api } from "../../convex/_generated/api";
 import { Input } from "../components/ui/input";
 import { cachedEmbedding, embedText, OUTPUT_DIM } from "../lib/geminiEmbeddings";
 import type { LocalConfig } from "../lib/localConfig";
@@ -19,32 +17,67 @@ function fileTypeLabel(ext: string, mimeType: string) {
   return "FILE";
 }
 
+function normalizePathForMatch(p: string) {
+  // Best-effort cross-platform normalization for prefix checks.
+  return p.replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
+function isPathSelected(path: string, cfg: LocalConfig) {
+  const p = normalizePathForMatch(path);
+  const include = cfg.include.map(normalizePathForMatch).filter(Boolean);
+  const exclude = cfg.exclude.map(normalizePathForMatch).filter(Boolean);
+  const ext = (p.split(".").pop() ?? "").trim().toLowerCase();
+
+  const inInclude =
+    include.length === 0 ? true : include.some((root) => p === root || p.startsWith(`${root}/`));
+  const inExclude = exclude.some((root) => p === root || p.startsWith(`${root}/`));
+  const extSelected = cfg.extensions.includes(ext as never);
+
+  return inInclude && !inExclude && extSelected;
+}
+
 export function SearchPage({ cfg }: { cfg: LocalConfig }) {
   const geminiApiKey =
     (import.meta.env.VITE_GOOGLE_GENERATIVE_AI_API_KEY as string | undefined) ?? "";
 
-  const semanticSearch = useAction(api.search.semantic);
-
   const [query, setQuery] = useState("");
   const [hasSearched, setHasSearched] = useState(false);
+  const [embeddedCount, setEmbeddedCount] = useState<number | null>(null);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [results, setResults] = useState<
     Array<{
       score: number;
       file: {
-        _id: string;
         path: string;
-        mimeType: string;
-        ext: string;
-        mtimeMs: number;
-        sizeBytes: number;
       };
     }>
   >([]);
   const [thumbByPath, setThumbByPath] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadCount() {
+      try {
+        const res = (await invoke("qdrant_count_points", {
+          args: { sourceId: cfg.sourceId },
+        })) as { count: number } | { count: string };
+        const count = typeof res.count === "string" ? Number.parseInt(res.count, 10) : res.count;
+        if (!cancelled) setEmbeddedCount(Number.isFinite(count) ? count : 0);
+      } catch {
+        if (!cancelled) setEmbeddedCount(null);
+      }
+    }
+    void loadCount();
+    return () => {
+      cancelled = true;
+    };
+  }, [cfg.sourceId]);
+
   async function runSearch(queryText: string) {
     setHasSearched(true);
     setResults([]);
     setThumbByPath({});
+    setSearchError(null);
     if (!geminiApiKey) return;
 
     const queryVector = await cachedEmbedding(`q:${OUTPUT_DIM}:${queryText}`, async () => {
@@ -52,21 +85,32 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
     });
 
     const searchLimit = cfg.searchMode === "topK" ? cfg.topK : 256;
-    const res = await semanticSearch({
-      sourceId: cfg.sourceId,
-      queryVector,
-      limit: searchLimit,
-    });
+    let res: typeof results;
+    try {
+      res = (await invoke("qdrant_semantic_search", {
+        args: {
+          sourceId: cfg.sourceId,
+          queryVector,
+          limit: searchLimit,
+        },
+      })) as typeof results;
+    } catch (e) {
+      setSearchError(String(e));
+      setResults([]);
+      return;
+    }
     const filtered =
       cfg.searchMode === "scoreThreshold"
         ? (res as typeof results).filter((r) => r.score >= cfg.scoreThreshold)
         : (res as typeof results).slice(0, cfg.topK);
 
-    setResults(filtered);
+    // Automatically ignore hits that are outside current selected folders/extensions.
+    const selectedOnly = filtered.filter((r) => isPathSelected(r.file.path, cfg));
+    setResults(selectedOnly);
 
-    for (const r of filtered) {
+    for (const r of selectedOnly) {
       const p = r.file.path;
-      const ext = r.file.ext.toLowerCase();
+      const ext = p.split(".").pop()?.toLowerCase() ?? "";
       if (ext === "png" || ext === "jpg" || ext === "jpeg") {
         try {
           const thumb = (await invoke("thumbnail_image_base64_png", {
@@ -122,18 +166,33 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
       <div className="mt-5">
         {results.length === 0 ? (
           !hasSearched ? (
-            <Link
-              to="/settings"
-              className="mx-auto block w-fit text-sm text-black/60 underline underline-offset-4 hover:text-black"
-            >
-              No files embedded yet.
-            </Link>
-          ) : null
+            embeddedCount === 0 ? (
+              <Link
+                to="/settings"
+                className="mx-auto block w-fit text-sm text-black/60 underline underline-offset-4 hover:text-black"
+              >
+                No files embedded yet. Open Settings to add folders.
+              </Link>
+            ) : (
+              <div className="text-center text-sm text-black/60">
+                Type to search{typeof embeddedCount === "number" ? ` (${embeddedCount} file(s) indexed)` : ""}.
+              </div>
+            )
+          ) : searchError ? (
+            <div className="text-center text-sm font-medium text-rose-700">
+              Search error: {searchError}
+            </div>
+          ) : (
+            <div className="text-center text-sm text-black/60">No results for “{query.trim()}”.</div>
+          )
         ) : (
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
             {results.map((r) => (
+              (() => {
+                const ext = r.file.path.split(".").pop()?.toLowerCase() ?? "";
+                return (
               <button
-                key={r.file._id}
+                key={r.file.path}
                 type="button"
                 onClick={() => openPath(r.file.path)}
                 className="flex flex-col items-center gap-2 min-w-0 rounded-lg p-1 hover:bg-black/[0.04] transition-colors"
@@ -145,7 +204,7 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
                   ) : (
                     <div className="h-11 w-11 rounded-md border border-black/10 bg-black/[0.04] flex items-center justify-center">
                       <span className="text-[10px] leading-none font-semibold text-black/60 uppercase tracking-wide">
-                        {fileTypeLabel(r.file.ext, r.file.mimeType)}
+                        {fileTypeLabel(ext, "")}
                       </span>
                     </div>
                   )}
@@ -156,6 +215,8 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
                   </div>
                 </div>
               </button>
+                );
+              })()
             ))}
           </div>
         )}
