@@ -4,18 +4,26 @@ import { cn } from "../../lib/utils";
 
 export type ProgressProps = React.HTMLAttributes<HTMLDivElement> & {
   value?: number;
+  trackClassName?: string;
+  indicatorClassName?: string;
 };
 
-export function Progress({ className, value = 0, ...props }: ProgressProps) {
+export function Progress({
+  className,
+  value = 0,
+  trackClassName,
+  indicatorClassName,
+  ...props
+}: ProgressProps) {
   const safeValue = Math.max(0, Math.min(100, value));
 
   return (
     <div
-      className={cn("relative h-2 w-full overflow-hidden rounded-full bg-black/10", className)}
+      className={cn("relative h-2 w-full overflow-hidden rounded-full bg-black/10", trackClassName, className)}
       {...props}
     >
       <div
-        className="h-full bg-black transition-all"
+        className={cn("h-full bg-black transition-all", indicatorClassName)}
         style={{ width: `${safeValue}%` }}
         aria-valuemin={0}
         aria-valuemax={100}

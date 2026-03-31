@@ -270,7 +270,18 @@ export default function RouterApp() {
       <div className="mx-auto max-w-5xl px-6 py-8">
         <EnvIssuesBanner issues={envIssues} />
         <Routes>
-          <Route path="/" element={<SearchPage cfg={cfg} />} />
+          <Route
+            path="/"
+            element={
+              <SearchPage
+                cfg={cfg}
+                embedding={embedding}
+                hasPendingEmbeds={hasPendingEmbeds}
+                embeddingPhase={embeddingPhase}
+                embedProgress={embedProgress}
+              />
+            }
+          />
           <Route
             path="/settings"
             element={

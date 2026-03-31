@@ -139,3 +139,29 @@ body {
     @apply font-sans;
   }
 }
+
+@layer components {
+  .app-title {
+    @apply text-2xl font-semibold leading-none tracking-tight;
+  }
+
+  .app-subtitle {
+    @apply text-sm text-black/60;
+  }
+
+  .app-section-title {
+    @apply text-base font-semibold tracking-tight;
+  }
+
+  .app-label {
+    @apply text-xs font-medium uppercase tracking-wide text-black/50;
+  }
+
+  .app-body {
+    @apply text-sm text-black/80;
+  }
+
+  .app-muted {
+    @apply text-sm text-black/60;
+  }
+}

@@ -6,6 +6,7 @@ import { Settings } from "lucide-react";
 import { Input } from "../components/ui/input";
 import { cachedEmbedding, OUTPUT_DIM } from "../lib/geminiEmbeddings";
 import type { LocalConfig } from "../lib/localConfig";
+import { EmbeddingProgressBar } from "../components/EmbeddingProgressBar";
 import { PageHeader } from "../components/PageHeader";
 
 function fileTypeLabel(ext: string, mimeType: string) {
@@ -36,11 +37,24 @@ function isPathSelected(path: string, cfg: LocalConfig) {
   return inInclude && !inExclude && extSelected;
 }
 
-export function SearchPage({ cfg }: { cfg: LocalConfig }) {
+export function SearchPage({
+  cfg,
+  embedding,
+  hasPendingEmbeds,
+  embeddingPhase,
+  embedProgress,
+}: {
+  cfg: LocalConfig;
+  embedding: boolean;
+  hasPendingEmbeds: boolean;
+  embeddingPhase: "idle" | "scanning" | "embedding" | "paused" | "cancelling" | "done" | "error";
+  embedProgress: { processed: number; total: number; status: string };
+}) {
   const [query, setQuery] = useState("");
   const [hasSearched, setHasSearched] = useState(false);
   const [embeddedCount, setEmbeddedCount] = useState<number | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [openError, setOpenError] = useState<string | null>(null);
   const [results, setResults] = useState<
     Array<{
       score: number;
@@ -75,6 +89,7 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
     setResults([]);
     setThumbByPath({});
     setSearchError(null);
+    setOpenError(null);
 
     let queryVector: number[];
     try {
@@ -179,17 +194,20 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
       </div>
 
       <div className="mt-5">
+        {openError ? (
+          <div className="mb-3 text-center text-sm font-medium text-rose-700">Open error: {openError}</div>
+        ) : null}
         {results.length === 0 ? (
           !hasSearched ? (
             embeddedCount === 0 ? (
               <Link
                 to="/settings"
-                className="mx-auto block w-fit text-sm text-black/60 underline underline-offset-4 hover:text-black"
+                className="app-muted mx-auto block w-fit underline underline-offset-4 hover:text-black"
               >
                 No files embedded yet. Open Settings to add folders.
               </Link>
             ) : (
-              <div className="text-center text-sm text-black/60">
+              <div className="app-muted text-center">
                 Type to search{typeof embeddedCount === "number" ? ` (${embeddedCount} file(s) indexed)` : ""}.
               </div>
             )
@@ -198,7 +216,7 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
               Search error: {searchError}
             </div>
           ) : (
-            <div className="text-center text-sm text-black/60">No results for “{query.trim()}”.</div>
+            <div className="app-muted text-center">No results for “{query.trim()}”.</div>
           )
         ) : (
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
@@ -209,7 +227,14 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
               <button
                 key={r.file.path}
                 type="button"
-                onClick={() => openPath(r.file.path)}
+                onClick={async () => {
+                  try {
+                    setOpenError(null);
+                    await openPath(r.file.path);
+                  } catch (e) {
+                    setOpenError(String(e));
+                  }
+                }}
                 className="flex flex-col items-center gap-2 min-w-0 rounded-lg p-1 hover:bg-black/[0.04] transition-colors"
                 title={r.file.path}
               >
@@ -225,7 +250,7 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
                   )}
                 </div>
                 <div className="min-w-0 w-full">
-                  <div className="text-xs font-medium text-center truncate">
+                  <div className="app-body text-center truncate">
                     {r.file.path.split("/").pop() ?? r.file.path}
                   </div>
                 </div>
@@ -235,6 +260,16 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
             ))}
           </div>
         )}
+      </div>
+
+      <div className="mt-4 flex justify-center">
+        <EmbeddingProgressBar
+          embedding={embedding}
+          hasPendingEmbeds={hasPendingEmbeds}
+          embeddingPhase={embeddingPhase}
+          processed={embedProgress.processed}
+          total={embedProgress.total}
+        />
       </div>
     </section>
   );

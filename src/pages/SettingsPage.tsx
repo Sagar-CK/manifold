@@ -1,4 +1,4 @@
-import { ArrowLeft, Check, FolderPlus, Pause, Play, Trash2, X } from "lucide-react";
+import { ArrowLeft, FolderPlus, Loader, Trash2 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
@@ -7,6 +7,7 @@ import { useEffect, useState } from "react";
 import type { LocalConfig, SupportedExt } from "../lib/localConfig";
 import { saveConfig } from "../lib/localConfig";
 import { PageHeader } from "../components/PageHeader";
+import { EmbeddingProgressBar } from "../components/EmbeddingProgressBar";
 import { Button } from "../components/ui/button";
 import {
   AlertDialog,
@@ -26,29 +27,7 @@ import {
   ComboboxItem,
   ComboboxList,
 } from "../components/ui/combobox";
-import { Progress } from "../components/ui/progress";
-
-function Checkbox({
-  checked,
-  onChange,
-  label,
-}: {
-  checked: boolean;
-  onChange: (v: boolean) => void;
-  label: string;
-}) {
-  return (
-    <label className="group flex items-center gap-2 rounded-md px-2 py-1 text-sm hover:bg-black/5">
-      <input
-        type="checkbox"
-        className="h-4 w-4 accent-black"
-        checked={checked}
-        onChange={(e) => onChange(e.target.checked)}
-      />
-      <span className="font-medium tracking-tight">{label}</span>
-    </label>
-  );
-}
+import { Toggle } from "../components/ui/toggle";
 
 const SEARCH_MODE_OPTIONS = [
   { value: "topK", label: "Top-K" },
@@ -110,6 +89,7 @@ export function SettingsPage({
   const [clearingIndex, setClearingIndex] = useState(false);
   const [clearIndexError, setClearIndexError] = useState<string | null>(null);
   const [confirmClearOpen, setConfirmClearOpen] = useState(false);
+  const [embeddedCount, setEmbeddedCount] = useState<number | null>(null);
   const [continueError, setContinueError] = useState<string | null>(null);
   const [jobControlError, setJobControlError] = useState<string | null>(null);
   const selectedSearchModeOption: SearchModeOption | null =
@@ -150,8 +130,6 @@ export function SettingsPage({
     }
   }
 
-  const progressValue =
-    embedProgress.total > 0 ? (embedProgress.processed / embedProgress.total) * 100 : 0;
   const hasEmbeddingIssue =
     embedProgress.status.startsWith("Embedding error:") ||
     embedProgress.status.startsWith("Missing ");
@@ -190,6 +168,27 @@ export function SettingsPage({
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadEmbeddedCount() {
+      try {
+        const res = (await invoke("qdrant_count_points", {
+          args: { sourceId: cfg.sourceId },
+        })) as { count: number } | { count: string };
+        const count = typeof res.count === "string" ? Number.parseInt(res.count, 10) : res.count;
+        if (!cancelled) setEmbeddedCount(Number.isFinite(count) ? count : 0);
+      } catch {
+        if (!cancelled) setEmbeddedCount(null);
+      }
+    }
+
+    void loadEmbeddedCount();
+    return () => {
+      cancelled = true;
+    };
+  }, [cfg.sourceId, clearingIndex]);
+
   return (
     <section>
       <div className="relative mb-8">
@@ -201,16 +200,16 @@ export function SettingsPage({
         >
           <ArrowLeft className="h-4 w-4" aria-hidden="true" />
         </Link>
-        <PageHeader heading="Settings" subtitle="Embedding + search" />
+        <PageHeader heading="Settings" />
       </div>
 
       <div className="grid grid-cols-1 gap-8 md:grid-cols-2">
         <div className="p-2">
-          <div className="font-semibold tracking-tight">Paths</div>
+          <div className="app-section-title">Paths</div>
 
           <div className="mt-4">
             <div className="flex items-center justify-between gap-2">
-              <div className="text-xs font-medium uppercase tracking-wide text-black/50">Include folders</div>
+              <div className="app-label">Include folders</div>
               <Button
                 variant="ghost"
                 size="icon-sm"
@@ -228,7 +227,7 @@ export function SettingsPage({
             </div>
             <div className="mt-2 flex flex-col gap-2">
               {cfg.include.length === 0 ? (
-                <div className="text-sm text-black/50">No include folders yet.</div>
+                <div className="app-muted">No include folders yet.</div>
               ) : (
                 cfg.include.map((p) => (
                   <div key={p} className="flex items-center justify-between gap-2 text-sm">
@@ -254,7 +253,7 @@ export function SettingsPage({
 
           <div className="mt-5">
             <div className="flex items-center justify-between gap-2">
-              <div className="text-xs font-medium uppercase tracking-wide text-black/50">Exclude folders</div>
+              <div className="app-label">Exclude folders</div>
               <Button
                 variant="ghost"
                 size="icon-sm"
@@ -272,7 +271,7 @@ export function SettingsPage({
             </div>
             <div className="mt-2 flex flex-col gap-2">
               {cfg.exclude.length === 0 ? (
-                <div className="text-sm text-black/50">No exclude folders.</div>
+                <div className="app-muted">No exclude folders.</div>
               ) : (
                 cfg.exclude.map((p) => (
                   <div key={p} className="flex items-center justify-between gap-2 text-sm">
@@ -298,32 +297,34 @@ export function SettingsPage({
         </div>
 
         <div className="p-2">
-          <div className="font-semibold tracking-tight">Embedding & Search</div>
+          <div className="app-section-title">Embedding & Search</div>
 
           <div className="mt-4">
-            <div className="text-xs font-medium uppercase tracking-wide text-black/50">
-              File types
-            </div>
-            <div className="mt-2 grid grid-cols-2 gap-1">
+            <div className="app-label">File types</div>
+            <div className="mt-2 flex flex-wrap gap-2">
               {extOptions.map((ext) => (
-                <Checkbox
+                <Toggle
                   key={ext}
-                  label={ext}
-                  checked={cfg.extensions.includes(ext)}
-                  onChange={(checked) => {
-                    const next = checked
+                  pressed={cfg.extensions.includes(ext)}
+                  onPressedChange={(pressed) => {
+                    if (pressed === undefined) return;
+                    const next = pressed
                       ? Array.from(new Set([...cfg.extensions, ext]))
                       : cfg.extensions.filter((x) => x !== ext);
                     updateConfig({ ...cfg, extensions: next });
                   }}
-                />
+                  variant="outline"
+                  className="h-auto min-w-0 px-3 py-1.5 text-center font-medium tracking-tight transition-all duration-200 ease-out data-[state=on]:scale-[1.02] data-[state=on]:border-emerald-200 data-[state=on]:bg-emerald-100 data-[state=on]:text-emerald-900 data-[state=on]:shadow-sm data-[state=off]:scale-100 data-[state=off]:border-zinc-200 data-[state=off]:bg-zinc-100 data-[state=off]:text-zinc-500"
+                >
+                  {ext}
+                </Toggle>
               ))}
             </div>
           </div>
 
           <div className="mt-5">
             <div className="flex items-center justify-between gap-3">
-              <div className="text-sm font-medium">Similarity threshold</div>
+                <div className="app-body font-medium">Similarity threshold</div>
               <Combobox<SearchModeOption>
                 value={selectedSearchModeOption}
                 onValueChange={(value) => {
@@ -354,7 +355,7 @@ export function SettingsPage({
 
             {cfg.searchMode === "topK" ? (
               <div className="mt-3 flex items-center gap-3">
-                <div className="text-xs text-black/60">Results to return</div>
+                <div className="app-muted">Results to return</div>
                 <input
                   type="number"
                   min={1}
@@ -371,7 +372,7 @@ export function SettingsPage({
               </div>
             ) : (
               <div className="mt-3">
-                <div className="mb-2 flex items-center justify-between text-xs text-black/60">
+                <div className="app-muted mb-2 flex items-center justify-between">
                   <span>Minimum semantic score</span>
                   <span>{Math.round(cfg.scoreThreshold * 100)}%</span>
                 </div>
@@ -398,9 +399,9 @@ export function SettingsPage({
       <div className="mt-8">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="min-w-0">
-            <div className="text-sm font-semibold tracking-tight text-rose-700">Delete all vectors</div>
-            <div className="mt-0.5 text-sm text-black/60">
-              Clears the local Qdrant index for this profile (embeddings only). Your files stay on disk.
+            <div className="app-section-title text-black">Delete all vectors</div>
+            <div className="app-muted mt-0.5 max-w-lg">
+              Clears the local Qdrant index (embeddings only). Your files will not be deleted from disk. Currently, {embeddedCount} file(s) are indexed.
             </div>
             {clearIndexError ? (
               <div className="mt-2 text-sm font-medium text-rose-700">Error: {clearIndexError}</div>
@@ -409,19 +410,19 @@ export function SettingsPage({
 
           <AlertDialog open={confirmClearOpen} onOpenChange={setConfirmClearOpen}>
             <AlertDialogTrigger asChild>
-              <Button variant="destructive" disabled={clearingIndex || embedding || hasPendingEmbeds}>
-                <Trash2 className="mr-2 h-4 w-4" aria-hidden="true" />
-                {clearingIndex ? "Deleting…" : "Delete all vectors"}
+              <Button
+                variant="destructive"
+                disabled={clearingIndex || embedding || hasPendingEmbeds || embeddedCount === 0}
+              >
+                <Trash2 className="h-4 w-4" aria-hidden="true" />
+                {clearingIndex && <Loader className="h-4 w-4 animate-spin" aria-hidden="true" /> }
               </Button>
             </AlertDialogTrigger>
             <AlertDialogContent>
               <AlertDialogHeader>
-                <AlertDialogTitle>Delete all vectors?</AlertDialogTitle>
+                <AlertDialogTitle className="text-black">Delete all {embeddedCount} vectors?</AlertDialogTitle>
                 <AlertDialogDescription>
-                  This removes embeddings from your local Qdrant index{typeof embedPlan.totalSelected === "number"
-                    ? ` (up to ${embedPlan.totalSelected} selected file(s)).`
-                    : "."}{" "}
-                  Your files won’t be deleted, but search will return no results until you re-embed.
+                  Clears all indexed vectors for this profile. Files are not deleted.
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
@@ -444,75 +445,39 @@ export function SettingsPage({
       <div className="mt-8 flex min-h-24 items-center justify-center">
         {embedding || hasPendingEmbeds ? (
           <div className="w-full max-w-sm">
-            {embedProgress.total > 0 ? (
-              <div className="mt-1 text-center text-xs tabular-nums text-black/60">
-                {embedProgress.processed}/{embedProgress.total}
-              </div>
-            ) : null}
-            <div className="mt-2 flex items-center gap-2">
-              <Progress className="flex-1" value={progressValue} />
-              {embedding ? (
-                <div className="flex items-center gap-1">
-                  {embeddingPhase === "paused" ? (
-                    <Button
-                      variant="ghost"
-                      size="icon-sm"
-                      disabled={clearingIndex}
-                      aria-label="Resume embedding"
-                      title="Resume"
-                      onClick={async () => {
-                        setJobControlError(null);
-                        try {
-                          await onResumeEmbedding();
-                        } catch (e) {
-                          setJobControlError(String(e));
-                        }
-                      }}
-                    >
-                      <Play className="h-4 w-4" aria-hidden="true" />
-                    </Button>
-                  ) : (
-                    <Button
-                      variant="ghost"
-                      size="icon-sm"
-                      disabled={clearingIndex || embeddingPhase === "cancelling"}
-                      aria-label="Pause embedding"
-                      title="Pause"
-                      onClick={async () => {
-                        setJobControlError(null);
-                        try {
-                          await onPauseEmbedding();
-                        } catch (e) {
-                          setJobControlError(String(e));
-                        }
-                      }}
-                    >
-                      <Pause className="h-4 w-4" aria-hidden="true" />
-                    </Button>
-                  )}
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    disabled={clearingIndex || embeddingPhase === "cancelling"}
-                    aria-label="Cancel embedding"
-                    title="Cancel"
-                    onClick={async () => {
-                      setJobControlError(null);
-                      try {
-                        await onCancelEmbedding();
-                      } catch (e) {
-                        setJobControlError(String(e));
-                      }
-                    }}
-                  >
-                    <X className="h-4 w-4" aria-hidden="true" />
-                  </Button>
-                </div>
-              ) : null}
-            </div>
-            <div className="mt-2 text-center text-sm font-medium tracking-tight">
-              {embedProgress.status}
-            </div>
+            <EmbeddingProgressBar
+              embedding={embedding}
+              hasPendingEmbeds={hasPendingEmbeds}
+              embeddingPhase={embeddingPhase}
+              processed={embedProgress.processed}
+              total={embedProgress.total}
+              showControls
+              controlsDisabled={clearingIndex}
+              onPause={async () => {
+                setJobControlError(null);
+                try {
+                  await onPauseEmbedding();
+                } catch (e) {
+                  setJobControlError(String(e));
+                }
+              }}
+              onResume={async () => {
+                setJobControlError(null);
+                try {
+                  await onResumeEmbedding();
+                } catch (e) {
+                  setJobControlError(String(e));
+                }
+              }}
+              onCancel={async () => {
+                setJobControlError(null);
+                try {
+                  await onCancelEmbedding();
+                } catch (e) {
+                  setJobControlError(String(e));
+                }
+              }}
+            />
             {lastEmbedError ? (
               <div className="mt-2 text-center text-xs font-medium text-rose-700">
                 {lastEmbedError}
@@ -528,12 +493,12 @@ export function SettingsPage({
           <div className="w-full max-w-xl rounded-lg border border-black/10 bg-white p-4">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <div className="text-sm font-semibold tracking-tight">Embedding paused</div>
-                <div className="mt-1 text-sm text-black/60">
+                <div className="app-section-title">Embedding paused</div>
+                <div className="app-muted mt-1">
                   Your selections changed. Click Continue when you're ready to (re)embed files.
                 </div>
                 {typeof embedPlan.totalSelected === "number" ? (
-                  <div className="mt-2 text-sm text-black/60 tabular-nums">
+                  <div className="app-muted mt-2 tabular-nums">
                     Planned:{" "}
                     <span className="font-medium text-black/80">
                       {embedPlan.pending ?? embedPlan.totalSelected}
@@ -584,14 +549,11 @@ export function SettingsPage({
             </div>
           </div>
         ) : embedPromptDismissed ? (
-          <div className="text-sm font-medium text-black/60">{embedProgress.status}</div>
+          <div className="app-muted font-medium">{embedProgress.status}</div>
         ) : hasEmbeddingIssue ? (
-          <div className="text-sm font-medium text-rose-700">{embedProgress.status}</div>
+          <div className="app-body font-medium text-rose-700">{embedProgress.status}</div>
         ) : (
-          <div className="flex items-center gap-2 text-sm font-medium text-black/70">
-            <Check className="h-4 w-4" aria-hidden="true" />
-            <span>All files embedded.</span>
-          </div>
+          <div />
         )}
       </div>
     </section>
