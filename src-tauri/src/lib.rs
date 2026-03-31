@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 mod qdrant;
+mod embedding;
 
 fn load_env() {
     let _ = dotenvy::from_filename(".env.local");
@@ -45,6 +46,7 @@ pub fn run() {
     tracing::info!("starting tauri backend");
     tauri::Builder::default()
         .manage(qdrant::QdrantState::default())
+        .manage(embedding::EmbeddingManager::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
@@ -58,7 +60,13 @@ pub fn run() {
             qdrant_upsert_embedding,
             qdrant_semantic_search,
             qdrant_count_points,
-            qdrant_delete_all_points
+            qdrant_delete_all_points,
+            start_embedding_job,
+            pause_embedding_job,
+            resume_embedding_job,
+            cancel_embedding_job,
+            embedding_job_status,
+            embed_query_text
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -277,12 +285,14 @@ async fn scan_files_count(args: ScanFilesArgs) -> Result<ScanFilesCountResult, S
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ScanFilesNeedsEmbeddingArgs {
     pub scan: ScanFilesArgs,
     pub source_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ScanFilesNeedsEmbeddingResult {
     pub total_selected: u64,
     pub needs_embedding: bool,
@@ -480,4 +490,60 @@ async fn qdrant_delete_all_points(
 ) -> Result<(), String> {
     tracing::info!(source_id = %args.source_id, "qdrant_delete_all_points: start");
     qdrant::delete_all_points(&app, &state, args).await
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartEmbeddingJobArgs {
+    pub scan: ScanFilesArgs,
+    pub source_id: String,
+}
+
+#[tauri::command]
+async fn start_embedding_job(
+    app: tauri::AppHandle,
+    embedding_mgr: tauri::State<'_, embedding::EmbeddingManager>,
+    qdrant_state: tauri::State<'_, qdrant::QdrantState>,
+    args: StartEmbeddingJobArgs,
+) -> Result<(), String> {
+    embedding::start(app, embedding_mgr, qdrant_state, args.scan, args.source_id).await
+}
+
+#[tauri::command]
+async fn pause_embedding_job(
+    embedding_mgr: tauri::State<'_, embedding::EmbeddingManager>,
+) -> Result<(), String> {
+    embedding::pause(embedding_mgr).await
+}
+
+#[tauri::command]
+async fn resume_embedding_job(
+    embedding_mgr: tauri::State<'_, embedding::EmbeddingManager>,
+) -> Result<(), String> {
+    embedding::resume(embedding_mgr).await
+}
+
+#[tauri::command]
+async fn cancel_embedding_job(
+    embedding_mgr: tauri::State<'_, embedding::EmbeddingManager>,
+) -> Result<(), String> {
+    embedding::cancel(embedding_mgr).await
+}
+
+#[tauri::command]
+async fn embedding_job_status(
+    embedding_mgr: tauri::State<'_, embedding::EmbeddingManager>,
+) -> Result<embedding::EmbeddingJobStatus, String> {
+    Ok(embedding_mgr.status().await)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EmbedQueryTextArgs {
+    text: String,
+}
+
+#[tauri::command]
+async fn embed_query_text(args: EmbedQueryTextArgs) -> Result<Vec<f32>, String> {
+    embedding::embed_query_text(&args.text).await
 }

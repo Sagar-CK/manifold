@@ -1,4 +1,4 @@
-import { ArrowLeft, Check, FolderPlus, Trash2 } from "lucide-react";
+import { ArrowLeft, Check, FolderPlus, Pause, Play, Trash2, X } from "lucide-react";
 import { Link } from "react-router-dom";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
@@ -66,7 +66,12 @@ export function SettingsPage({
   needsEmbedding,
   embedPlan,
   embedPromptDismissed,
+  embeddingPhase,
+  lastEmbedError,
   onContinueEmbedding,
+  onPauseEmbedding,
+  onResumeEmbedding,
+  onCancelEmbedding,
   onCancelEmbeddingPrompt,
 }: {
   cfg: LocalConfig;
@@ -86,7 +91,19 @@ export function SettingsPage({
     warning: string | null;
   };
   embedPromptDismissed: boolean;
+  embeddingPhase:
+    | "idle"
+    | "scanning"
+    | "embedding"
+    | "paused"
+    | "cancelling"
+    | "done"
+    | "error";
+  lastEmbedError: string | null;
   onContinueEmbedding: () => Promise<void>;
+  onPauseEmbedding: () => Promise<void>;
+  onResumeEmbedding: () => Promise<void>;
+  onCancelEmbedding: () => Promise<void>;
   onCancelEmbeddingPrompt: () => void;
 }) {
   const [homePath, setHomePath] = useState("");
@@ -94,6 +111,7 @@ export function SettingsPage({
   const [clearIndexError, setClearIndexError] = useState<string | null>(null);
   const [confirmClearOpen, setConfirmClearOpen] = useState(false);
   const [continueError, setContinueError] = useState<string | null>(null);
+  const [jobControlError, setJobControlError] = useState<string | null>(null);
   const selectedSearchModeOption: SearchModeOption | null =
     SEARCH_MODE_OPTIONS.find((option) => option.value === cfg.searchMode) ?? null;
 
@@ -431,10 +449,80 @@ export function SettingsPage({
                 {embedProgress.processed}/{embedProgress.total}
               </div>
             ) : null}
-            <Progress className="mt-2" value={progressValue} />
+            <div className="mt-2 flex items-center gap-2">
+              <Progress className="flex-1" value={progressValue} />
+              {embedding ? (
+                <div className="flex items-center gap-1">
+                  {embeddingPhase === "paused" ? (
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      disabled={clearingIndex}
+                      aria-label="Resume embedding"
+                      title="Resume"
+                      onClick={async () => {
+                        setJobControlError(null);
+                        try {
+                          await onResumeEmbedding();
+                        } catch (e) {
+                          setJobControlError(String(e));
+                        }
+                      }}
+                    >
+                      <Play className="h-4 w-4" aria-hidden="true" />
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      disabled={clearingIndex || embeddingPhase === "cancelling"}
+                      aria-label="Pause embedding"
+                      title="Pause"
+                      onClick={async () => {
+                        setJobControlError(null);
+                        try {
+                          await onPauseEmbedding();
+                        } catch (e) {
+                          setJobControlError(String(e));
+                        }
+                      }}
+                    >
+                      <Pause className="h-4 w-4" aria-hidden="true" />
+                    </Button>
+                  )}
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    disabled={clearingIndex || embeddingPhase === "cancelling"}
+                    aria-label="Cancel embedding"
+                    title="Cancel"
+                    onClick={async () => {
+                      setJobControlError(null);
+                      try {
+                        await onCancelEmbedding();
+                      } catch (e) {
+                        setJobControlError(String(e));
+                      }
+                    }}
+                  >
+                    <X className="h-4 w-4" aria-hidden="true" />
+                  </Button>
+                </div>
+              ) : null}
+            </div>
             <div className="mt-2 text-center text-sm font-medium tracking-tight">
               {embedProgress.status}
             </div>
+            {lastEmbedError ? (
+              <div className="mt-2 text-center text-xs font-medium text-rose-700">
+                {lastEmbedError}
+              </div>
+            ) : null}
+            {jobControlError ? (
+              <div className="mt-2 text-center text-xs font-medium text-rose-700">
+                {jobControlError}
+              </div>
+            ) : null}
           </div>
         ) : needsEmbedding ? (
           <div className="w-full max-w-xl rounded-lg border border-black/10 bg-white p-4">

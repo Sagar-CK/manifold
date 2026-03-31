@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { Settings } from "lucide-react";
 import { Input } from "../components/ui/input";
-import { cachedEmbedding, embedText, OUTPUT_DIM } from "../lib/geminiEmbeddings";
+import { cachedEmbedding, OUTPUT_DIM } from "../lib/geminiEmbeddings";
 import type { LocalConfig } from "../lib/localConfig";
 import { PageHeader } from "../components/PageHeader";
 
@@ -37,9 +37,6 @@ function isPathSelected(path: string, cfg: LocalConfig) {
 }
 
 export function SearchPage({ cfg }: { cfg: LocalConfig }) {
-  const geminiApiKey =
-    (import.meta.env.VITE_GOOGLE_GENERATIVE_AI_API_KEY as string | undefined) ?? "";
-
   const [query, setQuery] = useState("");
   const [hasSearched, setHasSearched] = useState(false);
   const [embeddedCount, setEmbeddedCount] = useState<number | null>(null);
@@ -78,11 +75,20 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
     setResults([]);
     setThumbByPath({});
     setSearchError(null);
-    if (!geminiApiKey) return;
 
-    const queryVector = await cachedEmbedding(`q:${OUTPUT_DIM}:${queryText}`, async () => {
-      return await embedText(geminiApiKey, queryText);
-    });
+    let queryVector: number[];
+    try {
+      queryVector = await cachedEmbedding(`q:${OUTPUT_DIM}:${queryText}`, async () => {
+        const v = (await invoke("embed_query_text", {
+          args: { text: queryText },
+        })) as number[];
+        return v;
+      });
+    } catch (e) {
+      setSearchError(String(e));
+      setResults([]);
+      return;
+    }
 
     const searchLimit = cfg.searchMode === "topK" ? cfg.topK : 256;
     let res: typeof results;
@@ -137,7 +143,16 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
       void runSearch(trimmed);
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [query, cfg.sourceId, cfg.searchMode, cfg.scoreThreshold, cfg.topK]);
+  }, [
+    query,
+    cfg.sourceId,
+    cfg.searchMode,
+    cfg.scoreThreshold,
+    cfg.topK,
+    cfg.include,
+    cfg.exclude,
+    cfg.extensions,
+  ]);
 
   return (
     <section>
