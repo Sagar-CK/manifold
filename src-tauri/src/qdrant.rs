@@ -573,6 +573,19 @@ pub struct DeleteAllPointsArgs {
     pub source_id: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletePointsForPathsArgs {
+    pub source_id: String,
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletePointsForPathsResult {
+    pub deleted_count: u64,
+}
+
 pub async fn delete_all_points(app: &AppHandle, state: &QdrantState, args: DeleteAllPointsArgs) -> Result<(), String> {
     let (http, base) = instance(app, state).await?;
     let started = std::time::Instant::now();
@@ -626,5 +639,72 @@ pub async fn delete_all_points(app: &AppHandle, state: &QdrantState, args: Delet
         "qdrant delete ok"
     );
     Ok(())
+}
+
+pub async fn delete_points_for_paths(
+    app: &AppHandle,
+    state: &QdrantState,
+    args: DeletePointsForPathsArgs,
+) -> Result<DeletePointsForPathsResult, String> {
+    let (http, base) = instance(app, state).await?;
+    let started = std::time::Instant::now();
+
+    #[derive(Debug, Serialize)]
+    struct DeleteBody {
+        points: Vec<String>,
+    }
+
+    let mut unique_paths = std::collections::HashSet::new();
+    let mut ids: Vec<String> = Vec::new();
+    for path in args.paths {
+        if !unique_paths.insert(path.clone()) {
+            continue;
+        }
+        ids.push(point_id(&args.source_id, &path).to_string());
+    }
+
+    if ids.is_empty() {
+        return Ok(DeletePointsForPathsResult { deleted_count: 0 });
+    }
+
+    const DELETE_CHUNK_SIZE: usize = 512;
+    let mut deleted_count: u64 = 0;
+
+    for chunk in ids.chunks(DELETE_CHUNK_SIZE) {
+        let body = DeleteBody {
+            points: chunk.to_vec(),
+        };
+        let url = format!("{base}/collections/{COLLECTION_NAME}/points/delete?wait=true");
+        debug!(
+            url = %url,
+            source_id = %args.source_id,
+            chunk_size = chunk.len(),
+            "qdrant delete points by ids"
+        );
+        let res = http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("qdrant delete-by-path request failed: {e}"))?;
+        let status = res.status();
+        if !status.is_success() {
+            let text = res.text().await.unwrap_or_default();
+            warn!(http_status = %status, body = %text, "qdrant delete-by-path failed");
+            return Err(format!(
+                "Failed to delete points for selected files: HTTP {}: {text}",
+                status
+            ));
+        }
+        deleted_count = deleted_count.saturating_add(chunk.len() as u64);
+    }
+
+    info!(
+        source_id = %args.source_id,
+        deleted_count,
+        elapsed_ms = started.elapsed().as_millis(),
+        "qdrant delete-by-path ok"
+    );
+    Ok(DeletePointsForPathsResult { deleted_count })
 }
 

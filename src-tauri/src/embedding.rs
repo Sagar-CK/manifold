@@ -140,6 +140,16 @@ fn emit_error(app: &tauri::AppHandle, message: &str) {
     );
 }
 
+fn emit_file_failed(app: &tauri::AppHandle, path: &std::path::Path, reason: &str) {
+    let _ = app.emit(
+        "embedding://file-failed",
+        serde_json::json!({
+            "path": path.to_string_lossy().to_string(),
+            "reason": reason
+        }),
+    );
+}
+
 fn emit_done(app: &tauri::AppHandle) {
     let _ = app.emit("embedding://done", serde_json::json!({ "ok": true }));
 }
@@ -468,6 +478,7 @@ pub async fn start(
                     Ok(h) => h,
                     Err(e) => {
                         emit_error(&app2, &e);
+                        emit_file_failed(&app2, path, &format!("hash failed: {e}"));
                         continue;
                     }
                 };
@@ -488,6 +499,7 @@ pub async fn start(
                     Ok(r) => r.should_embed,
                     Err(e) => {
                         emit_error(&app2, &e);
+                        emit_file_failed(&app2, path, &format!("metadata upsert failed: {e}"));
                         continue;
                     }
                 };
@@ -497,6 +509,7 @@ pub async fn start(
                         Ok(b) => b,
                         Err(e) => {
                             emit_error(&app2, &e.to_string());
+                            emit_file_failed(&app2, path, &format!("file read failed: {e}"));
                             continue;
                         }
                     };
@@ -504,18 +517,18 @@ pub async fn start(
                         Ok(v) => v,
                         Err(e) => {
                             emit_error(&app2, &e);
+                            emit_file_failed(&app2, path, &format!("embedding request failed: {e}"));
                             continue;
                         }
                     };
                     if embedding.len() != OUTPUT_DIM {
-                        emit_error(
-                            &app2,
-                            &format!(
-                                "Unexpected embedding length {}; expected {}",
-                                embedding.len(),
-                                OUTPUT_DIM
-                            ),
+                        let msg = format!(
+                            "Unexpected embedding length {}; expected {}",
+                            embedding.len(),
+                            OUTPUT_DIM
                         );
+                        emit_error(&app2, &msg);
+                        emit_file_failed(&app2, path, &msg);
                         continue;
                     }
 
@@ -532,6 +545,7 @@ pub async fn start(
                     .await;
                     if let Err(e) = upsert_res {
                         emit_error(&app2, &e);
+                        emit_file_failed(&app2, path, &format!("vector upsert failed: {e}"));
                         continue;
                     }
                 }

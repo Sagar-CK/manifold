@@ -1,13 +1,141 @@
 use base64::Engine;
+use pdfium_render::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use tauri::Manager;
 use walkdir::WalkDir;
 
 mod qdrant;
 mod embedding;
+
+const THUMB_CACHE_MAX_ENTRIES: usize = 512;
+
+#[derive(Debug, Clone)]
+struct ThumbnailCacheEntry {
+    mtime_ms: i64,
+    size_bytes: u64,
+    png_base64: String,
+}
+
+#[derive(Debug, Default)]
+struct ThumbnailCache {
+    // Small in-memory cache to avoid repeating expensive image decode/resize
+    // across searches for the same files.
+    entries: Mutex<HashMap<String, ThumbnailCacheEntry>>,
+}
+
+fn thumbnail_cache_key(path: &str, max_edge: u32) -> String {
+    format!("{path}::{max_edge}")
+}
+
+fn thumbnail_file_kind(path: &Path) -> String {
+    path.extension()
+        .and_then(|s| s.to_str())
+        .map(normalize_ext)
+        .unwrap_or_default()
+}
+
+fn render_image_thumbnail_base64(path: &Path, max_edge: u32) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|e| e.to_string())?;
+    let img = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
+    let resized = img.thumbnail(max_edge, max_edge);
+    let mut out = Vec::new();
+    resized
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(out))
+}
+
+fn bind_pdfium_library(app: &tauri::AppHandle) -> Result<Box<dyn PdfiumLibraryBindings>, String> {
+    let mut errors: Vec<String> = Vec::new();
+
+    if let Ok(raw) = std::env::var("MANIFOLD_PDFIUM_LIB_PATH") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            let candidate = PathBuf::from(trimmed);
+            let candidate = if candidate.is_dir() {
+                Pdfium::pdfium_platform_library_name_at_path(&candidate)
+            } else {
+                candidate
+            };
+            match Pdfium::bind_to_library(&candidate) {
+                Ok(bindings) => return Ok(bindings),
+                Err(err) => errors.push(format!(
+                    "MANIFOLD_PDFIUM_LIB_PATH({}): {}",
+                    candidate.display(),
+                    err
+                )),
+            }
+        }
+    }
+
+    let mut candidates: Vec<PathBuf> = vec![
+        Pdfium::pdfium_platform_library_name_at_path("./"),
+        PathBuf::from("/opt/homebrew/lib").join(Pdfium::pdfium_platform_library_name()),
+        PathBuf::from("/usr/local/lib").join(Pdfium::pdfium_platform_library_name()),
+    ];
+
+    // Prefer loading from app-managed paths so packaged builds work out-of-the-box.
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join(Pdfium::pdfium_platform_library_name()));
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            candidates.push(parent.join(Pdfium::pdfium_platform_library_name()));
+            candidates.push(parent.join("../Frameworks").join(Pdfium::pdfium_platform_library_name()));
+            candidates.push(parent.join("../Resources").join(Pdfium::pdfium_platform_library_name()));
+        }
+    }
+
+    for candidate in candidates {
+        match Pdfium::bind_to_library(&candidate) {
+            Ok(bindings) => return Ok(bindings),
+            Err(err) => errors.push(format!("{}: {}", candidate.display(), err)),
+        }
+    }
+
+    Pdfium::bind_to_system_library().map_err(|err| {
+        errors.push(format!("system: {err}"));
+        format!(
+            "failed to load Pdfium. Set MANIFOLD_PDFIUM_LIB_PATH to a pdfium library path or \
+             install libpdfium.dylib (Homebrew path: /opt/homebrew/lib/libpdfium.dylib). Attempts: {}",
+            errors.join(" | ")
+        )
+    })
+}
+
+fn render_pdf_thumbnail_base64(
+    app: &tauri::AppHandle,
+    path: &Path,
+    max_edge: u32,
+) -> Result<String, String> {
+    let bindings = bind_pdfium_library(app)?;
+    let pdfium = Pdfium::new(bindings);
+    let document = pdfium
+        .load_pdf_from_file(path, None)
+        .map_err(|e| e.to_string())?;
+    let page = document.pages().get(0).map_err(|e| e.to_string())?;
+    let target = std::cmp::max(1, max_edge) as i32;
+    let rendered = page
+        .render_with_config(
+            &PdfRenderConfig::new()
+                .set_target_width(target)
+                .set_maximum_height(target),
+        )
+        .map_err(|e| e.to_string())?;
+    let thumb_img = rendered.as_image();
+    let mut out = Vec::new();
+    thumb_img
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(out))
+}
 
 fn load_env() {
     let _ = dotenvy::from_filename(".env.local");
@@ -47,11 +175,13 @@ pub fn run() {
     tauri::Builder::default()
         .manage(qdrant::QdrantState::default())
         .manage(embedding::EmbeddingManager::default())
+        .manage(ThumbnailCache::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             scan_files,
             scan_files_count,
+            scan_files_estimate,
             scan_files_needs_embedding,
             read_file_base64,
             thumbnail_image_base64_png,
@@ -61,6 +191,7 @@ pub fn run() {
             qdrant_semantic_search,
             qdrant_count_points,
             qdrant_delete_all_points,
+            qdrant_delete_points_for_paths,
             start_embedding_job,
             pause_embedding_job,
             resume_embedding_job,
@@ -217,6 +348,19 @@ pub struct ScanFilesCountResult {
     pub total: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanFilesEstimateResult {
+    pub total: u64,
+    pub image_files: u64,
+    pub audio_files: u64,
+    pub video_files: u64,
+    pub text_like_files: u64,
+    pub total_text_bytes: u64,
+    pub total_audio_bytes: u64,
+    pub total_video_bytes: u64,
+}
+
 #[tauri::command]
 async fn scan_files_count(args: ScanFilesArgs) -> Result<ScanFilesCountResult, String> {
     tracing::info!(
@@ -282,6 +426,118 @@ async fn scan_files_count(args: ScanFilesArgs) -> Result<ScanFilesCountResult, S
     })
     .await
     .map_err(|e| format!("scan_files_count: task join error: {e}"))?
+}
+
+#[tauri::command]
+async fn scan_files_estimate(args: ScanFilesArgs) -> Result<ScanFilesEstimateResult, String> {
+    tracing::info!(
+        include_count = args.include.len(),
+        exclude_count = args.exclude.len(),
+        extensions_count = args.extensions.len(),
+        "scan_files_estimate: start"
+    );
+    tauri::async_runtime::spawn_blocking(move || {
+        let include_dirs: Vec<PathBuf> = args.include.iter().map(PathBuf::from).collect();
+        let exclude_dirs: Vec<PathBuf> = args.exclude.iter().map(PathBuf::from).collect();
+        let allowed_exts: std::collections::HashSet<String> =
+            args.extensions.iter().map(|e| normalize_ext(e)).collect();
+
+        let mut total: u64 = 0;
+        let mut image_files: u64 = 0;
+        let mut audio_files: u64 = 0;
+        let mut video_files: u64 = 0;
+        let mut text_like_files: u64 = 0;
+        let mut total_text_bytes: u64 = 0;
+        let mut total_audio_bytes: u64 = 0;
+        let mut total_video_bytes: u64 = 0;
+
+        for root in include_dirs {
+            if !root.exists() {
+                tracing::warn!(
+                    root = %root.display(),
+                    "scan_files_estimate: include root does not exist"
+                );
+                continue;
+            }
+            for entry in WalkDir::new(root)
+                .follow_links(false)
+                .into_iter()
+                .filter_entry(|e| {
+                    if e.file_type().is_dir() {
+                        let p = e.path();
+                        !exclude_dirs.iter().any(|ex| is_under_dir(p, ex))
+                    } else {
+                        true
+                    }
+                })
+            {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(err) => {
+                        if !is_walk_permission_denied(&err) {
+                            tracing::debug!(error = %err, "scan_files_estimate: walkdir error");
+                        }
+                        continue;
+                    }
+                };
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let path = entry.path();
+                let ext = path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .map(normalize_ext);
+                let Some(ext) = ext else { continue };
+                if !allowed_exts.contains(&ext) {
+                    continue;
+                }
+                let size_bytes = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                total = total.saturating_add(1);
+                match ext.as_str() {
+                    "png" | "jpg" | "jpeg" => {
+                        image_files = image_files.saturating_add(1);
+                    }
+                    "mp3" | "wav" => {
+                        audio_files = audio_files.saturating_add(1);
+                        total_audio_bytes = total_audio_bytes.saturating_add(size_bytes);
+                    }
+                    "mp4" | "mov" => {
+                        video_files = video_files.saturating_add(1);
+                        total_video_bytes = total_video_bytes.saturating_add(size_bytes);
+                    }
+                    _ => {
+                        text_like_files = text_like_files.saturating_add(1);
+                        total_text_bytes = total_text_bytes.saturating_add(size_bytes);
+                    }
+                }
+            }
+        }
+
+        tracing::info!(
+            total,
+            image_files,
+            audio_files,
+            video_files,
+            text_like_files,
+            total_text_bytes,
+            total_audio_bytes,
+            total_video_bytes,
+            "scan_files_estimate: done"
+        );
+        Ok(ScanFilesEstimateResult {
+            total,
+            image_files,
+            audio_files,
+            video_files,
+            text_like_files,
+            total_text_bytes,
+            total_audio_bytes,
+            total_video_bytes,
+        })
+    })
+    .await
+    .map_err(|e| format!("scan_files_estimate: task join error: {e}"))?
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -400,21 +656,99 @@ pub struct ThumbnailResult {
     pub png_base64: String,
 }
 
-/// Best-effort thumbnailing for images; other file types should use a generic UI icon for now.
+/// Best-effort thumbnailing for supported files.
 #[tauri::command]
-fn thumbnail_image_base64_png(args: ThumbnailArgs) -> Result<ThumbnailResult, String> {
+async fn thumbnail_image_base64_png(
+    app: tauri::AppHandle,
+    cache: tauri::State<'_, ThumbnailCache>,
+    args: ThumbnailArgs,
+) -> Result<ThumbnailResult, String> {
+    let started = std::time::Instant::now();
     tracing::debug!(path = %args.path, max_edge = args.max_edge, "thumbnail_image_base64_png: start");
-    let path = PathBuf::from(args.path);
-    let bytes = fs::read(&path).map_err(|e| e.to_string())?;
-    let img = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
-    let resized = img.thumbnail(args.max_edge, args.max_edge);
-    let mut out = Vec::new();
-    resized
-        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
-        .map_err(|e| e.to_string())?;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(out);
-    tracing::debug!("thumbnail_image_base64_png: done");
-    Ok(ThumbnailResult { png_base64: b64 })
+
+    let path = PathBuf::from(&args.path);
+    let meta = fs::metadata(&path).map_err(|e| e.to_string())?;
+    let mtime_ms = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let size_bytes = meta.len();
+    let cache_key = thumbnail_cache_key(&args.path, args.max_edge);
+
+    {
+        let guard = cache
+            .entries
+            .lock()
+            .map_err(|_| "thumbnail cache lock poisoned".to_string())?;
+        if let Some(entry) = guard.get(&cache_key) {
+            if entry.mtime_ms == mtime_ms && entry.size_bytes == size_bytes {
+                tracing::debug!(
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "thumbnail_image_base64_png: cache hit"
+                );
+                return Ok(ThumbnailResult {
+                    png_base64: entry.png_base64.clone(),
+                });
+            }
+        }
+    }
+
+    let max_edge = args.max_edge;
+    let path_for_kind = path.clone();
+    let app_for_worker = app.clone();
+    let kind = thumbnail_file_kind(&path);
+    let png_base64_res = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        match thumbnail_file_kind(&path_for_kind).as_str() {
+            "png" | "jpg" | "jpeg" => render_image_thumbnail_base64(&path, max_edge),
+            "pdf" => render_pdf_thumbnail_base64(&app_for_worker, &path, max_edge),
+            ext => Err(format!("thumbnail unsupported file type: {ext}")),
+        }
+    })
+    .await
+    .map_err(|e| format!("thumbnail task join error: {e}"))?;
+    let png_base64 = match png_base64_res {
+        Ok(v) => v,
+        Err(err) => {
+            if kind == "pdf" {
+                tracing::warn!(
+                    path = %args.path,
+                    error = %err,
+                    "thumbnail_image_base64_png: pdf thumbnail failed"
+                );
+            } else {
+                tracing::debug!(
+                    path = %args.path,
+                    file_kind = %kind,
+                    error = %err,
+                    "thumbnail_image_base64_png: thumbnail generation failed"
+                );
+            }
+            return Err(err);
+        }
+    };
+
+    {
+        let mut guard = cache
+            .entries
+            .lock()
+            .map_err(|_| "thumbnail cache lock poisoned".to_string())?;
+        if guard.len() >= THUMB_CACHE_MAX_ENTRIES {
+            guard.clear();
+        }
+        guard.insert(
+            cache_key,
+            ThumbnailCacheEntry {
+                mtime_ms,
+                size_bytes,
+                png_base64: png_base64.clone(),
+            },
+        );
+    }
+
+    tracing::debug!(elapsed_ms = started.elapsed().as_millis(), "thumbnail_image_base64_png: done");
+    Ok(ThumbnailResult { png_base64 })
 }
 
 #[tauri::command]
@@ -492,6 +826,20 @@ async fn qdrant_delete_all_points(
     qdrant::delete_all_points(&app, &state, args).await
 }
 
+#[tauri::command]
+async fn qdrant_delete_points_for_paths(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, qdrant::QdrantState>,
+    args: qdrant::DeletePointsForPathsArgs,
+) -> Result<qdrant::DeletePointsForPathsResult, String> {
+    tracing::info!(
+        source_id = %args.source_id,
+        path_count = args.paths.len(),
+        "qdrant_delete_points_for_paths: start"
+    );
+    qdrant::delete_points_for_paths(&app, &state, args).await
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartEmbeddingJobArgs {
@@ -545,5 +893,22 @@ struct EmbedQueryTextArgs {
 
 #[tauri::command]
 async fn embed_query_text(args: EmbedQueryTextArgs) -> Result<Vec<f32>, String> {
-    embedding::embed_query_text(&args.text).await
+    let started = std::time::Instant::now();
+    let text_len = args.text.chars().count();
+    let res = embedding::embed_query_text(&args.text).await;
+    match &res {
+        Ok(v) => tracing::info!(
+            text_len,
+            embedding_len = v.len(),
+            elapsed_ms = started.elapsed().as_millis(),
+            "embed_query_text: done"
+        ),
+        Err(err) => tracing::warn!(
+            text_len,
+            elapsed_ms = started.elapsed().as_millis(),
+            error = %err,
+            "embed_query_text: failed"
+        ),
+    }
+    res
 }

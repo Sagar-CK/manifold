@@ -7,7 +7,7 @@ import { useEffect, useState } from "react";
 import type { LocalConfig, SupportedExt } from "../lib/localConfig";
 import { saveConfig } from "../lib/localConfig";
 import { PageHeader } from "../components/PageHeader";
-import { EmbeddingProgressBar } from "../components/EmbeddingProgressBar";
+import { EmbeddingStatusPanel } from "../components/EmbeddingStatusPanel";
 import { Button } from "../components/ui/button";
 import {
   AlertDialog,
@@ -35,6 +35,32 @@ const SEARCH_MODE_OPTIONS = [
 ] as const;
 type SearchModeOption = (typeof SEARCH_MODE_OPTIONS)[number];
 
+const TEXT_EMBED_PRICE_PER_1M_TOKENS_USD = 0.2;
+const IMAGE_EMBED_COST_PER_IMAGE_USD = 0.00012;
+const AUDIO_EMBED_COST_PER_SECOND_USD = 0.00016;
+const VIDEO_EMBED_COST_PER_FRAME_USD = 0.00079;
+
+// Conservative estimates intentionally bias toward higher usage/cost.
+const TEXT_BYTES_PER_TOKEN_CONSERVATIVE = 3;
+const AUDIO_BYTES_PER_SECOND_CONSERVATIVE = 8_000;
+const VIDEO_BYTES_PER_FRAME_CONSERVATIVE = 50_000;
+
+type IncludeFolderEstimate = {
+  total: number;
+  imageFiles: number;
+  audioFiles: number;
+  videoFiles: number;
+  textLikeFiles: number;
+  estimatedTextTokens: number;
+  estimatedAudioSeconds: number;
+  estimatedVideoFrames: number;
+  textCostUsd: number;
+  imageCostUsd: number;
+  audioCostUsd: number;
+  videoCostUsd: number;
+  totalCostUsd: number;
+};
+
 export function SettingsPage({
   cfg,
   setCfg,
@@ -47,6 +73,7 @@ export function SettingsPage({
   embedPromptDismissed,
   embeddingPhase,
   lastEmbedError,
+  embedFailures,
   onContinueEmbedding,
   onPauseEmbedding,
   onResumeEmbedding,
@@ -79,6 +106,7 @@ export function SettingsPage({
     | "done"
     | "error";
   lastEmbedError: string | null;
+  embedFailures: Array<{ path: string; reason: string }>;
   onContinueEmbedding: () => Promise<void>;
   onPauseEmbedding: () => Promise<void>;
   onResumeEmbedding: () => Promise<void>;
@@ -91,7 +119,20 @@ export function SettingsPage({
   const [confirmClearOpen, setConfirmClearOpen] = useState(false);
   const [embeddedCount, setEmbeddedCount] = useState<number | null>(null);
   const [continueError, setContinueError] = useState<string | null>(null);
-  const [jobControlError, setJobControlError] = useState<string | null>(null);
+  const [includeToRemove, setIncludeToRemove] = useState<string | null>(null);
+  const [confirmRemoveIncludeOpen, setConfirmRemoveIncludeOpen] = useState(false);
+  const [removeIncludeLoading, setRemoveIncludeLoading] = useState(false);
+  const [removeIncludeAffectedCount, setRemoveIncludeAffectedCount] = useState<number | null>(null);
+  const [removeIncludeError, setRemoveIncludeError] = useState<string | null>(null);
+  const [confirmAddIncludeOpen, setConfirmAddIncludeOpen] = useState(false);
+  const [addIncludeLoading, setAddIncludeLoading] = useState(false);
+  const [addIncludeError, setAddIncludeError] = useState<string | null>(null);
+  const [includeToAdd, setIncludeToAdd] = useState<string | null>(null);
+  const [includeAddEstimate, setIncludeAddEstimate] = useState<IncludeFolderEstimate | null>(null);
+  const liveIndexedCount =
+    embedding || hasPendingEmbeds
+      ? Math.max(embeddedCount ?? 0, embedProgress.processed)
+      : embeddedCount;
   const selectedSearchModeOption: SearchModeOption | null =
     SEARCH_MODE_OPTIONS.find((option) => option.value === cfg.searchMode) ?? null;
 
@@ -99,6 +140,25 @@ export function SettingsPage({
     setCfg(next);
     saveConfig(next);
   }
+
+  function formatUsd(amount: number) {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: "USD",
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(amount);
+  }
+
+  const normalizedSelectedExts = new Set(cfg.extensions.map((ext) => ext.toLowerCase()));
+  const includeTextPdfEstimate = Array.from(normalizedSelectedExts).some(
+    (ext) => !["png", "jpg", "jpeg", "mp3", "wav", "mp4", "mov"].includes(ext),
+  );
+  const includeImageEstimate = ["png", "jpg", "jpeg"].some((ext) =>
+    normalizedSelectedExts.has(ext),
+  );
+  const includeAudioEstimate = ["mp3", "wav"].some((ext) => normalizedSelectedExts.has(ext));
+  const includeVideoEstimate = ["mp4", "mov"].some((ext) => normalizedSelectedExts.has(ext));
 
   async function deleteAllVectors() {
     setClearIndexError(null);
@@ -113,6 +173,147 @@ export function SettingsPage({
     } finally {
       setClearingIndex(false);
     }
+  }
+
+  async function prepareRemoveIncludeFolder(path: string) {
+    setIncludeToRemove(path);
+    setRemoveIncludeError(null);
+    setRemoveIncludeAffectedCount(null);
+    setConfirmRemoveIncludeOpen(true);
+    try {
+      const res = (await invoke("scan_files_count", {
+        args: {
+          include: [path],
+          exclude: cfg.exclude,
+          extensions: cfg.extensions,
+        },
+      })) as { total: number } | { total: string };
+      const total = typeof res.total === "string" ? Number.parseInt(res.total, 10) : res.total;
+      setRemoveIncludeAffectedCount(Number.isFinite(total) ? total : 0);
+    } catch (e) {
+      setRemoveIncludeError(String(e));
+      setRemoveIncludeAffectedCount(0);
+    }
+  }
+
+  async function removeIncludeFolderAndVectors() {
+    if (!includeToRemove) return;
+    setRemoveIncludeError(null);
+    setRemoveIncludeLoading(true);
+    try {
+      const scanned = (await invoke("scan_files", {
+        args: {
+          include: [includeToRemove],
+          exclude: cfg.exclude,
+          extensions: cfg.extensions,
+        },
+      })) as Array<{ path: string }>;
+      const paths = scanned.map((file) => file.path);
+      if (paths.length > 0) {
+        await invoke("qdrant_delete_points_for_paths", {
+          args: {
+            sourceId: cfg.sourceId,
+            paths,
+          },
+        });
+      }
+      updateConfig({ ...cfg, include: cfg.include.filter((x) => x !== includeToRemove) });
+      setConfirmRemoveIncludeOpen(false);
+      setIncludeToRemove(null);
+      setRemoveIncludeAffectedCount(null);
+    } catch (e) {
+      setRemoveIncludeError(String(e));
+    } finally {
+      setRemoveIncludeLoading(false);
+    }
+  }
+
+  async function prepareAddIncludeFolder(path: string) {
+    setIncludeToAdd(path);
+    setAddIncludeError(null);
+    setIncludeAddEstimate(null);
+    setConfirmAddIncludeOpen(true);
+    setAddIncludeLoading(true);
+    try {
+      const res = (await invoke("scan_files_estimate", {
+        args: {
+          include: [path],
+          exclude: cfg.exclude,
+          extensions: cfg.extensions,
+        },
+      })) as {
+        total: number | string;
+        imageFiles: number | string;
+        audioFiles: number | string;
+        videoFiles: number | string;
+        textLikeFiles: number | string;
+        totalTextBytes: number | string;
+        totalAudioBytes: number | string;
+        totalVideoBytes: number | string;
+      };
+      const total = typeof res.total === "string" ? Number.parseInt(res.total, 10) : res.total;
+      const imageFiles =
+        typeof res.imageFiles === "string" ? Number.parseInt(res.imageFiles, 10) : res.imageFiles;
+      const audioFiles =
+        typeof res.audioFiles === "string" ? Number.parseInt(res.audioFiles, 10) : res.audioFiles;
+      const videoFiles =
+        typeof res.videoFiles === "string" ? Number.parseInt(res.videoFiles, 10) : res.videoFiles;
+      const textLikeFiles =
+        typeof res.textLikeFiles === "string"
+          ? Number.parseInt(res.textLikeFiles, 10)
+          : res.textLikeFiles;
+      const totalTextBytes =
+        typeof res.totalTextBytes === "string"
+          ? Number.parseInt(res.totalTextBytes, 10)
+          : res.totalTextBytes;
+      const totalAudioBytes =
+        typeof res.totalAudioBytes === "string"
+          ? Number.parseInt(res.totalAudioBytes, 10)
+          : res.totalAudioBytes;
+      const totalVideoBytes =
+        typeof res.totalVideoBytes === "string"
+          ? Number.parseInt(res.totalVideoBytes, 10)
+          : res.totalVideoBytes;
+      const safeImageFiles = Number.isFinite(imageFiles) ? imageFiles : 0;
+      const safeTextBytes = Number.isFinite(totalTextBytes) ? totalTextBytes : 0;
+      const safeAudioBytes = Number.isFinite(totalAudioBytes) ? totalAudioBytes : 0;
+      const safeVideoBytes = Number.isFinite(totalVideoBytes) ? totalVideoBytes : 0;
+      const estimatedTextTokens = Math.ceil(safeTextBytes / TEXT_BYTES_PER_TOKEN_CONSERVATIVE);
+      const estimatedAudioSeconds = Math.ceil(safeAudioBytes / AUDIO_BYTES_PER_SECOND_CONSERVATIVE);
+      const estimatedVideoFrames = Math.ceil(safeVideoBytes / VIDEO_BYTES_PER_FRAME_CONSERVATIVE);
+      const textCostUsd = (estimatedTextTokens / 1_000_000) * TEXT_EMBED_PRICE_PER_1M_TOKENS_USD;
+      const imageCostUsd = safeImageFiles * IMAGE_EMBED_COST_PER_IMAGE_USD;
+      const audioCostUsd = estimatedAudioSeconds * AUDIO_EMBED_COST_PER_SECOND_USD;
+      const videoCostUsd = estimatedVideoFrames * VIDEO_EMBED_COST_PER_FRAME_USD;
+      setIncludeAddEstimate({
+        total: Number.isFinite(total) ? total : 0,
+        imageFiles: safeImageFiles,
+        audioFiles: Number.isFinite(audioFiles) ? audioFiles : 0,
+        videoFiles: Number.isFinite(videoFiles) ? videoFiles : 0,
+        textLikeFiles: Number.isFinite(textLikeFiles) ? textLikeFiles : 0,
+        estimatedTextTokens,
+        estimatedAudioSeconds,
+        estimatedVideoFrames,
+        textCostUsd,
+        imageCostUsd,
+        audioCostUsd,
+        videoCostUsd,
+        totalCostUsd: textCostUsd + imageCostUsd + audioCostUsd + videoCostUsd,
+      });
+    } catch (e) {
+      setAddIncludeError(String(e));
+    } finally {
+      setAddIncludeLoading(false);
+    }
+  }
+
+  function confirmAddIncludeFolder() {
+    if (!includeToAdd) return;
+    updateConfig({ ...cfg, include: [...cfg.include, includeToAdd] });
+    setConfirmAddIncludeOpen(false);
+    setAddIncludeError(null);
+    setIncludeToAdd(null);
+    setIncludeAddEstimate(null);
   }
 
   async function pickFolder(label: string): Promise<string | null> {
@@ -219,7 +420,7 @@ export function SettingsPage({
                   const dir = await pickFolder("Add include folder");
                   if (!dir) return;
                   if (cfg.include.includes(dir)) return;
-                  updateConfig({ ...cfg, include: [...cfg.include, dir] });
+                  await prepareAddIncludeFolder(dir);
                 }}
               >
                 <FolderPlus className="h-4 w-4" aria-hidden="true" />
@@ -237,11 +438,12 @@ export function SettingsPage({
                     <Button
                       variant="ghost"
                       size="icon-sm"
+                      className="text-destructive hover:bg-destructive/10 hover:text-destructive"
                       aria-label={`Remove include folder ${formatPathForDisplay(p)}`}
                       title="Remove include folder"
-                      onClick={() =>
-                        updateConfig({ ...cfg, include: cfg.include.filter((x) => x !== p) })
-                      }
+                      onClick={async () => {
+                        await prepareRemoveIncludeFolder(p);
+                      }}
                     >
                       <Trash2 className="h-4 w-4" aria-hidden="true" />
                     </Button>
@@ -281,6 +483,7 @@ export function SettingsPage({
                     <Button
                       variant="ghost"
                       size="icon-sm"
+                      className="text-destructive hover:bg-destructive/10 hover:text-destructive"
                       aria-label={`Remove exclude folder ${formatPathForDisplay(p)}`}
                       title="Remove exclude folder"
                       onClick={() =>
@@ -324,7 +527,7 @@ export function SettingsPage({
 
           <div className="mt-5">
             <div className="flex items-center justify-between gap-3">
-                <div className="app-body font-medium">Similarity threshold</div>
+              <div className="app-label">Similarity threshold</div>
               <Combobox<SearchModeOption>
                 value={selectedSearchModeOption}
                 onValueChange={(value) => {
@@ -401,7 +604,7 @@ export function SettingsPage({
           <div className="min-w-0">
             <div className="app-section-title text-black">Delete all vectors</div>
             <div className="app-muted mt-0.5 max-w-lg">
-              Clears the local Qdrant index (embeddings only). Your files will not be deleted from disk. Currently, {embeddedCount} file(s) are indexed.
+              Clears the local Qdrant index (embeddings only). Your files will not be deleted from disk. Currently, {liveIndexedCount} file(s) are indexed.
             </div>
             {clearIndexError ? (
               <div className="mt-2 text-sm font-medium text-rose-700">Error: {clearIndexError}</div>
@@ -412,7 +615,7 @@ export function SettingsPage({
             <AlertDialogTrigger asChild>
               <Button
                 variant="destructive"
-                disabled={clearingIndex || embedding || hasPendingEmbeds || embeddedCount === 0}
+                disabled={clearingIndex || embedding || hasPendingEmbeds || liveIndexedCount === 0}
               >
                 <Trash2 className="h-4 w-4" aria-hidden="true" />
                 {clearingIndex && <Loader className="h-4 w-4 animate-spin" aria-hidden="true" /> }
@@ -420,75 +623,243 @@ export function SettingsPage({
             </AlertDialogTrigger>
             <AlertDialogContent>
               <AlertDialogHeader>
-                <AlertDialogTitle className="text-black">Delete all {embeddedCount} vectors?</AlertDialogTitle>
+                <AlertDialogTitle className="text-black">Delete all {liveIndexedCount} vectors?</AlertDialogTitle>
                 <AlertDialogDescription>
                   Clears all indexed vectors for this profile. Files are not deleted.
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
-                <AlertDialogCancel disabled={clearingIndex}>Cancel</AlertDialogCancel>
+                <AlertDialogCancel
+                  disabled={clearingIndex}
+                  className="h-auto min-h-9 px-3 py-2"
+                  aria-label="Cancel deletion"
+                  title="Cancel"
+                >
+                  Cancel
+                </AlertDialogCancel>
                 <AlertDialogAction
                   variant="destructive"
                   disabled={clearingIndex}
+                  className="h-auto min-h-9 px-3 py-2"
+                  aria-label="Delete vectors"
+                  title="Delete vectors"
                   onClick={async (e) => {
                     e.preventDefault();
                     await deleteAllVectors();
                   }}
                 >
-                  Delete vectors
+                  {clearingIndex ? (
+                    <>
+                      <Loader className="h-4 w-4 animate-spin" aria-hidden="true" />
+                      Deleting...
+                    </>
+                  ) : (
+                    "Delete"
+                  )}
                 </AlertDialogAction>
               </AlertDialogFooter>
             </AlertDialogContent>
           </AlertDialog>
         </div>
       </div>
+
+      <AlertDialog
+        open={confirmAddIncludeOpen}
+        onOpenChange={(open) => {
+          setConfirmAddIncludeOpen(open);
+          if (!open && !addIncludeLoading) {
+            setIncludeToAdd(null);
+            setIncludeAddEstimate(null);
+            setAddIncludeError(null);
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-black">Add folder and continue with embedding estimate?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This folder has {includeAddEstimate?.total ?? "..."} selected file(s).
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="rounded-md border border-black/10 bg-black/2 px-3 py-2 text-sm text-black/80">
+            <div className="grid grid-cols-[1.4fr_0.8fr_1fr] gap-x-3 border-b border-black/10 pb-1 font-semibold text-black">
+              <div>Type</div>
+              <div className="text-right">Amount</div>
+              <div className="text-right">Cost</div>
+            </div>
+            <div className="mt-1 grid grid-cols-[1.4fr_0.8fr_1fr] gap-x-3">
+              {includeTextPdfEstimate ? (
+                <>
+                  <div>Text/PDF</div>
+                  <div className="text-right tabular-nums">
+                    {includeAddEstimate
+                      ? `~${includeAddEstimate.estimatedTextTokens.toLocaleString()} tokens`
+                      : "..."}
+                  </div>
+                  <div className="text-right">
+                    {includeAddEstimate ? formatUsd(includeAddEstimate.textCostUsd) : "..."}
+                  </div>
+                </>
+              ) : null}
+
+              {includeImageEstimate ? (
+                <>
+                  <div>Images</div>
+                  <div className="text-right tabular-nums">{includeAddEstimate?.imageFiles ?? "..."}</div>
+                  <div className="text-right">
+                    {includeAddEstimate ? formatUsd(includeAddEstimate.imageCostUsd) : "..."}
+                  </div>
+                </>
+              ) : null}
+
+              {includeAudioEstimate ? (
+                <>
+                  <div>Audio</div>
+                  <div className="text-right tabular-nums">
+                    {includeAddEstimate
+                      ? `~${includeAddEstimate.estimatedAudioSeconds.toLocaleString()} s`
+                      : "..."}
+                  </div>
+                  <div className="text-right">
+                    {includeAddEstimate ? formatUsd(includeAddEstimate.audioCostUsd) : "..."}
+                  </div>
+                </>
+              ) : null}
+
+              {includeVideoEstimate ? (
+                <>
+                  <div>Video</div>
+                  <div className="text-right tabular-nums">
+                    {includeAddEstimate
+                      ? `~${includeAddEstimate.estimatedVideoFrames.toLocaleString()} frames`
+                      : "..."}
+                  </div>
+                  <div className="text-right">
+                    {includeAddEstimate ? formatUsd(includeAddEstimate.videoCostUsd) : "..."}
+                  </div>
+                </>
+              ) : null}
+            </div>
+            <div className="mt-2 grid grid-cols-[1.4fr_0.8fr_1fr] gap-x-3 border-t border-black/10 pt-1 font-semibold text-black">
+              <div>Total</div>
+              <div className="text-right tabular-nums">{includeAddEstimate?.total ?? "..."}</div>
+              <div className="text-right">
+                {includeAddEstimate ? formatUsd(includeAddEstimate.totalCostUsd) : "..."}
+              </div>
+            </div>
+            <div className="mt-2 text-xs text-black/60">
+              Conservative estimate: actual provider metering can differ.
+            </div>
+          </div>
+          {addIncludeError ? (
+            <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+              Error: {addIncludeError}
+            </div>
+          ) : null}
+          <AlertDialogFooter>
+            <AlertDialogCancel
+              disabled={addIncludeLoading}
+              className="h-auto min-h-9 px-3 py-2"
+              aria-label="Cancel adding include folder"
+              title="Cancel"
+            >
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              disabled={addIncludeLoading || includeToAdd === null}
+              className="h-auto min-h-9 px-3 py-2"
+              aria-label="Confirm add include folder"
+              title="Confirm add include folder"
+              onClick={(e) => {
+                e.preventDefault();
+                confirmAddIncludeFolder();
+              }}
+            >
+              {addIncludeLoading ? (
+                <>
+                  <Loader className="h-4 w-4 animate-spin" aria-hidden="true" />
+                  Confirming...
+                </>
+              ) : (
+                "Confirm"
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog
+        open={confirmRemoveIncludeOpen}
+        onOpenChange={(open) => {
+          setConfirmRemoveIncludeOpen(open);
+          if (!open && !removeIncludeLoading) {
+            setIncludeToRemove(null);
+            setRemoveIncludeAffectedCount(null);
+            setRemoveIncludeError(null);
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-black">
+              Remove include folder and delete {removeIncludeAffectedCount ?? "..."} vectors?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              This removes the folder from include paths and deletes vectors for{" "}
+              {removeIncludeAffectedCount ?? "..."} file(s) in this folder.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {removeIncludeError ? (
+            <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+              Error: {removeIncludeError}
+            </div>
+          ) : null}
+          <AlertDialogFooter>
+            <AlertDialogCancel
+              disabled={removeIncludeLoading}
+              className="h-auto min-h-9 px-3 py-2"
+              aria-label="Cancel removal"
+              title="Cancel"
+            >
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              disabled={removeIncludeLoading || includeToRemove === null}
+              className="h-auto min-h-9 px-3 py-2"
+              aria-label="Remove folder and vectors"
+              title="Remove folder and vectors"
+              onClick={async (e) => {
+                e.preventDefault();
+                await removeIncludeFolderAndVectors();
+              }}
+            >
+              {removeIncludeLoading ? (
+                <>
+                  <Loader className="h-4 w-4 animate-spin" aria-hidden="true" />
+                  Deleting...
+                </>
+              ) : (
+                "Delete"
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       <div className="mt-8 flex min-h-24 items-center justify-center">
         {embedding || hasPendingEmbeds ? (
-          <div className="w-full max-w-sm">
-            <EmbeddingProgressBar
+          <EmbeddingStatusPanel
               embedding={embedding}
               hasPendingEmbeds={hasPendingEmbeds}
               embeddingPhase={embeddingPhase}
               processed={embedProgress.processed}
               total={embedProgress.total}
-              showControls
               controlsDisabled={clearingIndex}
-              onPause={async () => {
-                setJobControlError(null);
-                try {
-                  await onPauseEmbedding();
-                } catch (e) {
-                  setJobControlError(String(e));
-                }
-              }}
-              onResume={async () => {
-                setJobControlError(null);
-                try {
-                  await onResumeEmbedding();
-                } catch (e) {
-                  setJobControlError(String(e));
-                }
-              }}
-              onCancel={async () => {
-                setJobControlError(null);
-                try {
-                  await onCancelEmbedding();
-                } catch (e) {
-                  setJobControlError(String(e));
-                }
-              }}
+              lastEmbedError={lastEmbedError}
+              embedFailures={embedFailures}
+              onPause={onPauseEmbedding}
+              onResume={onResumeEmbedding}
+              onCancel={onCancelEmbedding}
             />
-            {lastEmbedError ? (
-              <div className="mt-2 text-center text-xs font-medium text-rose-700">
-                {lastEmbedError}
-              </div>
-            ) : null}
-            {jobControlError ? (
-              <div className="mt-2 text-center text-xs font-medium text-rose-700">
-                {jobControlError}
-              </div>
-            ) : null}
-          </div>
         ) : needsEmbedding ? (
           <div className="w-full max-w-xl rounded-lg border border-black/10 bg-white p-4">
             <div className="flex items-start justify-between gap-3">

@@ -25,6 +25,11 @@ type EmbeddingJobStatus = {
   message: string;
 };
 
+type EmbeddingFileFailure = {
+  path: string;
+  reason: string;
+};
+
 export default function RouterApp() {
   const [cfg, setCfg] = useState<LocalConfig>(() => loadConfig());
   const [embedding, setEmbedding] = useState(false);
@@ -44,6 +49,7 @@ export default function RouterApp() {
     warning: string | null;
   }>({ totalSelected: null, pending: null, warning: null });
   const [lastEmbedError, setLastEmbedError] = useState<string | null>(null);
+  const [embedFailures, setEmbedFailures] = useState<EmbeddingFileFailure[]>([]);
 
   const geminiApiKey =
     (import.meta.env.VITE_GOOGLE_GENERATIVE_AI_API_KEY as string | undefined) ?? "";
@@ -97,6 +103,7 @@ export default function RouterApp() {
     }
 
     setLastEmbedError(null);
+    setEmbedFailures([]);
     await invoke("start_embedding_job", {
       args: {
         scan: { include: cfg.include, exclude: cfg.exclude, extensions: cfg.extensions },
@@ -214,6 +221,7 @@ export default function RouterApp() {
     let unlistenStatus: (() => void) | null = null;
     let unlistenDone: (() => void) | null = null;
     let unlistenError: (() => void) | null = null;
+    let unlistenFileFailed: (() => void) | null = null;
     let cancelled = false;
 
     async function subscribe() {
@@ -233,6 +241,12 @@ export default function RouterApp() {
       });
       unlistenError = await listen<{ message: string }>("embedding://error", (event) => {
         setLastEmbedError(event.payload.message);
+      });
+      unlistenFileFailed = await listen<EmbeddingFileFailure>("embedding://file-failed", (event) => {
+        setEmbedFailures((prev) => {
+          const next = [event.payload, ...prev];
+          return next.slice(0, 8);
+        });
       });
 
       try {
@@ -262,6 +276,7 @@ export default function RouterApp() {
       unlistenStatus?.();
       unlistenDone?.();
       unlistenError?.();
+      unlistenFileFailed?.();
     };
   }, [needsEmbedding]);
 
@@ -279,6 +294,17 @@ export default function RouterApp() {
                 hasPendingEmbeds={hasPendingEmbeds}
                 embeddingPhase={embeddingPhase}
                 embedProgress={embedProgress}
+                lastEmbedError={lastEmbedError}
+                embedFailures={embedFailures}
+                onPauseEmbedding={async () => {
+                  await invoke("pause_embedding_job");
+                }}
+                onResumeEmbedding={async () => {
+                  await invoke("resume_embedding_job");
+                }}
+                onCancelEmbedding={async () => {
+                  await invoke("cancel_embedding_job");
+                }}
               />
             }
           />
@@ -297,6 +323,7 @@ export default function RouterApp() {
                 embedPromptDismissed={embedPromptDismissed}
                 embeddingPhase={embeddingPhase}
                 lastEmbedError={lastEmbedError}
+                embedFailures={embedFailures}
                 onContinueEmbedding={async () => {
                   setEmbedPromptDismissed(false);
                   setNeedsEmbedding(false);
