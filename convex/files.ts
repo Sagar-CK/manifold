@@ -31,9 +31,10 @@ export const upsertMetadata = mutation({
         mimeType: args.mimeType,
         ext: args.ext,
       });
-      return _id;
+      return { fileId: _id, shouldEmbed: true };
     }
 
+    const shouldEmbed = existing.contentHash !== args.contentHash || existing.embeddingId === undefined;
     await ctx.db.patch(existing._id, {
       contentHash: args.contentHash,
       mtimeMs: args.mtimeMs,
@@ -41,7 +42,7 @@ export const upsertMetadata = mutation({
       mimeType: args.mimeType,
       ext: args.ext,
     });
-    return existing._id;
+    return { fileId: existing._id, shouldEmbed };
   },
 });
 

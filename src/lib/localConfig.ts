@@ -6,6 +6,8 @@ export type LocalConfig = {
   exclude: string[];
   extensions: SupportedExt[];
   scoreThreshold: number;
+  searchMode: "topK" | "scoreThreshold";
+  topK: number;
 };
 
 const KEY = "manifold:config:v1";
@@ -17,6 +19,8 @@ function defaultConfig(): LocalConfig {
     exclude: [],
     extensions: ["png", "jpg", "jpeg", "pdf", "mp3", "wav", "mp4", "mov"],
     scoreThreshold: 0,
+    searchMode: "topK",
+    topK: 24,
   };
 }
 
@@ -40,6 +44,14 @@ export function loadConfig(): LocalConfig {
         typeof parsed.scoreThreshold === "number"
           ? Math.max(0, Math.min(1, parsed.scoreThreshold))
           : defaultConfig().scoreThreshold,
+      searchMode:
+        parsed.searchMode === "scoreThreshold" || parsed.searchMode === "topK"
+          ? parsed.searchMode
+          : defaultConfig().searchMode,
+      topK:
+        typeof parsed.topK === "number"
+          ? Math.max(1, Math.min(256, Math.floor(parsed.topK)))
+          : defaultConfig().topK,
     };
     saveConfig(cfg);
     return cfg;

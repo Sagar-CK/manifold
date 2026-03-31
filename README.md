@@ -1,7 +1,7 @@
 # Manifold
 
 <p align="center">
-  <img src="src/assets/manifold.png" alt="Manifold logo" width="96" height="96" />
+  <img src="src/assets/manifold-icon.png" alt="Manifold logo" width="96" height="96" />
 </p>
 
 Native desktop app for **semantic search across your local files** using **Gemini multimodal embeddings** + **Convex vector search**.

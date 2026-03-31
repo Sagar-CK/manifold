@@ -51,12 +51,16 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
       return await embedText(geminiApiKey, queryText);
     });
 
+    const searchLimit = cfg.searchMode === "topK" ? cfg.topK : 256;
     const res = await semanticSearch({
       sourceId: cfg.sourceId,
       queryVector,
-      limit: 24,
+      limit: searchLimit,
     });
-    const filtered = (res as typeof results).filter((r) => r.score >= cfg.scoreThreshold);
+    const filtered =
+      cfg.searchMode === "scoreThreshold"
+        ? (res as typeof results).filter((r) => r.score >= cfg.scoreThreshold)
+        : (res as typeof results).slice(0, cfg.topK);
 
     setResults(filtered);
 
@@ -89,7 +93,7 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
       void runSearch(trimmed);
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [query, cfg.sourceId, cfg.scoreThreshold]);
+  }, [query, cfg.sourceId, cfg.searchMode, cfg.scoreThreshold, cfg.topK]);
 
   return (
     <section>
