@@ -1,62 +1,68 @@
 # Manifold
 
 <p align="center">
-  <img src="src/assets/manifold-icon.png" alt="Manifold logo" width="96" height="96" />
+  <img src="src/assets/manifold-icon.jpg" alt="Manifold logo" width="96" height="96" />
 </p>
 
-Native desktop app for **semantic search across your local files** using **Gemini embeddings** + a **local Qdrant vector database**.
+Native desktop app for local file indexing and search using Tauri + React, Gemini embeddings, and local Qdrant.
 
-## Features
+## What it does
 
-- **Local file access** (Tauri) with configurable **include/exclude** paths
-- **Supported types**: `png`, `jpg/jpeg`, `pdf`, `mp3`, `wav`, `mp4`, `mov`
-- **Embeddings**: Gemini `gemini-embedding-2-preview` (client-side API calls; cached locally)
-- **Index + search**: vectors stored locally in **Qdrant**, searched via **vector similarity**
-- **Results**: relevance score + local path + best-effort thumbnail for images
+- Indexes selected local files from include/exclude folders.
+- Supports `png`, `jpg`, `jpeg`, `pdf`, `mp3`, `wav`, `mp4`, `mov`.
+- Builds embeddings with Gemini (`models/gemini-embedding-2-preview`).
+- Stores vectors in local Qdrant and runs hybrid search:
+  - direct text matches (local text index)
+  - semantic vector matches (Qdrant)
+- Shows image thumbnails in results when available.
 
-## Setup (developer)
+## Stack
 
-### Prereqs
+- Frontend: React 19 + TypeScript + Vite + React Router.
+- Desktop shell: Tauri v2 (Rust backend + JS frontend).
+- Vector DB: Qdrant (Docker in local dev).
+- Styling/UI: Tailwind CSS v4 + shadcn-style components.
 
-- Node + pnpm
-- Rust toolchain
-- Tauri prerequisites for your OS: see Tauri docs
+## Run locally
 
-### Install deps
+### 1) Install dependencies
 
 ```bash
 pnpm install
 ```
 
-### Configure env
+### 2) Create `.env.local`
 
-Create `.env.local` from `.env.example` and fill:
+Required:
 
-- `VITE_GOOGLE_GENERATIVE_AI_API_KEY`
-- `MANIFOLD_QDRANT_URL` (Docker Qdrant URL, e.g. `http://127.0.0.1:6333`)
+- `MANIFOLD_QDRANT_URL=http://127.0.0.1:6333`
+- `MANIFOLD_GEMINI_API_KEY=...` (or `GOOGLE_GENERATIVE_AI_API_KEY=...`)
 
-### Run Qdrant via Docker (dev)
+Optional:
 
-This follows the same idea as the Qdrant quickstart ([Qdrant Quickstart](https://qdrant.tech/documentation/quickstart/)).
+- `MANIFOLD_LOG=info`
+
+### 3) Start Qdrant
 
 ```bash
 ./scripts/qdrant-dev.sh up
 ```
 
-### Run the desktop app
+### 4) Start the app
 
 ```bash
 pnpm tauri dev
 ```
 
+## Project layout
+
+- `src/` React UI (search + settings + local config).
+- `src-tauri/src/lib.rs` Tauri command surface and app wiring.
+- `src-tauri/src/embedding.rs` embedding job pipeline and Gemini calls.
+- `src-tauri/src/qdrant.rs` Qdrant connection, upsert, search, delete.
+- `scripts/qdrant-dev.sh` local Qdrant lifecycle helper.
+
 ## Notes
 
-- **Your Gemini API key stays on-device** (the desktop app calls Gemini directly).
-- Qdrant runs as a **Docker container** (see `./scripts/qdrant-dev.sh`).
-- Don’t commit `.env.local`.
-
-## Contributing
-
-- Issues and PRs are welcome.
-- Keep changes small and focused.
-- Please avoid introducing new file types without adding both: (1) a MIME mapping, and (2) an embedding + size limit path.
+- `.env.local` is loaded by the Rust backend; do not commit it.
+- Deleting vectors only clears index data, not files on disk.

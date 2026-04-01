@@ -10,12 +10,13 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{watch, Mutex, Semaphore};
 use walkdir::WalkDir;
 
-const OUTPUT_DIM: usize = 768;
+const OUTPUT_DIM: usize = 3072;
 const MAX_FILE_BYTES: u64 = 25 * 1024 * 1024; // 25MB
 const GEMINI_MODEL: &str = "models/gemini-embedding-2-preview";
+const GEMINI_OCR_MODEL: &str = "models/gemini-3-flash-preview";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -435,15 +436,24 @@ async fn extract_text_with_gemini(
     let body = serde_json::json!({
         "contents": [{
             "parts": [
-                { "text": "Extract all readable text. Return plain text only." },
+                {
+                    "text": "Extract all readable text from this file and return plain text only. Do not add explanations, labels, markdown, or commentary."
+                },
                 { "inline_data": { "mime_type": mime_type, "data": b64 } }
             ]
-        }]
+        }],
+        "generationConfig": {
+            "temperature": 0,
+            "responseMimeType": "text/plain"
+        }
     });
-    let url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/{}:generateContent",
+        GEMINI_OCR_MODEL
+    );
     let res = client
         .http
-        .post(url)
+        .post(&url)
         .header("Content-Type", "application/json")
         .header("x-goog-api-key", &client.api_key)
         .json(&body)
@@ -656,6 +666,16 @@ pub async fn start(
         }
 
         let mut processed: u64 = 0;
+        let max_parallelism = std::thread::available_parallelism()
+            .map(|n| (n.get() * 2).clamp(2, 16))
+            .unwrap_or(8);
+        tracing::info!(
+            source_id = %source_id,
+            max_parallelism,
+            "embedding parallel workers configured"
+        );
+        let semaphore = Arc::new(Semaphore::new(max_parallelism));
+        let mut join_set = tokio::task::JoinSet::new();
         for pending in pending_files {
             if cancel_flag.load(Ordering::Relaxed) {
                 break;
@@ -664,32 +684,41 @@ pub async fn start(
                 emit_error(&app2, &e);
                 break;
             }
-
-            let path = pending.path.as_path();
-            let ext = pending.ext.clone();
-            let mime = pending.mime;
-            let sha256 = pending.content_hash;
-            let file_path = path.to_string_lossy().to_string();
-            let file_started = Instant::now();
-            let bytes = if pending.should_embed_content {
-                match std::fs::read(path) {
-                    Ok(b) => Some(b),
-                    Err(e) => {
-                        emit_error(&app2, &e.to_string());
-                        emit_file_failed(&app2, path, &format!("file read failed: {e}"));
-                        continue;
-                    }
-                }
-            } else {
-                None
+            let permit = match semaphore.clone().acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => break,
             };
+            let app_for_file = app2.clone();
+            let source_id_for_file = source_id.clone();
+            let gemini_for_file = gemini.clone();
+            join_set.spawn(async move {
+                let _permit = permit;
+                let path = pending.path.as_path();
+                let ext = pending.ext.clone();
+                let mime = pending.mime;
+                let sha256 = pending.content_hash;
+                let file_path = path.to_string_lossy().to_string();
+                let file_started = Instant::now();
+                let bytes = if pending.should_embed_content {
+                    match std::fs::read(path) {
+                        Ok(b) => Some(b),
+                        Err(e) => {
+                            emit_error(&app_for_file, &e.to_string());
+                            emit_file_failed(&app_for_file, path, &format!("file read failed: {e}"));
+                            return false;
+                        }
+                    }
+                } else {
+                    None
+                };
                 let content_embed_elapsed_ms: u128;
                 let metadata_embed_elapsed_ms: u128;
                 let text_extract_elapsed_ms: u128;
                 let mime_owned = mime.map(|m| m.to_string());
                 let metadata_text = metadata_text_for_path(path);
+                let metadata_text_for_embedding = metadata_text.clone();
                 let content_handle = {
-                    let gemini = gemini.clone();
+                    let gemini = gemini_for_file.clone();
                     let mime = mime_owned.clone();
                     let bytes = bytes.clone();
                     tokio::spawn(async move {
@@ -710,7 +739,8 @@ pub async fn start(
                     })
                 };
                 let metadata_handle = {
-                    let gemini = gemini.clone();
+                    let gemini = gemini_for_file.clone();
+                    let metadata_text = metadata_text_for_embedding;
                     tokio::spawn(async move {
                         if pending.should_embed_metadata {
                             let started = Instant::now();
@@ -726,7 +756,7 @@ pub async fn start(
                     })
                 };
                 let text_handle = {
-                    let gemini = gemini.clone();
+                    let gemini = gemini_for_file.clone();
                     let mime = mime_owned;
                     tokio::spawn(async move {
                         if pending.should_embed_content && supports_text_extraction(&ext) {
@@ -762,9 +792,9 @@ pub async fn start(
                 let (content_embedding, content_elapsed) = match content_res {
                     Ok(v) => v,
                     Err(e) => {
-                        emit_error(&app2, &e);
-                        emit_file_failed(&app2, path, &format!("embedding request failed: {e}"));
-                        continue;
+                        emit_error(&app_for_file, &e);
+                        emit_file_failed(&app_for_file, path, &format!("embedding request failed: {e}"));
+                        return false;
                     }
                 };
                 content_embed_elapsed_ms = content_elapsed;
@@ -772,9 +802,9 @@ pub async fn start(
                 let (metadata_embedding, metadata_elapsed) = match metadata_res {
                     Ok(v) => v,
                     Err(e) => {
-                        emit_error(&app2, &e);
-                        emit_file_failed(&app2, path, &format!("metadata embedding failed: {e}"));
-                        continue;
+                        emit_error(&app_for_file, &e);
+                        emit_file_failed(&app_for_file, path, &format!("metadata embedding failed: {e}"));
+                        return false;
                     }
                 };
                 metadata_embed_elapsed_ms = metadata_elapsed;
@@ -785,12 +815,13 @@ pub async fn start(
                 };
                 text_extract_elapsed_ms = text_elapsed;
 
+                let qdrant_state = app_for_file.state::<qdrant::QdrantState>();
                 if let Some(embedding) = content_embedding {
                     if let Err(e) = qdrant::upsert_embedding(
-                        &app2,
+                        &app_for_file,
                         &qdrant_state,
                         qdrant::UpsertEmbeddingArgs {
-                            source_id: source_id.clone(),
+                            source_id: source_id_for_file.clone(),
                             path: file_path.clone(),
                             content_hash: sha256.clone(),
                             embedding,
@@ -798,18 +829,18 @@ pub async fn start(
                     )
                     .await
                     {
-                        emit_error(&app2, &e);
-                        emit_file_failed(&app2, path, &format!("vector upsert failed: {e}"));
-                        continue;
+                        emit_error(&app_for_file, &e);
+                        emit_file_failed(&app_for_file, path, &format!("vector upsert failed: {e}"));
+                        return false;
                     }
                 }
 
                 if let Some(metadata_embedding) = metadata_embedding {
                     if let Err(e) = qdrant::upsert_metadata_embedding(
-                        &app2,
+                        &app_for_file,
                         &qdrant_state,
                         qdrant::UpsertMetadataEmbeddingArgs {
-                            source_id: source_id.clone(),
+                            source_id: source_id_for_file.clone(),
                             path: file_path.clone(),
                             content_hash: sha256.clone(),
                             metadata_embedding,
@@ -817,9 +848,13 @@ pub async fn start(
                     )
                     .await
                     {
-                        emit_error(&app2, &e);
-                        emit_file_failed(&app2, path, &format!("metadata vector upsert failed: {e}"));
-                        continue;
+                        emit_error(&app_for_file, &e);
+                        emit_file_failed(
+                            &app_for_file,
+                            path,
+                            &format!("metadata vector upsert failed: {e}"),
+                        );
+                        return false;
                     }
                 }
 
@@ -832,9 +867,9 @@ pub async fn start(
                 let normalized = text_index::normalize_text(&direct_match_text);
                 if !normalized.is_empty() {
                     let _ = text_index::upsert_text(
-                        &app2,
+                        &app_for_file,
                         text_index::UpsertTextArgs {
-                            source_id: source_id.clone(),
+                            source_id: source_id_for_file.clone(),
                             path: file_path.clone(),
                             content_hash: sha256.clone(),
                             normalized_text: normalized,
@@ -843,7 +878,7 @@ pub async fn start(
                 }
                 tracing::info!(
                     path = %file_path,
-                    source_id = %source_id,
+                    source_id = %source_id_for_file,
                     should_embed_content = pending.should_embed_content,
                     should_embed_metadata = pending.should_embed_metadata,
                     content_embed_elapsed_ms,
@@ -852,29 +887,39 @@ pub async fn start(
                     file_total_elapsed_ms = file_started.elapsed().as_millis(),
                     "embedding file completed"
                 );
+                true
+            });
+        }
 
-                processed = processed.saturating_add(1);
-                if should_emit(&mut last_emit, processed, total) {
-                    let mgr = app2.state::<EmbeddingManager>();
-                    let mut s = mgr.state.lock().await;
-                    s.processed = processed;
-                    s.phase = if *pause_rx.borrow() {
-                        EmbeddingJobPhase::Paused
-                    } else {
-                        EmbeddingJobPhase::Embedding
-                    };
-                    s.message = "Embedding in progress…".to_string();
-                    emit_status(
-                        &app2,
-                        &EmbeddingJobStatus {
-                            phase: s.phase.clone(),
-                            processed: s.processed,
-                            total: s.total,
-                            message: s.message.clone(),
-                        },
-                    );
-                    last_emit = Instant::now();
-                }
+        while let Some(joined) = join_set.join_next().await {
+            let completed = joined.unwrap_or(false);
+            // Count every finished file task (success or failure) so UI progress reflects real-time completion.
+            processed = processed.saturating_add(1);
+            if should_emit(&mut last_emit, processed, total) {
+                let mgr = app2.state::<EmbeddingManager>();
+                let mut s = mgr.state.lock().await;
+                s.processed = processed;
+                s.phase = if *pause_rx.borrow() {
+                    EmbeddingJobPhase::Paused
+                } else {
+                    EmbeddingJobPhase::Embedding
+                };
+                s.message = if completed {
+                    "Embedding in progress…".to_string()
+                } else {
+                    "Embedding in progress (some files failed)…".to_string()
+                };
+                emit_status(
+                    &app2,
+                    &EmbeddingJobStatus {
+                        phase: s.phase.clone(),
+                        processed: s.processed,
+                        total: s.total,
+                        message: s.message.clone(),
+                    },
+                );
+                last_emit = Instant::now();
+            }
         }
 
         let cancelled = cancel_flag.load(Ordering::Relaxed);

@@ -5,7 +5,7 @@ use tokio::sync::Mutex;
 
 const CONTENT_COLLECTION_NAME: &str = "manifold_files_content_v2";
 const METADATA_COLLECTION_NAME: &str = "manifold_files_metadata_v2";
-const VECTOR_DIM: usize = 768;
+const VECTOR_DIM: usize = 3072;
 const CONNECT_COOLDOWN: Duration = Duration::from_secs(15);
 
 // Stable app-specific UUID namespace (generated once).
@@ -132,32 +132,91 @@ async fn ensure_collection(http: &reqwest::Client, base: &str, collection_name: 
         distance: &'static str,
     }
 
-    // Create is idempotent-ish: if it exists, Qdrant returns an error. We treat that as ok.
+    fn extract_collection_vector_size(v: &serde_json::Value) -> Option<usize> {
+        let vectors = v
+            .get("result")?
+            .get("config")?
+            .get("params")?
+            .get("vectors")?;
+        if let Some(size) = vectors.get("size").and_then(|s| s.as_u64()) {
+            return usize::try_from(size).ok();
+        }
+        if let Some(obj) = vectors.as_object() {
+            for vv in obj.values() {
+                if let Some(size) = vv.get("size").and_then(|s| s.as_u64()) {
+                    return usize::try_from(size).ok();
+                }
+            }
+        }
+        None
+    }
+
     let url = format!("{base}/collections/{collection_name}");
+
+    let get_res = http
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("ensure_collection preflight request failed: {e}"))?;
+    let get_status = get_res.status();
+
+    if get_status.is_success() {
+        let json: serde_json::Value = get_res
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse collection config JSON: {e}"))?;
+        if let Some(existing_size) = extract_collection_vector_size(&json) {
+            if existing_size == VECTOR_DIM {
+                return Ok(());
+            }
+            tracing::warn!(
+                collection = collection_name,
+                existing_size,
+                expected_size = VECTOR_DIM,
+                "qdrant collection has wrong vector size; recreating"
+            );
+            let del_res = http
+                .delete(&url)
+                .send()
+                .await
+                .map_err(|e| format!("Failed to delete mismatched collection: {e}"))?;
+            let del_status = del_res.status();
+            if !del_status.is_success() {
+                let text = del_res.text().await.unwrap_or_default();
+                return Err(format!(
+                    "Failed to delete mismatched collection: HTTP {}: {text}",
+                    del_status
+                ));
+            }
+        }
+    } else if get_status.as_u16() != 404 {
+        let text = get_res.text().await.unwrap_or_default();
+        return Err(format!(
+            "Failed to inspect Qdrant collection: HTTP {}: {text}",
+            get_status
+        ));
+    }
+
     let body = CreateCollectionBody {
         vectors: Vectors {
             size: VECTOR_DIM,
             distance: "Cosine",
         },
     };
-    let res = http
+    let create_res = http
         .put(&url)
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("ensure_collection request failed: {e}"))?;
-    let status = res.status();
-    if status.is_success() {
+        .map_err(|e| format!("ensure_collection create request failed: {e}"))?;
+    let create_status = create_res.status();
+    if create_status.is_success() {
         return Ok(());
     }
-    // Already exists / conflict is fine.
-    if status.as_u16() == 409 {
-        return Ok(());
-    }
-    let text = res.text().await.unwrap_or_default();
+    let text = create_res.text().await.unwrap_or_default();
     Err(format!(
         "Failed to ensure Qdrant collection: HTTP {}: {text}",
-        status
+        create_status
     ))
 }
 

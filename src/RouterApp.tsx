@@ -35,7 +35,6 @@ export default function RouterApp() {
   const [embedding, setEmbedding] = useState(false);
   const [embeddingPhase, setEmbeddingPhase] = useState<EmbeddingJobPhase>("idle");
   const [envIssues, setEnvIssues] = useState<string[]>([]);
-  const [embedPromptDismissed, setEmbedPromptDismissed] = useState(false);
   const [embedProgress, setEmbedProgress] = useState({
     processed: 0,
     total: 0,
@@ -43,11 +42,6 @@ export default function RouterApp() {
   });
   const [hasPendingEmbeds, setHasPendingEmbeds] = useState(false);
   const [needsEmbedding, setNeedsEmbedding] = useState(false);
-  const [embedPlan, setEmbedPlan] = useState<{
-    totalSelected: number | null;
-    pending: number | null;
-    warning: string | null;
-  }>({ totalSelected: null, pending: null, warning: null });
   const [lastEmbedError, setLastEmbedError] = useState<string | null>(null);
   const [embedFailures, setEmbedFailures] = useState<EmbeddingFileFailure[]>([]);
 
@@ -122,9 +116,7 @@ export default function RouterApp() {
       if (cfg.include.length === 0) {
         setNeedsEmbedding(false);
         setHasPendingEmbeds(false);
-        setEmbedPromptDismissed(false);
         setEmbedProgress({ processed: 0, total: 0, status: "All files indexed." });
-        setEmbedPlan({ totalSelected: null, pending: null, warning: null });
         return;
       }
 
@@ -141,7 +133,6 @@ export default function RouterApp() {
 
         setNeedsEmbedding(needs);
         setHasPendingEmbeds(needs);
-        setEmbedPromptDismissed(false);
         setEmbedProgress({
           processed: 0,
           total: 0,
@@ -161,7 +152,6 @@ export default function RouterApp() {
         // If preflight fails, fall back to attempting an explicit start anyway.
         setNeedsEmbedding(true);
         setHasPendingEmbeds(true);
-        setEmbedPromptDismissed(false);
         setEmbedProgress({
           processed: 0,
           total: 0,
@@ -185,37 +175,6 @@ export default function RouterApp() {
       cancelled = true;
     };
   }, [autoEmbedKey, cfg.include.length, embedding, runEmbed]);
-
-  useEffect(() => {
-    let cancelled = false;
-    async function preflightPlan() {
-      if (embedding) return;
-      if (cfg.include.length === 0) return;
-
-      try {
-        const res = (await invoke("scan_files_count", {
-          args: { include: cfg.include, exclude: cfg.exclude, extensions: cfg.extensions },
-        })) as { total: number } | { total: string };
-        const totalSelected = typeof res.total === "string" ? Number.parseInt(res.total, 10) : res.total;
-        const safeTotalSelected = Number.isFinite(totalSelected) ? totalSelected : 0;
-        const toWarnOn = safeTotalSelected;
-        const warning =
-          toWarnOn >= 1500
-            ? "Large indexing job detected (1500+ files). This may take a long time and consume significant API quota."
-            : toWarnOn >= 500
-              ? "Large indexing job detected (500+ files). Consider narrowing folders/types before continuing."
-              : null;
-
-        if (!cancelled) setEmbedPlan({ totalSelected: safeTotalSelected, pending: null, warning });
-      } catch {
-        if (!cancelled) setEmbedPlan({ totalSelected: null, pending: null, warning: null });
-      }
-    }
-    void preflightPlan();
-    return () => {
-      cancelled = true;
-    };
-  }, [autoEmbedKey, cfg.exclude, cfg.extensions, cfg.include, cfg.sourceId, embedding]);
 
   useEffect(() => {
     let unlistenStatus: (() => void) | null = null;
