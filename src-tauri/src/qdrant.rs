@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tauri::AppHandle;
 use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
 
-const COLLECTION_NAME: &str = "manifold_files_v1";
+const CONTENT_COLLECTION_NAME: &str = "manifold_files_content_v2";
+const METADATA_COLLECTION_NAME: &str = "manifold_files_metadata_v2";
 const VECTOR_DIM: usize = 768;
 const CONNECT_COOLDOWN: Duration = Duration::from_secs(15);
 
@@ -45,7 +45,8 @@ pub struct UpsertMetadataArgs {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpsertMetadataResult {
-    pub should_embed: bool,
+    pub should_embed_content: bool,
+    pub should_embed_metadata: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,10 +60,27 @@ pub struct UpsertEmbeddingArgs {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct UpsertMetadataEmbeddingArgs {
+    pub source_id: String,
+    pub path: String,
+    pub content_hash: String,
+    pub metadata_embedding: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SemanticSearchArgs {
     pub source_id: String,
     pub query_vector: Vec<f32>,
     pub limit: Option<u32>,
+    pub channel: Option<SemanticSearchChannel>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SemanticSearchChannel {
+    Content,
+    Metadata,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,7 +121,7 @@ async fn quick_http_ready(http: &reqwest::Client, base: &str) -> Result<(), Stri
         .map_err(|e| format!("Qdrant not ready at {base}: {e}"))
 }
 
-async fn ensure_collection(http: &reqwest::Client, base: &str) -> Result<(), String> {
+async fn ensure_collection(http: &reqwest::Client, base: &str, collection_name: &str) -> Result<(), String> {
     #[derive(Debug, Serialize)]
     struct CreateCollectionBody {
         vectors: Vectors,
@@ -115,7 +133,7 @@ async fn ensure_collection(http: &reqwest::Client, base: &str) -> Result<(), Str
     }
 
     // Create is idempotent-ish: if it exists, Qdrant returns an error. We treat that as ok.
-    let url = format!("{base}/collections/{COLLECTION_NAME}");
+    let url = format!("{base}/collections/{collection_name}");
     let body = CreateCollectionBody {
         vectors: Vectors {
             size: VECTOR_DIM,
@@ -130,12 +148,10 @@ async fn ensure_collection(http: &reqwest::Client, base: &str) -> Result<(), Str
         .map_err(|e| format!("ensure_collection request failed: {e}"))?;
     let status = res.status();
     if status.is_success() {
-        info!(collection = COLLECTION_NAME, vector_dim = VECTOR_DIM, "qdrant collection ensured");
         return Ok(());
     }
     // Already exists / conflict is fine.
     if status.as_u16() == 409 {
-        info!(collection = COLLECTION_NAME, "qdrant collection already exists");
         return Ok(());
     }
     let text = res.text().await.unwrap_or_default();
@@ -153,7 +169,6 @@ async fn start_qdrant(_app: &AppHandle) -> Result<QdrantInstance, String> {
             "Missing MANIFOLD_QDRANT_URL. Start Qdrant with Docker (./scripts/qdrant-dev.sh up) and set MANIFOLD_QDRANT_URL=http://127.0.0.1:6333".to_string(),
         );
     }
-    info!(base_url = %trimmed, "qdrant: connecting");
     // Keep this fast. The UI may call into Qdrant during embedding/search and we should
     // fail quickly when the local Qdrant instance isn't running.
     let http = reqwest::Client::builder()
@@ -165,8 +180,8 @@ async fn start_qdrant(_app: &AppHandle) -> Result<QdrantInstance, String> {
     quick_http_ready(&http, &trimmed).await?;
     // If Qdrant is starting up, collection creation may still fail once; keep a tiny
     // retry loop here without impacting the UI too much.
-    ensure_collection(&http, &trimmed).await?;
-    info!(base_url = %trimmed, "qdrant: ready");
+    ensure_collection(&http, &trimmed, CONTENT_COLLECTION_NAME).await?;
+    ensure_collection(&http, &trimmed, METADATA_COLLECTION_NAME).await?;
     Ok(QdrantInstance { base_url: trimmed, http })
 }
 
@@ -193,7 +208,6 @@ async fn instance(app: &AppHandle, state: &QdrantState) -> Result<(reqwest::Clie
                 *state.last_error.lock().await = None;
             }
             Err(e) => {
-                warn!(error = %e, "qdrant: connect failed (entering cooldown)");
                 *state.last_failed_at.lock().await = Some(std::time::Instant::now());
                 *state.last_error.lock().await = Some(e.clone());
                 return Err(e);
@@ -213,8 +227,6 @@ fn truncate_for_log(s: &str, max: usize) -> String {
 
 pub async fn upsert_metadata(app: &AppHandle, state: &QdrantState, args: UpsertMetadataArgs) -> Result<UpsertMetadataResult, String> {
     let (http, base) = instance(app, state).await?;
-    let id = point_id(&args.source_id, &args.path);
-    let started = std::time::Instant::now();
 
     #[derive(Debug, Deserialize)]
     struct GetPointResponse {
@@ -229,57 +241,56 @@ pub async fn upsert_metadata(app: &AppHandle, state: &QdrantState, args: UpsertM
 
     // We request the vector because an existing point may have metadata but no embedding vector
     // (e.g. previous partial upsert / failed embedding write). In that case we must re-embed.
-    let url = format!(
-        "{base}/collections/{COLLECTION_NAME}/points/{id}?with_vector=true&with_payload=true"
-    );
-    debug!(%id, url = %url, "qdrant get point");
-    let res = http
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("qdrant get point request failed: {e}"))?;
-    let status = res.status();
-    if status.as_u16() == 404 {
-        info!(
-            %id,
-            elapsed_ms = started.elapsed().as_millis(),
-            "qdrant get point: missing (should_embed=true)"
+    let id = point_id(&args.source_id, &args.path);
+    async fn read_point(
+        http: &reqwest::Client,
+        base: &str,
+        collection_name: &str,
+        id: &uuid::Uuid,
+    ) -> Result<Option<GetPointResult>, String> {
+        let url = format!(
+            "{base}/collections/{collection_name}/points/{id}?with_vector=true&with_payload=true"
         );
-        return Ok(UpsertMetadataResult { should_embed: true });
+        let res = http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("qdrant get point request failed: {e}"))?;
+        let status = res.status();
+        if status.as_u16() == 404 {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            let text = res.text().await.unwrap_or_default();
+            return Err(format!("Failed to read existing point: HTTP {}: {text}", status));
+        }
+        let json: GetPointResponse = res.json().await.map_err(|e| e.to_string())?;
+        Ok(json.result)
     }
-    if !status.is_success() {
-        let text = res.text().await.unwrap_or_default();
-        warn!(%id, http_status = %status, body = %text, "qdrant get point failed");
-        return Err(format!(
-            "Failed to read existing point: HTTP {}: {text}",
-            status
-        ));
-    }
-    let json: GetPointResponse = res.json().await.map_err(|e| e.to_string())?;
-    let existing_hash = json
-        .result
+
+    let content_point = read_point(&http, &base, CONTENT_COLLECTION_NAME, &id).await?;
+    let metadata_point = read_point(&http, &base, METADATA_COLLECTION_NAME, &id).await?;
+
+    let existing_hash = content_point
         .as_ref()
         .and_then(|r| r.payload.clone())
         .and_then(|p| p.get("contentHash").cloned())
         .and_then(|v| v.as_str().map(|s| s.to_string()));
-
-    let has_vector = json
-        .result
+    let content_has_vector = content_point
         .as_ref()
         .and_then(|r| r.vector.as_ref())
         .is_some_and(|v| v.len() == VECTOR_DIM);
-
+    let metadata_has_vector = metadata_point
+        .as_ref()
+        .and_then(|r| r.vector.as_ref())
+        .is_some_and(|v| v.len() == VECTOR_DIM);
     let hash_matches = existing_hash.as_deref() == Some(args.content_hash.as_str());
-    let should_embed = !(hash_matches && has_vector);
-    info!(
-        %id,
-        should_embed,
-        hash_matches,
-        has_vector,
-        elapsed_ms = started.elapsed().as_millis(),
-        "qdrant get point: ok"
-    );
-    Ok(UpsertMetadataResult { should_embed })
+    let should_embed_content = !(hash_matches && content_has_vector);
+    let should_embed_metadata = !(hash_matches && metadata_has_vector);
+    Ok(UpsertMetadataResult {
+        should_embed_content,
+        should_embed_metadata,
+    })
 }
 
 pub async fn upsert_embedding(app: &AppHandle, state: &QdrantState, args: UpsertEmbeddingArgs) -> Result<(), String> {
@@ -293,7 +304,6 @@ pub async fn upsert_embedding(app: &AppHandle, state: &QdrantState, args: Upsert
 
     let (http, base) = instance(app, state).await?;
     let id = point_id(&args.source_id, &args.path);
-    let started = std::time::Instant::now();
 
     #[derive(Debug, Serialize)]
     struct UpsertBody<'a> {
@@ -306,10 +316,22 @@ pub async fn upsert_embedding(app: &AppHandle, state: &QdrantState, args: Upsert
         payload: serde_json::Value,
     }
 
+    let file_name = std::path::Path::new(&args.path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_string();
+    let extension = std::path::Path::new(&args.path)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     let payload = serde_json::json!({
         "sourceId": args.source_id,
         "path": args.path,
         "contentHash": args.content_hash,
+        "fileName": file_name,
+        "extension": extension,
     });
     let body = UpsertBody {
         points: vec![Point {
@@ -319,8 +341,7 @@ pub async fn upsert_embedding(app: &AppHandle, state: &QdrantState, args: Upsert
         }],
     };
 
-    let url = format!("{base}/collections/{COLLECTION_NAME}/points?wait=true");
-    debug!(%id, url = %url, "qdrant upsert point");
+    let url = format!("{base}/collections/{CONTENT_COLLECTION_NAME}/points?wait=true");
     let res = http
         .put(&url)
         .json(&body)
@@ -330,10 +351,61 @@ pub async fn upsert_embedding(app: &AppHandle, state: &QdrantState, args: Upsert
     let status = res.status();
     if !status.is_success() {
         let text = res.text().await.unwrap_or_default();
-        warn!(%id, http_status = %status, body = %text, "qdrant upsert failed");
         return Err(format!("Failed to upsert point: HTTP {}: {text}", status));
     }
-    info!(%id, elapsed_ms = started.elapsed().as_millis(), "qdrant upsert ok");
+    Ok(())
+}
+
+pub async fn upsert_metadata_embedding(
+    app: &AppHandle,
+    state: &QdrantState,
+    args: UpsertMetadataEmbeddingArgs,
+) -> Result<(), String> {
+    if args.metadata_embedding.len() != VECTOR_DIM {
+        return Err(format!(
+            "Metadata embedding length {} does not match expected dimensions {}.",
+            args.metadata_embedding.len(),
+            VECTOR_DIM
+        ));
+    }
+    let (http, base) = instance(app, state).await?;
+    let id = point_id(&args.source_id, &args.path);
+    let file_name = std::path::Path::new(&args.path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_string();
+    let extension = std::path::Path::new(&args.path)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let payload = serde_json::json!({
+        "sourceId": args.source_id,
+        "path": args.path,
+        "contentHash": args.content_hash,
+        "fileName": file_name,
+        "extension": extension,
+    });
+    let body = serde_json::json!({
+        "points": [{
+            "id": id.to_string(),
+            "vector": args.metadata_embedding,
+            "payload": payload
+        }]
+    });
+    let url = format!("{base}/collections/{METADATA_COLLECTION_NAME}/points?wait=true");
+    let res = http
+        .put(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("qdrant metadata upsert request failed: {e}"))?;
+    let status = res.status();
+    if !status.is_success() {
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("Failed to upsert metadata point: HTTP {}: {text}", status));
+    }
     Ok(())
 }
 
@@ -347,7 +419,6 @@ pub async fn semantic_search(app: &AppHandle, state: &QdrantState, args: Semanti
     }
     let limit = args.limit.unwrap_or(16).clamp(1, 256);
     let (http, base) = instance(app, state).await?;
-    let started = std::time::Instant::now();
 
     #[derive(Debug, Serialize)]
     struct QueryBody<'a> {
@@ -402,8 +473,12 @@ pub async fn semantic_search(app: &AppHandle, state: &QdrantState, args: Semanti
         },
     };
 
-    let url = format!("{base}/collections/{COLLECTION_NAME}/points/query");
-    debug!(url = %url, limit, source_id = %body.filter.must[0].r#match.value, "qdrant query");
+    let channel = args.channel.unwrap_or(SemanticSearchChannel::Content);
+    let collection = match channel {
+        SemanticSearchChannel::Content => CONTENT_COLLECTION_NAME,
+        SemanticSearchChannel::Metadata => METADATA_COLLECTION_NAME,
+    };
+    let url = format!("{base}/collections/{collection}/points/query");
     let res = http
         .post(&url)
         .json(&body)
@@ -413,7 +488,6 @@ pub async fn semantic_search(app: &AppHandle, state: &QdrantState, args: Semanti
     let status = res.status();
     if !status.is_success() {
         let text = res.text().await.unwrap_or_default();
-        warn!(http_status = %status, body = %text, "qdrant query failed");
         return Err(format!("Failed to query points: HTTP {}: {text}", status));
     }
     // If decoding fails, include a snippet of the response body (Qdrant sometimes returns a
@@ -444,17 +518,11 @@ pub async fn semantic_search(app: &AppHandle, state: &QdrantState, args: Semanti
             });
         }
     }
-    info!(
-        results = out.len(),
-        elapsed_ms = started.elapsed().as_millis(),
-        "qdrant query ok"
-    );
     Ok(out)
 }
 
 pub async fn count_points(app: &AppHandle, state: &QdrantState, args: CountPointsArgs) -> Result<CountPointsResult, String> {
     let (http, base) = instance(app, state).await?;
-    let started = std::time::Instant::now();
 
     #[derive(Debug, Serialize)]
     struct CountBody {
@@ -496,8 +564,7 @@ pub async fn count_points(app: &AppHandle, state: &QdrantState, args: CountPoint
         },
     };
 
-    let url = format!("{base}/collections/{COLLECTION_NAME}/points/count");
-    debug!(url = %url, "qdrant count points");
+    let url = format!("{base}/collections/{CONTENT_COLLECTION_NAME}/points/count");
     let res = http
         .post(&url)
         .json(&body)
@@ -507,7 +574,6 @@ pub async fn count_points(app: &AppHandle, state: &QdrantState, args: CountPoint
     let status = res.status();
     if !status.is_success() {
         let text = res.text().await.unwrap_or_default();
-        warn!(http_status = %status, body = %text, "qdrant count failed");
         return Err(format!("Failed to count points: HTTP {}: {text}", status));
     }
     let text = res.text().await.map_err(|e| format!("Failed to read response body: {e}"))?;
@@ -515,11 +581,6 @@ pub async fn count_points(app: &AppHandle, state: &QdrantState, args: CountPoint
         let snippet = truncate_for_log(&text, 1400);
         format!("Failed to decode Qdrant count response: {e}. Body: {snippet}")
     })?;
-    info!(
-        count = json.result.count,
-        elapsed_ms = started.elapsed().as_millis(),
-        "qdrant count ok"
-    );
     Ok(CountPointsResult { count: json.result.count })
 }
 
@@ -559,7 +620,6 @@ pub async fn status(_app: &AppHandle, state: &QdrantState) -> Result<QdrantStatu
     match quick_http_ready(&http, &trimmed).await {
         Ok(()) => Ok(QdrantStatus { base_url: trimmed }),
         Err(e) => {
-            warn!(error = %e, "qdrant: status probe failed (entering cooldown)");
             *state.last_failed_at.lock().await = Some(std::time::Instant::now());
             *state.last_error.lock().await = Some(e.clone());
             Err(e)
@@ -588,7 +648,6 @@ pub struct DeletePointsForPathsResult {
 
 pub async fn delete_all_points(app: &AppHandle, state: &QdrantState, args: DeleteAllPointsArgs) -> Result<(), String> {
     let (http, base) = instance(app, state).await?;
-    let started = std::time::Instant::now();
 
     #[derive(Debug, Serialize)]
     struct DeleteBody {
@@ -618,26 +677,20 @@ pub async fn delete_all_points(app: &AppHandle, state: &QdrantState, args: Delet
             }],
         },
     };
-
-    let url = format!("{base}/collections/{COLLECTION_NAME}/points/delete?wait=true");
-    debug!(url = %url, source_id = %args.source_id, "qdrant delete points");
-    let res = http
-        .post(&url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("qdrant delete request failed: {e}"))?;
-    let status = res.status();
-    if !status.is_success() {
-        let text = res.text().await.unwrap_or_default();
-        warn!(http_status = %status, body = %text, "qdrant delete failed");
-        return Err(format!("Failed to delete points: HTTP {}: {text}", status));
+    for collection in [CONTENT_COLLECTION_NAME, METADATA_COLLECTION_NAME] {
+        let url = format!("{base}/collections/{collection}/points/delete?wait=true");
+        let res = http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("qdrant delete request failed: {e}"))?;
+        let status = res.status();
+        if !status.is_success() {
+            let text = res.text().await.unwrap_or_default();
+            return Err(format!("Failed to delete points: HTTP {}: {text}", status));
+        }
     }
-    info!(
-        source_id = %args.source_id,
-        elapsed_ms = started.elapsed().as_millis(),
-        "qdrant delete ok"
-    );
     Ok(())
 }
 
@@ -647,7 +700,6 @@ pub async fn delete_points_for_paths(
     args: DeletePointsForPathsArgs,
 ) -> Result<DeletePointsForPathsResult, String> {
     let (http, base) = instance(app, state).await?;
-    let started = std::time::Instant::now();
 
     #[derive(Debug, Serialize)]
     struct DeleteBody {
@@ -674,37 +726,25 @@ pub async fn delete_points_for_paths(
         let body = DeleteBody {
             points: chunk.to_vec(),
         };
-        let url = format!("{base}/collections/{COLLECTION_NAME}/points/delete?wait=true");
-        debug!(
-            url = %url,
-            source_id = %args.source_id,
-            chunk_size = chunk.len(),
-            "qdrant delete points by ids"
-        );
-        let res = http
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("qdrant delete-by-path request failed: {e}"))?;
-        let status = res.status();
-        if !status.is_success() {
-            let text = res.text().await.unwrap_or_default();
-            warn!(http_status = %status, body = %text, "qdrant delete-by-path failed");
-            return Err(format!(
-                "Failed to delete points for selected files: HTTP {}: {text}",
-                status
-            ));
+        for collection in [CONTENT_COLLECTION_NAME, METADATA_COLLECTION_NAME] {
+            let url = format!("{base}/collections/{collection}/points/delete?wait=true");
+            let res = http
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("qdrant delete-by-path request failed: {e}"))?;
+            let status = res.status();
+            if !status.is_success() {
+                let text = res.text().await.unwrap_or_default();
+                return Err(format!(
+                    "Failed to delete points for selected files: HTTP {}: {text}",
+                    status
+                ));
+            }
         }
         deleted_count = deleted_count.saturating_add(chunk.len() as u64);
     }
-
-    info!(
-        source_id = %args.source_id,
-        deleted_count,
-        elapsed_ms = started.elapsed().as_millis(),
-        "qdrant delete-by-path ok"
-    );
     Ok(DeletePointsForPathsResult { deleted_count })
 }
 

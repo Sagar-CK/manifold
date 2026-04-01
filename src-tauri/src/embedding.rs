@@ -1,5 +1,6 @@
-use crate::{compute_sha256, is_under_dir, normalize_ext, ScanFilesArgs};
+use crate::{compute_sha256, is_under_dir, normalize_ext, normalize_path_key, ScanFilesArgs};
 use crate::qdrant;
+use crate::text_index;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -95,6 +96,17 @@ fn mime_type_for_ext(ext: &str) -> Option<&'static str> {
     }
 }
 
+fn supports_text_extraction(ext: &str) -> bool {
+    matches!(ext, "png" | "jpg" | "jpeg" | "pdf")
+}
+
+fn metadata_text_for_path(path: &std::path::Path) -> String {
+    let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or_default();
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or_default().to_ascii_lowercase();
+    // Intentionally exclude full path so metadata semantic matching is driven by file name.
+    format!("filename: {file_name}\nextension: {ext}")
+}
+
 fn read_gemini_api_key() -> Result<String, String> {
     let key = std::env::var("MANIFOLD_GEMINI_API_KEY")
         .ok()
@@ -154,6 +166,16 @@ fn emit_done(app: &tauri::AppHandle) {
     let _ = app.emit("embedding://done", serde_json::json!({ "ok": true }));
 }
 
+#[derive(Debug)]
+struct PendingEmbeddingFile {
+    path: PathBuf,
+    ext: String,
+    mime: Option<&'static str>,
+    content_hash: String,
+    should_embed_content: bool,
+    should_embed_metadata: bool,
+}
+
 async fn wait_if_paused(
     pause_rx: &mut watch::Receiver<bool>,
     cancel_flag: &Arc<AtomicBool>,
@@ -172,13 +194,19 @@ async fn wait_if_paused(
     }
 }
 
-async fn scan_total(args: &ScanFilesArgs) -> u64 {
+async fn collect_pending_files(
+    app: &tauri::AppHandle,
+    qdrant_state: &qdrant::QdrantState,
+    args: &ScanFilesArgs,
+    source_id: &str,
+) -> Result<Vec<PendingEmbeddingFile>, String> {
     let include_dirs: Vec<PathBuf> = args.include.iter().map(PathBuf::from).collect();
     let exclude_dirs: Vec<PathBuf> = args.exclude.iter().map(PathBuf::from).collect();
     let allowed_exts: std::collections::HashSet<String> =
         args.extensions.iter().map(|e| normalize_ext(e)).collect();
 
-    let mut total: u64 = 0;
+    let mut out: Vec<PendingEmbeddingFile> = Vec::new();
+    let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
     for root in include_dirs {
         if !root.exists() {
             continue;
@@ -195,21 +223,54 @@ async fn scan_total(args: &ScanFilesArgs) -> u64 {
             if exclude_dirs.iter().any(|ex| is_under_dir(path, ex)) {
                 continue;
             }
+            let path_key = normalize_path_key(path);
+            if !seen_paths.insert(path_key) {
+                continue;
+            }
             let ext = path
                 .extension()
                 .and_then(|s| s.to_str())
                 .map(normalize_ext);
             let Some(ext) = ext else { continue };
-            if !allowed_exts.contains(&ext) {
+            if !allowed_exts.is_empty() && !allowed_exts.contains(&ext) {
                 continue;
             }
-            if mime_type_for_ext(&ext).is_none() {
+            let mime = mime_type_for_ext(&ext);
+            let meta = match std::fs::metadata(path) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if meta.len() > MAX_FILE_BYTES {
                 continue;
             }
-            total = total.saturating_add(1);
+            let content_hash = match compute_sha256(path, 1024 * 1024 * 128) {
+                Ok(h) => h,
+                Err(_) => continue,
+            };
+            let should_embed = qdrant::upsert_metadata(
+                app,
+                qdrant_state,
+                qdrant::UpsertMetadataArgs {
+                    source_id: source_id.to_string(),
+                    path: path.to_string_lossy().to_string(),
+                    content_hash: content_hash.clone(),
+                },
+            )
+            .await?;
+            if !should_embed.should_embed_content && !should_embed.should_embed_metadata {
+                continue;
+            }
+            out.push(PendingEmbeddingFile {
+                path: path.to_path_buf(),
+                ext,
+                mime,
+                content_hash,
+                should_embed_content: should_embed.should_embed_content,
+                should_embed_metadata: should_embed.should_embed_metadata,
+            });
         }
     }
-    total
+    Ok(out)
 }
 
 #[derive(Debug, Deserialize)]
@@ -223,6 +284,22 @@ struct GeminiEmbedResponse {
 #[derive(Debug, Deserialize)]
 struct GeminiEmbeddingValues {
     values: Vec<f32>,
+}
+
+#[derive(Clone)]
+struct GeminiClient {
+    http: reqwest::Client,
+    api_key: String,
+}
+
+impl GeminiClient {
+    fn new(api_key: String) -> Result<Self, String> {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(25))
+            .build()
+            .map_err(|e| e.to_string())?;
+        Ok(Self { http, api_key })
+    }
 }
 
 fn l2_normalize_vec(mut v: Vec<f32>) -> Vec<f32> {
@@ -240,15 +317,20 @@ fn l2_normalize_vec(mut v: Vec<f32>) -> Vec<f32> {
     v
 }
 
-async fn gemini_embed_post(api_key: &str, body: serde_json::Value) -> Result<Vec<f32>, String> {
+fn format_error_chain(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut parts = vec![err.to_string()];
+    let mut source = err.source();
+    while let Some(cause) = source {
+        parts.push(cause.to_string());
+        source = cause.source();
+    }
+    parts.join(": ")
+}
+
+async fn gemini_embed_post(client: &GeminiClient, body: serde_json::Value) -> Result<Vec<f32>, String> {
     async fn sleep_ms(ms: u64) {
         tokio::time::sleep(Duration::from_millis(ms)).await;
     }
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|e| e.to_string())?;
 
     let url = format!(
         "https://generativelanguage.googleapis.com/v1beta/{}:embedContent",
@@ -260,13 +342,17 @@ async fn gemini_embed_post(api_key: &str, body: serde_json::Value) -> Result<Vec
     loop {
         attempt += 1;
         let res = client
+            .http
             .post(&url)
             .header("Content-Type", "application/json")
-            .header("x-goog-api-key", api_key)
+            .header("x-goog-api-key", &client.api_key)
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("Gemini embedContent request failed: {e}"))?;
+            .map_err(|e| {
+                tracing::error!(attempt, error = %e, "gemini embedContent request failed");
+                format!("Gemini embedContent request failed: {e}")
+            })?;
 
         let status = res.status();
         if status.is_success() {
@@ -296,10 +382,22 @@ async fn gemini_embed_post(api_key: &str, body: serde_json::Value) -> Result<Vec
         let text = res.text().await.unwrap_or_default();
         let retryable = matches!(status.as_u16(), 429 | 500 | 503);
         if retryable && attempt < 5 {
+            tracing::error!(
+                attempt,
+                status = status.as_u16(),
+                body = %text,
+                "gemini embedContent retryable failure"
+            );
             sleep_ms(backoff_ms).await;
             backoff_ms = std::cmp::min(5000, ((backoff_ms as f64) * 1.8).round() as u64);
             continue;
         }
+        tracing::error!(
+            attempt,
+            status = status.as_u16(),
+            body = %text,
+            "gemini embedContent failed"
+        );
         return Err(format!(
             "Gemini embedContent failed (HTTP {}): {}",
             status.as_u16(),
@@ -309,7 +407,7 @@ async fn gemini_embed_post(api_key: &str, body: serde_json::Value) -> Result<Vec
 }
 
 async fn embed_with_gemini(
-    api_key: &str,
+    client: &GeminiClient,
     mime_type: &str,
     bytes: Vec<u8>,
 ) -> Result<Vec<f32>, String> {
@@ -325,19 +423,98 @@ async fn embed_with_gemini(
         },
         "output_dimensionality": OUTPUT_DIM
     });
-    gemini_embed_post(api_key, body).await
+    gemini_embed_post(client, body).await
+}
+
+async fn extract_text_with_gemini(
+    client: &GeminiClient,
+    mime_type: &str,
+    bytes: Vec<u8>,
+) -> Result<String, String> {
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let body = serde_json::json!({
+        "contents": [{
+            "parts": [
+                { "text": "Extract all readable text. Return plain text only." },
+                { "inline_data": { "mime_type": mime_type, "data": b64 } }
+            ]
+        }]
+    });
+    let url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+    let res = client
+        .http
+        .post(url)
+        .header("Content-Type", "application/json")
+        .header("x-goog-api-key", &client.api_key)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| {
+            let chain = format_error_chain(&e);
+            tracing::error!(error = %chain, "gemini text extraction request failed");
+            format!("Gemini text extraction request failed: {chain}")
+        })?;
+    let status = res.status();
+    let text = res.text().await.unwrap_or_default();
+    if !status.is_success() {
+        let api_message = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| {
+                v.get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str())
+                    .map(|s| s.to_string())
+            });
+        tracing::error!(
+            status = status.as_u16(),
+            api_message = ?api_message,
+            body = %text,
+            "gemini text extraction failed"
+        );
+        let details = api_message.unwrap_or(text);
+        return Err(format!(
+            "Gemini text extraction failed (HTTP {}): {}",
+            status.as_u16(),
+            details
+        ));
+    }
+    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let parts = v
+        .get("candidates")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|c| c.get("content"))
+        .and_then(|c| c.get("parts"))
+        .and_then(|p| p.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut out = String::new();
+    for p in parts {
+        if let Some(t) = p.get("text").and_then(|x| x.as_str()) {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(t);
+        }
+    }
+    Ok(out)
 }
 
 /// Embed a search query using the same API key env as file embedding (Rust-side).
 pub async fn embed_query_text(text: &str) -> Result<Vec<f32>, String> {
     let api_key = read_gemini_api_key()?;
+    let client = GeminiClient::new(api_key)?;
+    embed_query_text_with_client(&client, text).await
+}
+
+async fn embed_query_text_with_client(client: &GeminiClient, text: &str) -> Result<Vec<f32>, String> {
     let body = serde_json::json!({
         "content": {
             "parts": [{ "text": text }]
         },
         "output_dimensionality": OUTPUT_DIM
     });
-    gemini_embed_post(&api_key, body).await
+    gemini_embed_post(client, body).await
 }
 
 pub async fn start(
@@ -377,16 +554,74 @@ pub async fn start(
 
     let app2 = app.clone();
     tauri::async_runtime::spawn(async move {
+        let job_started = Instant::now();
         let mut last_emit = Instant::now();
+        let gemini = match GeminiClient::new(api_key.clone()) {
+            Ok(c) => c,
+            Err(e) => {
+                emit_error(&app2, &e);
+                let mgr = app2.state::<EmbeddingManager>();
+                let mut s = mgr.state.lock().await;
+                s.running = false;
+                s.phase = EmbeddingJobPhase::Error;
+                s.message = e;
+                emit_status(
+                    &app2,
+                    &EmbeddingJobStatus {
+                        phase: s.phase.clone(),
+                        processed: s.processed,
+                        total: s.total,
+                        message: s.message.clone(),
+                    },
+                );
+                return;
+            }
+        };
+        tracing::info!(
+            source_id = %source_id,
+            include_count = args.include.len(),
+            exclude_count = args.exclude.len(),
+            extensions_count = args.extensions.len(),
+            "embedding job started"
+        );
 
-        let total = scan_total(&args).await;
+        let qdrant_state = app2.state::<qdrant::QdrantState>();
+        let scan_started = Instant::now();
+        let pending_files = match collect_pending_files(&app2, &qdrant_state, &args, &source_id).await {
+            Ok(v) => v,
+            Err(e) => {
+                emit_error(&app2, &e);
+                let mgr = app2.state::<EmbeddingManager>();
+                let mut s = mgr.state.lock().await;
+                s.running = false;
+                s.phase = EmbeddingJobPhase::Error;
+                s.message = e;
+                emit_status(
+                    &app2,
+                    &EmbeddingJobStatus {
+                        phase: s.phase.clone(),
+                        processed: s.processed,
+                        total: s.total,
+                        message: s.message.clone(),
+                    },
+                );
+                return;
+            }
+        };
+        let total = pending_files.len() as u64;
+        tracing::info!(
+            source_id = %source_id,
+            total_files = total,
+            scan_elapsed_ms = scan_started.elapsed().as_millis(),
+            "embedding pending scan completed"
+        );
         {
             let mgr = app2.state::<EmbeddingManager>();
             let mut s = mgr.state.lock().await;
             s.total = total;
             s.phase = EmbeddingJobPhase::Embedding;
             s.message = if total == 0 {
-                "No supported files found to embed.".to_string()
+                "No new or changed files to embed.".to_string()
             } else {
                 format!("Embedding {total} file(s)…")
             };
@@ -420,135 +655,203 @@ pub async fn start(
             return;
         }
 
-        let include_dirs: Vec<PathBuf> = args.include.iter().map(PathBuf::from).collect();
-        let exclude_dirs: Vec<PathBuf> = args.exclude.iter().map(PathBuf::from).collect();
-        let allowed_exts: std::collections::HashSet<String> =
-            args.extensions.iter().map(|e| normalize_ext(e)).collect();
-
         let mut processed: u64 = 0;
-
-        'outer: for root in include_dirs {
-            if !root.exists() {
-                continue;
+        for pending in pending_files {
+            if cancel_flag.load(Ordering::Relaxed) {
+                break;
             }
-            for entry in WalkDir::new(root).follow_links(false).into_iter() {
-                if cancel_flag.load(Ordering::Relaxed) {
-                    break 'outer;
-                }
-                if let Err(e) = wait_if_paused(&mut pause_rx, &cancel_flag).await {
-                    emit_error(&app2, &e);
-                    break 'outer;
-                }
+            if let Err(e) = wait_if_paused(&mut pause_rx, &cancel_flag).await {
+                emit_error(&app2, &e);
+                break;
+            }
 
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(_) => continue,
+            let path = pending.path.as_path();
+            let ext = pending.ext.clone();
+            let mime = pending.mime;
+            let sha256 = pending.content_hash;
+            let file_path = path.to_string_lossy().to_string();
+            let file_started = Instant::now();
+            let bytes = if pending.should_embed_content {
+                match std::fs::read(path) {
+                    Ok(b) => Some(b),
+                    Err(e) => {
+                        emit_error(&app2, &e.to_string());
+                        emit_file_failed(&app2, path, &format!("file read failed: {e}"));
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+                let content_embed_elapsed_ms: u128;
+                let metadata_embed_elapsed_ms: u128;
+                let text_extract_elapsed_ms: u128;
+                let mime_owned = mime.map(|m| m.to_string());
+                let metadata_text = metadata_text_for_path(path);
+                let content_handle = {
+                    let gemini = gemini.clone();
+                    let mime = mime_owned.clone();
+                    let bytes = bytes.clone();
+                    tokio::spawn(async move {
+                        if pending.should_embed_content {
+                            if let (Some(mime), Some(raw)) = (mime, bytes) {
+                                let started = Instant::now();
+                                let embedding = embed_with_gemini(&gemini, &mime, raw).await?;
+                                Ok::<(Option<Vec<f32>>, u128), String>((
+                                    Some(embedding),
+                                    started.elapsed().as_millis(),
+                                ))
+                            } else {
+                                Ok::<(Option<Vec<f32>>, u128), String>((None, 0))
+                            }
+                        } else {
+                            Ok::<(Option<Vec<f32>>, u128), String>((None, 0))
+                        }
+                    })
                 };
-                if !entry.file_type().is_file() {
-                    continue;
-                }
-                let path = entry.path();
-                if exclude_dirs.iter().any(|ex| is_under_dir(path, ex)) {
-                    continue;
-                }
-
-                let ext = path
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .map(normalize_ext);
-                let Some(ext) = ext else { continue };
-                if !allowed_exts.contains(&ext) {
-                    continue;
-                }
-                let Some(mime) = mime_type_for_ext(&ext) else {
-                    continue;
+                let metadata_handle = {
+                    let gemini = gemini.clone();
+                    tokio::spawn(async move {
+                        if pending.should_embed_metadata {
+                            let started = Instant::now();
+                            let metadata_embedding =
+                                embed_query_text_with_client(&gemini, &metadata_text).await?;
+                            Ok::<(Option<Vec<f32>>, u128), String>((
+                                Some(metadata_embedding),
+                                started.elapsed().as_millis(),
+                            ))
+                        } else {
+                            Ok::<(Option<Vec<f32>>, u128), String>((None, 0))
+                        }
+                    })
+                };
+                let text_handle = {
+                    let gemini = gemini.clone();
+                    let mime = mime_owned;
+                    tokio::spawn(async move {
+                        if pending.should_embed_content && supports_text_extraction(&ext) {
+                            if let (Some(mime), Some(raw)) = (mime, bytes) {
+                                let started = Instant::now();
+                                let extracted = extract_text_with_gemini(&gemini, &mime, raw).await.ok();
+                                Ok::<(Option<String>, u128), String>((
+                                    extracted,
+                                    started.elapsed().as_millis(),
+                                ))
+                            } else {
+                                Ok::<(Option<String>, u128), String>((None, 0))
+                            }
+                        } else {
+                            Ok::<(Option<String>, u128), String>((None, 0))
+                        }
+                    })
                 };
 
-                // Size cap early, before hashing/embedding.
-                let meta = match std::fs::metadata(path) {
-                    Ok(m) => m,
-                    Err(_) => continue,
+                let content_res = match content_handle.await {
+                    Ok(v) => v,
+                    Err(e) => Err(format!("content embedding task failed: {e}")),
                 };
-                if meta.len() > MAX_FILE_BYTES {
-                    continue;
-                }
+                let metadata_res = match metadata_handle.await {
+                    Ok(v) => v,
+                    Err(e) => Err(format!("metadata embedding task failed: {e}")),
+                };
+                let text_res = match text_handle.await {
+                    Ok(v) => v,
+                    Err(e) => Err(format!("text extraction task failed: {e}")),
+                };
 
-                // Hash (used for dedupe + Qdrant should_embed check).
-                let sha256 = match compute_sha256(path, 1024 * 1024 * 128) {
-                    Ok(h) => h,
+                let (content_embedding, content_elapsed) = match content_res {
+                    Ok(v) => v,
                     Err(e) => {
                         emit_error(&app2, &e);
-                        emit_file_failed(&app2, path, &format!("hash failed: {e}"));
+                        emit_file_failed(&app2, path, &format!("embedding request failed: {e}"));
                         continue;
                     }
                 };
+                content_embed_elapsed_ms = content_elapsed;
 
-                // Check if embedding is needed.
-                let qdrant_state = app2.state::<qdrant::QdrantState>();
-                let should_embed = match qdrant::upsert_metadata(
-                    &app2,
-                    &qdrant_state,
-                    qdrant::UpsertMetadataArgs {
-                        source_id: source_id.clone(),
-                        path: path.to_string_lossy().to_string(),
-                        content_hash: sha256.clone(),
-                    },
-                )
-                .await
-                {
-                    Ok(r) => r.should_embed,
+                let (metadata_embedding, metadata_elapsed) = match metadata_res {
+                    Ok(v) => v,
                     Err(e) => {
                         emit_error(&app2, &e);
-                        emit_file_failed(&app2, path, &format!("metadata upsert failed: {e}"));
+                        emit_file_failed(&app2, path, &format!("metadata embedding failed: {e}"));
                         continue;
                     }
                 };
+                metadata_embed_elapsed_ms = metadata_elapsed;
 
-                if should_embed {
-                    let bytes = match std::fs::read(path) {
-                        Ok(b) => b,
-                        Err(e) => {
-                            emit_error(&app2, &e.to_string());
-                            emit_file_failed(&app2, path, &format!("file read failed: {e}"));
-                            continue;
-                        }
-                    };
-                    let embedding = match embed_with_gemini(&api_key, mime, bytes).await {
-                        Ok(v) => v,
-                        Err(e) => {
-                            emit_error(&app2, &e);
-                            emit_file_failed(&app2, path, &format!("embedding request failed: {e}"));
-                            continue;
-                        }
-                    };
-                    if embedding.len() != OUTPUT_DIM {
-                        let msg = format!(
-                            "Unexpected embedding length {}; expected {}",
-                            embedding.len(),
-                            OUTPUT_DIM
-                        );
-                        emit_error(&app2, &msg);
-                        emit_file_failed(&app2, path, &msg);
-                        continue;
-                    }
+                let (extracted_text, text_elapsed) = match text_res {
+                    Ok(v) => v,
+                    Err(_) => (None, 0),
+                };
+                text_extract_elapsed_ms = text_elapsed;
 
-                    let upsert_res = qdrant::upsert_embedding(
+                if let Some(embedding) = content_embedding {
+                    if let Err(e) = qdrant::upsert_embedding(
                         &app2,
                         &qdrant_state,
                         qdrant::UpsertEmbeddingArgs {
                             source_id: source_id.clone(),
-                            path: path.to_string_lossy().to_string(),
-                            content_hash: sha256,
+                            path: file_path.clone(),
+                            content_hash: sha256.clone(),
                             embedding,
                         },
                     )
-                    .await;
-                    if let Err(e) = upsert_res {
+                    .await
+                    {
                         emit_error(&app2, &e);
                         emit_file_failed(&app2, path, &format!("vector upsert failed: {e}"));
                         continue;
                     }
                 }
+
+                if let Some(metadata_embedding) = metadata_embedding {
+                    if let Err(e) = qdrant::upsert_metadata_embedding(
+                        &app2,
+                        &qdrant_state,
+                        qdrant::UpsertMetadataEmbeddingArgs {
+                            source_id: source_id.clone(),
+                            path: file_path.clone(),
+                            content_hash: sha256.clone(),
+                            metadata_embedding,
+                        },
+                    )
+                    .await
+                    {
+                        emit_error(&app2, &e);
+                        emit_file_failed(&app2, path, &format!("metadata vector upsert failed: {e}"));
+                        continue;
+                    }
+                }
+
+                let direct_match_text = match extracted_text {
+                    Some(extracted) if !extracted.trim().is_empty() => {
+                        format!("{metadata_text}\n{extracted}")
+                    }
+                    _ => metadata_text.clone(),
+                };
+                let normalized = text_index::normalize_text(&direct_match_text);
+                if !normalized.is_empty() {
+                    let _ = text_index::upsert_text(
+                        &app2,
+                        text_index::UpsertTextArgs {
+                            source_id: source_id.clone(),
+                            path: file_path.clone(),
+                            content_hash: sha256.clone(),
+                            normalized_text: normalized,
+                        },
+                    );
+                }
+                tracing::info!(
+                    path = %file_path,
+                    source_id = %source_id,
+                    should_embed_content = pending.should_embed_content,
+                    should_embed_metadata = pending.should_embed_metadata,
+                    content_embed_elapsed_ms,
+                    metadata_embed_elapsed_ms,
+                    text_extract_elapsed_ms,
+                    file_total_elapsed_ms = file_started.elapsed().as_millis(),
+                    "embedding file completed"
+                );
 
                 processed = processed.saturating_add(1);
                 if should_emit(&mut last_emit, processed, total) {
@@ -572,7 +875,6 @@ pub async fn start(
                     );
                     last_emit = Instant::now();
                 }
-            }
         }
 
         let cancelled = cancel_flag.load(Ordering::Relaxed);
@@ -588,6 +890,13 @@ pub async fn start(
             s.message = "All files embedded.".to_string();
             emit_done(&app2);
         }
+        tracing::info!(
+            source_id = %source_id,
+            processed_files = processed,
+            cancelled,
+            total_elapsed_ms = job_started.elapsed().as_millis(),
+            "embedding job finished"
+        );
         emit_status(
             &app2,
             &EmbeddingJobStatus {

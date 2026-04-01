@@ -4,7 +4,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { homeDir } from "@tauri-apps/api/path";
 import { useEffect, useState } from "react";
-import type { LocalConfig, SupportedExt } from "../lib/localConfig";
+import { collapseIncludeFolders, type LocalConfig, type SupportedExt } from "../lib/localConfig";
 import { saveConfig } from "../lib/localConfig";
 import { PageHeader } from "../components/PageHeader";
 import { EmbeddingStatusPanel } from "../components/EmbeddingStatusPanel";
@@ -68,17 +68,10 @@ export function SettingsPage({
   hasPendingEmbeds,
   embedProgress,
   extOptions,
-  needsEmbedding,
-  embedPlan,
-  embedPromptDismissed,
   embeddingPhase,
   lastEmbedError,
   embedFailures,
-  onContinueEmbedding,
-  onPauseEmbedding,
-  onResumeEmbedding,
   onCancelEmbedding,
-  onCancelEmbeddingPrompt,
 }: {
   cfg: LocalConfig;
   setCfg: (next: LocalConfig) => void;
@@ -90,13 +83,6 @@ export function SettingsPage({
     status: string;
   };
   extOptions: SupportedExt[];
-  needsEmbedding: boolean;
-  embedPlan: {
-    totalSelected: number | null;
-    pending: number | null;
-    warning: string | null;
-  };
-  embedPromptDismissed: boolean;
   embeddingPhase:
     | "idle"
     | "scanning"
@@ -107,18 +93,13 @@ export function SettingsPage({
     | "error";
   lastEmbedError: string | null;
   embedFailures: Array<{ path: string; reason: string }>;
-  onContinueEmbedding: () => Promise<void>;
-  onPauseEmbedding: () => Promise<void>;
-  onResumeEmbedding: () => Promise<void>;
   onCancelEmbedding: () => Promise<void>;
-  onCancelEmbeddingPrompt: () => void;
 }) {
   const [homePath, setHomePath] = useState("");
   const [clearingIndex, setClearingIndex] = useState(false);
   const [clearIndexError, setClearIndexError] = useState<string | null>(null);
   const [confirmClearOpen, setConfirmClearOpen] = useState(false);
   const [embeddedCount, setEmbeddedCount] = useState<number | null>(null);
-  const [continueError, setContinueError] = useState<string | null>(null);
   const [includeToRemove, setIncludeToRemove] = useState<string | null>(null);
   const [confirmRemoveIncludeOpen, setConfirmRemoveIncludeOpen] = useState(false);
   const [removeIncludeLoading, setRemoveIncludeLoading] = useState(false);
@@ -139,6 +120,18 @@ export function SettingsPage({
   function updateConfig(next: LocalConfig) {
     setCfg(next);
     saveConfig(next);
+  }
+
+  async function refreshEmbeddedCount(sourceId: string) {
+    try {
+      const res = (await invoke("qdrant_count_points", {
+        args: { sourceId },
+      })) as { count: number } | { count: string };
+      const count = typeof res.count === "string" ? Number.parseInt(res.count, 10) : res.count;
+      setEmbeddedCount(Number.isFinite(count) ? count : 0);
+    } catch {
+      setEmbeddedCount(null);
+    }
   }
 
   function formatUsd(amount: number) {
@@ -166,7 +159,9 @@ export function SettingsPage({
     try {
       await invoke("qdrant_delete_all_points", { args: { sourceId: cfg.sourceId } });
       // Bump sourceId to force a clean re-index cycle + avoid any stale per-source caches.
-      updateConfig({ ...cfg, sourceId: crypto.randomUUID() });
+      const nextSourceId = crypto.randomUUID();
+      updateConfig({ ...cfg, sourceId: nextSourceId });
+      await refreshEmbeddedCount(nextSourceId);
       setConfirmClearOpen(false);
     } catch (e) {
       setClearIndexError(String(e));
@@ -217,7 +212,12 @@ export function SettingsPage({
           },
         });
       }
-      updateConfig({ ...cfg, include: cfg.include.filter((x) => x !== includeToRemove) });
+      const nextInclude = cfg.include.filter((x) => x !== includeToRemove);
+      updateConfig({ ...cfg, include: nextInclude });
+      if (nextInclude.length === 0 && (embedding || hasPendingEmbeds)) {
+        await onCancelEmbedding();
+      }
+      await refreshEmbeddedCount(cfg.sourceId);
       setConfirmRemoveIncludeOpen(false);
       setIncludeToRemove(null);
       setRemoveIncludeAffectedCount(null);
@@ -309,7 +309,7 @@ export function SettingsPage({
 
   function confirmAddIncludeFolder() {
     if (!includeToAdd) return;
-    updateConfig({ ...cfg, include: [...cfg.include, includeToAdd] });
+    updateConfig({ ...cfg, include: collapseIncludeFolders([...cfg.include, includeToAdd]) });
     setConfirmAddIncludeOpen(false);
     setAddIncludeError(null);
     setIncludeToAdd(null);
@@ -330,10 +330,6 @@ export function SettingsPage({
       return dir && dir.trim().length > 0 ? dir.trim() : null;
     }
   }
-
-  const hasEmbeddingIssue =
-    embedProgress.status.startsWith("Embedding error:") ||
-    embedProgress.status.startsWith("Missing ");
 
   function formatPathForDisplay(path: string) {
     const normalize = (value: string) => value.replace(/\\/g, "/").replace(/\/+$/, "");
@@ -370,28 +366,15 @@ export function SettingsPage({
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
-
     async function loadEmbeddedCount() {
-      try {
-        const res = (await invoke("qdrant_count_points", {
-          args: { sourceId: cfg.sourceId },
-        })) as { count: number } | { count: string };
-        const count = typeof res.count === "string" ? Number.parseInt(res.count, 10) : res.count;
-        if (!cancelled) setEmbeddedCount(Number.isFinite(count) ? count : 0);
-      } catch {
-        if (!cancelled) setEmbeddedCount(null);
-      }
+      await refreshEmbeddedCount(cfg.sourceId);
     }
 
     void loadEmbeddedCount();
-    return () => {
-      cancelled = true;
-    };
   }, [cfg.sourceId, clearingIndex]);
 
   return (
-    <section>
+    <section className="flex min-h-[calc(100dvh-4rem)] flex-col">
       <div className="relative mb-8">
         <Link
           to="/"
@@ -419,7 +402,8 @@ export function SettingsPage({
                 onClick={async () => {
                   const dir = await pickFolder("Add include folder");
                   if (!dir) return;
-                  if (cfg.include.includes(dir)) return;
+                  const nextIncludes = collapseIncludeFolders([...cfg.include, dir]);
+                  if (nextIncludes.length === cfg.include.length) return;
                   await prepareAddIncludeFolder(dir);
                 }}
               >
@@ -500,7 +484,7 @@ export function SettingsPage({
         </div>
 
         <div className="p-2">
-          <div className="app-section-title">Embedding & Search</div>
+          <div className="app-section-title">Indexing & Search</div>
 
           <div className="mt-4">
             <div className="app-label">File types</div>
@@ -604,7 +588,7 @@ export function SettingsPage({
           <div className="min-w-0">
             <div className="app-section-title text-black">Delete all vectors</div>
             <div className="app-muted mt-0.5 max-w-lg">
-              Clears the local Qdrant index (embeddings only). Your files will not be deleted from disk. Currently, {liveIndexedCount} file(s) are indexed.
+              Clears the local Qdrant index (vectors only). Your files will not be deleted from disk. Currently, {liveIndexedCount} file(s) are indexed.
             </div>
             {clearIndexError ? (
               <div className="mt-2 text-sm font-medium text-rose-700">Error: {clearIndexError}</div>
@@ -676,7 +660,7 @@ export function SettingsPage({
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle className="text-black">Add folder and continue with embedding estimate?</AlertDialogTitle>
+            <AlertDialogTitle className="text-black">Add folder and continue with indexing estimate?</AlertDialogTitle>
             <AlertDialogDescription>
               This folder has {includeAddEstimate?.total ?? "..."} selected file(s).
             </AlertDialogDescription>
@@ -845,87 +829,18 @@ export function SettingsPage({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-      <div className="mt-8 flex min-h-24 items-center justify-center">
-        {embedding || hasPendingEmbeds ? (
+      <div className="mt-auto pt-4">
+        <div className="flex min-h-24 items-center justify-center">
           <EmbeddingStatusPanel
-              embedding={embedding}
-              hasPendingEmbeds={hasPendingEmbeds}
-              embeddingPhase={embeddingPhase}
-              processed={embedProgress.processed}
-              total={embedProgress.total}
-              controlsDisabled={clearingIndex}
-              lastEmbedError={lastEmbedError}
-              embedFailures={embedFailures}
-              onPause={onPauseEmbedding}
-              onResume={onResumeEmbedding}
-              onCancel={onCancelEmbedding}
-            />
-        ) : needsEmbedding ? (
-          <div className="w-full max-w-xl rounded-lg border border-black/10 bg-white p-4">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <div className="app-section-title">Embedding paused</div>
-                <div className="app-muted mt-1">
-                  Your selections changed. Click Continue when you're ready to (re)embed files.
-                </div>
-                {typeof embedPlan.totalSelected === "number" ? (
-                  <div className="app-muted mt-2 tabular-nums">
-                    Planned:{" "}
-                    <span className="font-medium text-black/80">
-                      {embedPlan.pending ?? embedPlan.totalSelected}
-                    </span>{" "}
-                    file(s) to embed
-                    {embedPlan.pending === null ? (
-                      <span className="text-black/50"> (estimate)</span>
-                    ) : (
-                      <span className="text-black/50"> (exact)</span>
-                    )}
-                  </div>
-                ) : null}
-                {embedPlan.warning ? (
-                  <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-                    <div className="font-semibold">Warning</div>
-                    <div className="mt-1 text-amber-900/90">{embedPlan.warning}</div>
-                  </div>
-                ) : null}
-                {continueError ? (
-                  <div className="mt-2 text-sm font-medium text-rose-700">Error: {continueError}</div>
-                ) : null}
-              </div>
-              <div className="flex shrink-0 flex-col gap-2">
-                <Button
-                  disabled={embedding || clearingIndex}
-                  onClick={async () => {
-                    setContinueError(null);
-                    try {
-                      await onContinueEmbedding();
-                    } catch (e) {
-                      setContinueError(String(e));
-                    }
-                  }}
-                >
-                  Continue
-                </Button>
-                <Button
-                  variant="ghost"
-                  disabled={embedding || clearingIndex}
-                  onClick={() => {
-                    setContinueError(null);
-                    onCancelEmbeddingPrompt();
-                  }}
-                >
-                  Cancel
-                </Button>
-              </div>
-            </div>
-          </div>
-        ) : embedPromptDismissed ? (
-          <div className="app-muted font-medium">{embedProgress.status}</div>
-        ) : hasEmbeddingIssue ? (
-          <div className="app-body font-medium text-rose-700">{embedProgress.status}</div>
-        ) : (
-          <div />
-        )}
+            embedding={embedding}
+            hasPendingEmbeds={hasPendingEmbeds}
+            embeddingPhase={embeddingPhase}
+            processed={embedProgress.processed}
+            total={embedProgress.total}
+            lastEmbedError={lastEmbedError}
+            embedFailures={embedFailures}
+          />
+        </div>
       </div>
     </section>
   );

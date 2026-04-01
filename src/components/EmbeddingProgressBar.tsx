@@ -87,7 +87,7 @@ export function EmbeddingProgressBar({
       ].join(" ")}
     >
       <div className="mb-1 text-center text-xs text-black/50">
-        Embedding {Math.max(0, processed)} / {total > 0 ? total : "..."} files
+        Indexing {Math.max(0, processed)} / {total > 0 ? total : "..."} files
       </div>
       <div className="flex items-center gap-2">
         <Progress
@@ -107,7 +107,7 @@ export function EmbeddingProgressBar({
                 variant="ghost"
                 size="icon-sm"
                 disabled={controlsDisabled || !onResume}
-                aria-label="Resume embedding"
+                aria-label="Resume indexing"
                 title="Resume"
                 onClick={() => void onResume?.()}
               >
@@ -118,7 +118,7 @@ export function EmbeddingProgressBar({
                 variant="ghost"
                 size="icon-sm"
                 disabled={controlsDisabled || !onPause || embeddingPhase === "cancelling"}
-                aria-label="Pause embedding"
+                aria-label="Pause indexing"
                 title="Pause"
                 onClick={() => void onPause?.()}
               >
@@ -129,7 +129,7 @@ export function EmbeddingProgressBar({
               variant="ghost"
               size="icon-sm"
               disabled={controlsDisabled || !onCancel || embeddingPhase === "cancelling"}
-              aria-label="Cancel embedding"
+              aria-label="Cancel indexing"
               title="Cancel"
               onClick={() => void onCancel?.()}
             >

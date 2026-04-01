@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { EmbeddingProgressBar } from "./EmbeddingProgressBar";
 
 type EmbeddingPhase =
@@ -21,27 +20,17 @@ export function EmbeddingStatusPanel({
   embeddingPhase,
   processed,
   total,
-  controlsDisabled = false,
   lastEmbedError,
   embedFailures,
-  onPause,
-  onResume,
-  onCancel,
 }: {
   embedding: boolean;
   hasPendingEmbeds: boolean;
   embeddingPhase: EmbeddingPhase;
   processed: number;
   total: number;
-  controlsDisabled?: boolean;
   lastEmbedError: string | null;
   embedFailures: EmbeddingFileFailure[];
-  onPause: () => Promise<void>;
-  onResume: () => Promise<void>;
-  onCancel: () => Promise<void>;
 }) {
-  const [jobControlError, setJobControlError] = useState<string | null>(null);
-
   return (
     <div className="w-full max-w-sm">
       <EmbeddingProgressBar
@@ -50,32 +39,6 @@ export function EmbeddingStatusPanel({
         embeddingPhase={embeddingPhase}
         processed={processed}
         total={total}
-        showControls
-        controlsDisabled={controlsDisabled}
-        onPause={async () => {
-          setJobControlError(null);
-          try {
-            await onPause();
-          } catch (e) {
-            setJobControlError(String(e));
-          }
-        }}
-        onResume={async () => {
-          setJobControlError(null);
-          try {
-            await onResume();
-          } catch (e) {
-            setJobControlError(String(e));
-          }
-        }}
-        onCancel={async () => {
-          setJobControlError(null);
-          try {
-            await onCancel();
-          } catch (e) {
-            setJobControlError(String(e));
-          }
-        }}
       />
       {lastEmbedError ? (
         <div className="mt-2 text-center text-xs font-medium text-rose-700">{lastEmbedError}</div>
@@ -91,9 +54,6 @@ export function EmbeddingStatusPanel({
             ))}
           </div>
         </div>
-      ) : null}
-      {jobControlError ? (
-        <div className="mt-2 text-center text-xs font-medium text-rose-700">{jobControlError}</div>
       ) : null}
     </div>
   );

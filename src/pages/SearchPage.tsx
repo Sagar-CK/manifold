@@ -4,7 +4,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { Settings } from "lucide-react";
 import { Input } from "../components/ui/input";
-import { cachedEmbedding, OUTPUT_DIM } from "../lib/geminiEmbeddings";
 import type { LocalConfig } from "../lib/localConfig";
 import { EmbeddingStatusPanel } from "../components/EmbeddingStatusPanel";
 import { PageHeader } from "../components/PageHeader";
@@ -32,7 +31,7 @@ function isPathSelected(path: string, cfg: LocalConfig) {
   const inInclude =
     include.length === 0 ? true : include.some((root) => p === root || p.startsWith(`${root}/`));
   const inExclude = exclude.some((root) => p === root || p.startsWith(`${root}/`));
-  const extSelected = cfg.extensions.includes(ext as never);
+  const extSelected = cfg.extensions.length === 0 || cfg.extensions.includes(ext);
 
   return inInclude && !inExclude && extSelected;
 }
@@ -55,9 +54,6 @@ export function SearchPage({
   embedProgress,
   lastEmbedError,
   embedFailures,
-  onPauseEmbedding,
-  onResumeEmbedding,
-  onCancelEmbedding,
 }: {
   cfg: LocalConfig;
   embedding: boolean;
@@ -66,9 +62,6 @@ export function SearchPage({
   embedProgress: { processed: number; total: number; status: string };
   lastEmbedError: string | null;
   embedFailures: Array<{ path: string; reason: string }>;
-  onPauseEmbedding: () => Promise<void>;
-  onResumeEmbedding: () => Promise<void>;
-  onCancelEmbedding: () => Promise<void>;
 }) {
   const [query, setQuery] = useState("");
   const [hasSearched, setHasSearched] = useState(false);
@@ -78,6 +71,7 @@ export function SearchPage({
   const [results, setResults] = useState<
     Array<{
       score: number;
+      matchType: "textMatch" | "semantic";
       file: {
         path: string;
       };
@@ -99,7 +93,7 @@ export function SearchPage({
     data?: Record<string, unknown>,
     level: "debug" | "warn" | "error" = "debug",
   ) => {
-    if (!SEARCH_DEBUG) return;
+    if (!SEARCH_DEBUG && level !== "error") return;
     const prefix = `[search][run:${runId}] ${message}`;
     if (level === "warn") {
       console.warn(prefix, data ?? "");
@@ -153,33 +147,13 @@ export function SearchPage({
     setSearchError(null);
     setOpenError(null);
 
-    let queryVector: number[];
-    try {
-      queryVector = await cachedEmbedding(`q:${OUTPUT_DIM}:${queryText}`, async () => {
-        const v = (await invoke("embed_query_text", {
-          args: { text: queryText },
-        })) as number[];
-        return v;
-      });
-      logSearch(runId, "query embedding resolved", {
-        elapsedMs: Math.round(performance.now() - stageStartMs),
-        vectorLength: queryVector.length,
-      });
-      stageStartMs = performance.now();
-    } catch (e) {
-      logSearch(runId, "query embedding failed", { elapsedMs: Math.round(performance.now() - stageStartMs), error: String(e) }, "error");
-      setSearchError(String(e));
-      setResults([]);
-      return;
-    }
-
     const searchLimit = cfg.searchMode === "topK" ? cfg.topK : 256;
     let res: typeof results;
     try {
-      res = (await invoke("qdrant_semantic_search", {
+      res = (await invoke("hybrid_search", {
         args: {
           sourceId: cfg.sourceId,
-          queryVector,
+          queryText,
           limit: searchLimit,
         },
       })) as typeof results;
@@ -222,7 +196,7 @@ export function SearchPage({
       .filter((p) => {
         if (thumbCacheRef.current[p]) return false;
         const ext = p.split(".").pop()?.toLowerCase() ?? "";
-        return ext === "png" || ext === "jpg" || ext === "jpeg" || ext === "pdf";
+        return ext === "png" || ext === "jpg" || ext === "jpeg";
       });
     void (async () => {
       const thumbStartMs = performance.now();
@@ -325,7 +299,7 @@ export function SearchPage({
           <Settings className="h-5 w-5" aria-hidden="true" />
         </Link>
 
-        <PageHeader heading="manifold" subtitle="native semantic file search" />
+        <PageHeader heading="manifold" subtitle="native indexed file search" />
       </div>
 
       <div className="flex">
@@ -348,7 +322,7 @@ export function SearchPage({
                 to="/settings"
                 className="app-muted mx-auto block w-fit underline underline-offset-4 hover:text-black"
               >
-                No files embedded yet. Open Settings to add folders.
+                No files indexed yet. Open Settings to add folders.
               </Link>
             ) : null
           ) : searchError ? (
@@ -379,7 +353,9 @@ export function SearchPage({
                 title={r.file.path}
               >
                 <div className="pointer-events-none absolute right-2 top-2 rounded bg-black/75 px-2 py-1 text-[10px] font-medium leading-none tracking-wide text-white opacity-0 transition-opacity group-hover:opacity-100">
-                  Similarity {formatSimilarityScore(r.score)}
+                  {r.matchType === "textMatch"
+                    ? "Text match"
+                    : `Similarity ${formatSimilarityScore(r.score)}`}
                 </div>
                 <div className="h-24 w-full rounded-md bg-black/5 overflow-hidden flex items-center justify-center">
                   {thumbByPath[r.file.path] ? (
@@ -420,9 +396,6 @@ export function SearchPage({
             total={embedProgress.total}
             lastEmbedError={lastEmbedError}
             embedFailures={embedFailures}
-            onPause={onPauseEmbedding}
-            onResume={onResumeEmbedding}
-            onCancel={onCancelEmbedding}
           />
         </div>
       </div>

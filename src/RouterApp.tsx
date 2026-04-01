@@ -39,7 +39,7 @@ export default function RouterApp() {
   const [embedProgress, setEmbedProgress] = useState({
     processed: 0,
     total: 0,
-    status: "All files embedded.",
+    status: "All files indexed.",
   });
   const [hasPendingEmbeds, setHasPendingEmbeds] = useState(false);
   const [needsEmbedding, setNeedsEmbedding] = useState(false);
@@ -123,7 +123,7 @@ export default function RouterApp() {
         setNeedsEmbedding(false);
         setHasPendingEmbeds(false);
         setEmbedPromptDismissed(false);
-        setEmbedProgress({ processed: 0, total: 0, status: "All files embedded." });
+        setEmbedProgress({ processed: 0, total: 0, status: "All files indexed." });
         setEmbedPlan({ totalSelected: null, pending: null, warning: null });
         return;
       }
@@ -145,7 +145,7 @@ export default function RouterApp() {
         setEmbedProgress({
           processed: 0,
           total: 0,
-          status: needs ? "Starting embedding…" : "All files embedded.",
+          status: needs ? "Starting indexing…" : "All files indexed.",
         });
 
         // Auto-start embedding when selections change.
@@ -165,12 +165,12 @@ export default function RouterApp() {
         setEmbedProgress({
           processed: 0,
           total: 0,
-          status: "Starting embedding…",
+          status: "Starting indexing…",
         });
         setEnvIssues((prev) =>
-          prev.includes(`Embedding preflight failed: ${String(e)}`)
+          prev.includes(`Indexing preflight failed: ${String(e)}`)
             ? prev
-            : [...prev, `Embedding preflight failed: ${String(e)}`],
+            : [...prev, `Indexing preflight failed: ${String(e)}`],
         );
         try {
           await runEmbed();
@@ -201,9 +201,9 @@ export default function RouterApp() {
         const toWarnOn = safeTotalSelected;
         const warning =
           toWarnOn >= 1500
-            ? "Large embedding job detected (1500+ files). This may take a long time and consume significant API quota."
+            ? "Large indexing job detected (1500+ files). This may take a long time and consume significant API quota."
             : toWarnOn >= 500
-              ? "Large embedding job detected (500+ files). Consider narrowing folders/types before continuing."
+              ? "Large indexing job detected (500+ files). Consider narrowing folders/types before continuing."
               : null;
 
         if (!cancelled) setEmbedPlan({ totalSelected: safeTotalSelected, pending: null, warning });
@@ -296,15 +296,6 @@ export default function RouterApp() {
                 embedProgress={embedProgress}
                 lastEmbedError={lastEmbedError}
                 embedFailures={embedFailures}
-                onPauseEmbedding={async () => {
-                  await invoke("pause_embedding_job");
-                }}
-                onResumeEmbedding={async () => {
-                  await invoke("resume_embedding_job");
-                }}
-                onCancelEmbedding={async () => {
-                  await invoke("cancel_embedding_job");
-                }}
               />
             }
           />
@@ -318,31 +309,11 @@ export default function RouterApp() {
                 hasPendingEmbeds={hasPendingEmbeds}
                 embedProgress={embedProgress}
                 extOptions={extOptions}
-                needsEmbedding={needsEmbedding}
-                embedPlan={embedPlan}
-                embedPromptDismissed={embedPromptDismissed}
                 embeddingPhase={embeddingPhase}
                 lastEmbedError={lastEmbedError}
                 embedFailures={embedFailures}
-                onContinueEmbedding={async () => {
-                  setEmbedPromptDismissed(false);
-                  setNeedsEmbedding(false);
-                  await runEmbed();
-                }}
-                onPauseEmbedding={async () => {
-                  await invoke("pause_embedding_job");
-                }}
-                onResumeEmbedding={async () => {
-                  await invoke("resume_embedding_job");
-                }}
                 onCancelEmbedding={async () => {
                   await invoke("cancel_embedding_job");
-                }}
-                onCancelEmbeddingPrompt={() => {
-                  setEmbedPromptDismissed(true);
-                  setNeedsEmbedding(false);
-                  setHasPendingEmbeds(false);
-                  setEmbedProgress({ processed: 0, total: 0, status: "Embedding not started." });
                 }}
               />
             }

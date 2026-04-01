@@ -1,5 +1,4 @@
 use base64::Engine;
-use pdfium_render::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -7,11 +6,11 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use tauri::Manager;
 use walkdir::WalkDir;
 
 mod qdrant;
 mod embedding;
+mod text_index;
 
 const THUMB_CACHE_MAX_ENTRIES: usize = 512;
 
@@ -51,92 +50,6 @@ fn render_image_thumbnail_base64(path: &Path, max_edge: u32) -> Result<String, S
     Ok(base64::engine::general_purpose::STANDARD.encode(out))
 }
 
-fn bind_pdfium_library(app: &tauri::AppHandle) -> Result<Box<dyn PdfiumLibraryBindings>, String> {
-    let mut errors: Vec<String> = Vec::new();
-
-    if let Ok(raw) = std::env::var("MANIFOLD_PDFIUM_LIB_PATH") {
-        let trimmed = raw.trim();
-        if !trimmed.is_empty() {
-            let candidate = PathBuf::from(trimmed);
-            let candidate = if candidate.is_dir() {
-                Pdfium::pdfium_platform_library_name_at_path(&candidate)
-            } else {
-                candidate
-            };
-            match Pdfium::bind_to_library(&candidate) {
-                Ok(bindings) => return Ok(bindings),
-                Err(err) => errors.push(format!(
-                    "MANIFOLD_PDFIUM_LIB_PATH({}): {}",
-                    candidate.display(),
-                    err
-                )),
-            }
-        }
-    }
-
-    let mut candidates: Vec<PathBuf> = vec![
-        Pdfium::pdfium_platform_library_name_at_path("./"),
-        PathBuf::from("/opt/homebrew/lib").join(Pdfium::pdfium_platform_library_name()),
-        PathBuf::from("/usr/local/lib").join(Pdfium::pdfium_platform_library_name()),
-    ];
-
-    // Prefer loading from app-managed paths so packaged builds work out-of-the-box.
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        candidates.push(resource_dir.join(Pdfium::pdfium_platform_library_name()));
-    }
-
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            candidates.push(parent.join(Pdfium::pdfium_platform_library_name()));
-            candidates.push(parent.join("../Frameworks").join(Pdfium::pdfium_platform_library_name()));
-            candidates.push(parent.join("../Resources").join(Pdfium::pdfium_platform_library_name()));
-        }
-    }
-
-    for candidate in candidates {
-        match Pdfium::bind_to_library(&candidate) {
-            Ok(bindings) => return Ok(bindings),
-            Err(err) => errors.push(format!("{}: {}", candidate.display(), err)),
-        }
-    }
-
-    Pdfium::bind_to_system_library().map_err(|err| {
-        errors.push(format!("system: {err}"));
-        format!(
-            "failed to load Pdfium. Set MANIFOLD_PDFIUM_LIB_PATH to a pdfium library path or \
-             install libpdfium.dylib (Homebrew path: /opt/homebrew/lib/libpdfium.dylib). Attempts: {}",
-            errors.join(" | ")
-        )
-    })
-}
-
-fn render_pdf_thumbnail_base64(
-    app: &tauri::AppHandle,
-    path: &Path,
-    max_edge: u32,
-) -> Result<String, String> {
-    let bindings = bind_pdfium_library(app)?;
-    let pdfium = Pdfium::new(bindings);
-    let document = pdfium
-        .load_pdf_from_file(path, None)
-        .map_err(|e| e.to_string())?;
-    let page = document.pages().get(0).map_err(|e| e.to_string())?;
-    let target = std::cmp::max(1, max_edge) as i32;
-    let rendered = page
-        .render_with_config(
-            &PdfRenderConfig::new()
-                .set_target_width(target)
-                .set_maximum_height(target),
-        )
-        .map_err(|e| e.to_string())?;
-    let thumb_img = rendered.as_image();
-    let mut out = Vec::new();
-    thumb_img
-        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
-        .map_err(|e| e.to_string())?;
-    Ok(base64::engine::general_purpose::STANDARD.encode(out))
-}
-
 fn load_env() {
     let _ = dotenvy::from_filename(".env.local");
     let _ = dotenvy::from_filename("../.env.local");
@@ -144,19 +57,15 @@ fn load_env() {
 }
 
 fn init_logging() {
-    // MANIFOLD_LOG is preferred; RUST_LOG is also supported.
-    // Examples:
-    // - MANIFOLD_LOG=info
-    // - MANIFOLD_LOG=debug,reqwest=warn
-    // - MANIFOLD_LOG=manifold_lib=trace
+    // Error-only logging by default.
     let filter = std::env::var("MANIFOLD_LOG")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .or_else(|| std::env::var("RUST_LOG").ok())
-        .unwrap_or_else(|| "info".to_string());
+        .unwrap_or_else(|| "error".to_string());
 
     let env_filter = tracing_subscriber::EnvFilter::try_new(filter)
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("error"));
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
@@ -171,7 +80,6 @@ fn init_logging() {
 pub fn run() {
     load_env();
     init_logging();
-    tracing::info!("starting tauri backend");
     tauri::Builder::default()
         .manage(qdrant::QdrantState::default())
         .manage(embedding::EmbeddingManager::default())
@@ -189,6 +97,7 @@ pub fn run() {
             qdrant_upsert_metadata,
             qdrant_upsert_embedding,
             qdrant_semantic_search,
+            hybrid_search,
             qdrant_count_points,
             qdrant_delete_all_points,
             qdrant_delete_points_for_paths,
@@ -234,6 +143,13 @@ fn normalize_ext(s: &str) -> String {
         .to_ascii_lowercase()
 }
 
+pub fn normalize_path_key(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
+}
+
 fn compute_sha256(path: &Path, max_bytes: u64) -> Result<String, String> {
     let mut file = fs::File::open(path).map_err(|e| e.to_string())?;
     let mut hasher = Sha256::new();
@@ -259,12 +175,6 @@ fn compute_sha256(path: &Path, max_bytes: u64) -> Result<String, String> {
 
 #[tauri::command]
 async fn scan_files(args: ScanFilesArgs) -> Result<Vec<ScannedFile>, String> {
-    tracing::info!(
-        include_count = args.include.len(),
-        exclude_count = args.exclude.len(),
-        extensions_count = args.extensions.len(),
-        "scan_files: start"
-    );
     tauri::async_runtime::spawn_blocking(move || {
         let include_dirs: Vec<PathBuf> = args.include.iter().map(PathBuf::from).collect();
         let exclude_dirs: Vec<PathBuf> = args.exclude.iter().map(PathBuf::from).collect();
@@ -272,9 +182,9 @@ async fn scan_files(args: ScanFilesArgs) -> Result<Vec<ScannedFile>, String> {
             args.extensions.iter().map(|e| normalize_ext(e)).collect();
 
         let mut out: Vec<ScannedFile> = Vec::new();
+        let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
         for root in include_dirs {
             if !root.exists() {
-                tracing::warn!(root = %root.display(), "scan_files: include root does not exist");
                 continue;
             }
             for entry in WalkDir::new(root)
@@ -294,7 +204,7 @@ async fn scan_files(args: ScanFilesArgs) -> Result<Vec<ScannedFile>, String> {
                     Ok(e) => e,
                     Err(err) => {
                         if !is_walk_permission_denied(&err) {
-                            tracing::debug!(error = %err, "scan_files: walkdir error");
+                            // skip non-permission walk errors
                         }
                         continue;
                     }
@@ -303,24 +213,21 @@ async fn scan_files(args: ScanFilesArgs) -> Result<Vec<ScannedFile>, String> {
                     continue;
                 }
                 let path = entry.path();
+                let path_key = normalize_path_key(path);
+                if !seen_paths.insert(path_key) {
+                    continue;
+                }
                 let ext = path
                     .extension()
                     .and_then(|s| s.to_str())
                     .map(normalize_ext);
                 let Some(ext) = ext else { continue };
-                if !allowed_exts.contains(&ext) {
+                if !allowed_exts.is_empty() && !allowed_exts.contains(&ext) {
                     continue;
                 }
                 let meta = match fs::metadata(path) {
                     Ok(m) => m,
-                    Err(err) => {
-                        tracing::debug!(
-                            path = %path.display(),
-                            error = %err,
-                            "scan_files: metadata error"
-                        );
-                        continue;
-                    }
+                    Err(_err) => continue,
                 };
                 let modified = meta.modified().ok();
                 let mtime_ms = modified
@@ -336,7 +243,6 @@ async fn scan_files(args: ScanFilesArgs) -> Result<Vec<ScannedFile>, String> {
                 });
             }
         }
-        tracing::info!(count = out.len(), "scan_files: done");
         Ok(out)
     })
     .await
@@ -363,12 +269,6 @@ pub struct ScanFilesEstimateResult {
 
 #[tauri::command]
 async fn scan_files_count(args: ScanFilesArgs) -> Result<ScanFilesCountResult, String> {
-    tracing::info!(
-        include_count = args.include.len(),
-        exclude_count = args.exclude.len(),
-        extensions_count = args.extensions.len(),
-        "scan_files_count: start"
-    );
     tauri::async_runtime::spawn_blocking(move || {
         let include_dirs: Vec<PathBuf> = args.include.iter().map(PathBuf::from).collect();
         let exclude_dirs: Vec<PathBuf> = args.exclude.iter().map(PathBuf::from).collect();
@@ -376,12 +276,9 @@ async fn scan_files_count(args: ScanFilesArgs) -> Result<ScanFilesCountResult, S
             args.extensions.iter().map(|e| normalize_ext(e)).collect();
 
         let mut total: u64 = 0;
+        let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
         for root in include_dirs {
             if !root.exists() {
-                tracing::warn!(
-                    root = %root.display(),
-                    "scan_files_count: include root does not exist"
-                );
                 continue;
             }
             for entry in WalkDir::new(root)
@@ -400,7 +297,7 @@ async fn scan_files_count(args: ScanFilesArgs) -> Result<ScanFilesCountResult, S
                     Ok(e) => e,
                     Err(err) => {
                         if !is_walk_permission_denied(&err) {
-                            tracing::debug!(error = %err, "scan_files_count: walkdir error");
+                            // skip non-permission walk errors
                         }
                         continue;
                     }
@@ -409,19 +306,22 @@ async fn scan_files_count(args: ScanFilesArgs) -> Result<ScanFilesCountResult, S
                     continue;
                 }
                 let path = entry.path();
+                let path_key = normalize_path_key(path);
+                if !seen_paths.insert(path_key) {
+                    continue;
+                }
                 let ext = path
                     .extension()
                     .and_then(|s| s.to_str())
                     .map(normalize_ext);
                 let Some(ext) = ext else { continue };
-                if !allowed_exts.contains(&ext) {
+                if !allowed_exts.is_empty() && !allowed_exts.contains(&ext) {
                     continue;
                 }
                 total = total.saturating_add(1);
             }
         }
 
-        tracing::info!(total, "scan_files_count: done");
         Ok(ScanFilesCountResult { total })
     })
     .await
@@ -430,12 +330,6 @@ async fn scan_files_count(args: ScanFilesArgs) -> Result<ScanFilesCountResult, S
 
 #[tauri::command]
 async fn scan_files_estimate(args: ScanFilesArgs) -> Result<ScanFilesEstimateResult, String> {
-    tracing::info!(
-        include_count = args.include.len(),
-        exclude_count = args.exclude.len(),
-        extensions_count = args.extensions.len(),
-        "scan_files_estimate: start"
-    );
     tauri::async_runtime::spawn_blocking(move || {
         let include_dirs: Vec<PathBuf> = args.include.iter().map(PathBuf::from).collect();
         let exclude_dirs: Vec<PathBuf> = args.exclude.iter().map(PathBuf::from).collect();
@@ -443,6 +337,7 @@ async fn scan_files_estimate(args: ScanFilesArgs) -> Result<ScanFilesEstimateRes
             args.extensions.iter().map(|e| normalize_ext(e)).collect();
 
         let mut total: u64 = 0;
+        let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut image_files: u64 = 0;
         let mut audio_files: u64 = 0;
         let mut video_files: u64 = 0;
@@ -453,10 +348,6 @@ async fn scan_files_estimate(args: ScanFilesArgs) -> Result<ScanFilesEstimateRes
 
         for root in include_dirs {
             if !root.exists() {
-                tracing::warn!(
-                    root = %root.display(),
-                    "scan_files_estimate: include root does not exist"
-                );
                 continue;
             }
             for entry in WalkDir::new(root)
@@ -475,7 +366,7 @@ async fn scan_files_estimate(args: ScanFilesArgs) -> Result<ScanFilesEstimateRes
                     Ok(e) => e,
                     Err(err) => {
                         if !is_walk_permission_denied(&err) {
-                            tracing::debug!(error = %err, "scan_files_estimate: walkdir error");
+                            // skip non-permission walk errors
                         }
                         continue;
                     }
@@ -484,12 +375,16 @@ async fn scan_files_estimate(args: ScanFilesArgs) -> Result<ScanFilesEstimateRes
                     continue;
                 }
                 let path = entry.path();
+                let path_key = normalize_path_key(path);
+                if !seen_paths.insert(path_key) {
+                    continue;
+                }
                 let ext = path
                     .extension()
                     .and_then(|s| s.to_str())
                     .map(normalize_ext);
                 let Some(ext) = ext else { continue };
-                if !allowed_exts.contains(&ext) {
+                if !allowed_exts.is_empty() && !allowed_exts.contains(&ext) {
                     continue;
                 }
                 let size_bytes = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
@@ -514,17 +409,6 @@ async fn scan_files_estimate(args: ScanFilesArgs) -> Result<ScanFilesEstimateRes
             }
         }
 
-        tracing::info!(
-            total,
-            image_files,
-            audio_files,
-            video_files,
-            text_like_files,
-            total_text_bytes,
-            total_audio_bytes,
-            total_video_bytes,
-            "scan_files_estimate: done"
-        );
         Ok(ScanFilesEstimateResult {
             total,
             image_files,
@@ -560,20 +444,12 @@ async fn scan_files_needs_embedding(
     state: tauri::State<'_, qdrant::QdrantState>,
     args: ScanFilesNeedsEmbeddingArgs,
 ) -> Result<ScanFilesNeedsEmbeddingResult, String> {
-    tracing::info!(
-        include_count = args.scan.include.len(),
-        exclude_count = args.scan.exclude.len(),
-        extensions_count = args.scan.extensions.len(),
-        "scan_files_needs_embedding: start"
-    );
-
     // Scan + hash in a blocking task to avoid freezing the runtime.
     let scanned = scan_files(args.scan).await?;
     let total_selected = scanned.len() as u64;
 
     // If nothing is selected, nothing needs embedding.
     if scanned.is_empty() {
-        tracing::info!("scan_files_needs_embedding: no selected files");
         return Ok(ScanFilesNeedsEmbeddingResult {
             total_selected,
             needs_embedding: false,
@@ -593,11 +469,7 @@ async fn scan_files_needs_embedding(
         )
         .await?;
 
-        if res.should_embed {
-            tracing::info!(
-                total_selected,
-                "scan_files_needs_embedding: needs embedding (early exit)"
-            );
+        if res.should_embed_content || res.should_embed_metadata {
             return Ok(ScanFilesNeedsEmbeddingResult {
                 total_selected,
                 needs_embedding: true,
@@ -605,7 +477,6 @@ async fn scan_files_needs_embedding(
         }
     }
 
-    tracing::info!(total_selected, "scan_files_needs_embedding: all up to date");
     Ok(ScanFilesNeedsEmbeddingResult {
         total_selected,
         needs_embedding: false,
@@ -626,7 +497,6 @@ pub struct ReadFileBase64Result {
 
 #[tauri::command]
 fn read_file_base64(args: ReadFileArgs) -> Result<ReadFileBase64Result, String> {
-    tracing::debug!(path = %args.path, max_bytes = args.max_bytes, "read_file_base64: start");
     let path = PathBuf::from(args.path);
     let meta = fs::metadata(&path).map_err(|e| e.to_string())?;
     let size = meta.len();
@@ -638,7 +508,6 @@ fn read_file_base64(args: ReadFileArgs) -> Result<ReadFileBase64Result, String> 
     }
     let bytes = fs::read(&path).map_err(|e| e.to_string())?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
-    tracing::debug!(size_bytes = size, "read_file_base64: done");
     Ok(ReadFileBase64Result {
         base64: b64,
         size_bytes: size,
@@ -659,13 +528,9 @@ pub struct ThumbnailResult {
 /// Best-effort thumbnailing for supported files.
 #[tauri::command]
 async fn thumbnail_image_base64_png(
-    app: tauri::AppHandle,
     cache: tauri::State<'_, ThumbnailCache>,
     args: ThumbnailArgs,
 ) -> Result<ThumbnailResult, String> {
-    let started = std::time::Instant::now();
-    tracing::debug!(path = %args.path, max_edge = args.max_edge, "thumbnail_image_base64_png: start");
-
     let path = PathBuf::from(&args.path);
     let meta = fs::metadata(&path).map_err(|e| e.to_string())?;
     let mtime_ms = meta
@@ -684,10 +549,6 @@ async fn thumbnail_image_base64_png(
             .map_err(|_| "thumbnail cache lock poisoned".to_string())?;
         if let Some(entry) = guard.get(&cache_key) {
             if entry.mtime_ms == mtime_ms && entry.size_bytes == size_bytes {
-                tracing::debug!(
-                    elapsed_ms = started.elapsed().as_millis(),
-                    "thumbnail_image_base64_png: cache hit"
-                );
                 return Ok(ThumbnailResult {
                     png_base64: entry.png_base64.clone(),
                 });
@@ -697,37 +558,15 @@ async fn thumbnail_image_base64_png(
 
     let max_edge = args.max_edge;
     let path_for_kind = path.clone();
-    let app_for_worker = app.clone();
-    let kind = thumbnail_file_kind(&path);
     let png_base64_res = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         match thumbnail_file_kind(&path_for_kind).as_str() {
             "png" | "jpg" | "jpeg" => render_image_thumbnail_base64(&path, max_edge),
-            "pdf" => render_pdf_thumbnail_base64(&app_for_worker, &path, max_edge),
             ext => Err(format!("thumbnail unsupported file type: {ext}")),
         }
     })
     .await
     .map_err(|e| format!("thumbnail task join error: {e}"))?;
-    let png_base64 = match png_base64_res {
-        Ok(v) => v,
-        Err(err) => {
-            if kind == "pdf" {
-                tracing::warn!(
-                    path = %args.path,
-                    error = %err,
-                    "thumbnail_image_base64_png: pdf thumbnail failed"
-                );
-            } else {
-                tracing::debug!(
-                    path = %args.path,
-                    file_kind = %kind,
-                    error = %err,
-                    "thumbnail_image_base64_png: thumbnail generation failed"
-                );
-            }
-            return Err(err);
-        }
-    };
+    let png_base64 = png_base64_res?;
 
     {
         let mut guard = cache
@@ -747,7 +586,6 @@ async fn thumbnail_image_base64_png(
         );
     }
 
-    tracing::debug!(elapsed_ms = started.elapsed().as_millis(), "thumbnail_image_base64_png: done");
     Ok(ThumbnailResult { png_base64 })
 }
 
@@ -756,7 +594,6 @@ async fn qdrant_status(
     app: tauri::AppHandle,
     state: tauri::State<'_, qdrant::QdrantState>,
 ) -> Result<qdrant::QdrantStatus, String> {
-    tracing::debug!("qdrant_status: start");
     qdrant::status(&app, &state).await
 }
 
@@ -766,12 +603,6 @@ async fn qdrant_upsert_metadata(
     state: tauri::State<'_, qdrant::QdrantState>,
     args: qdrant::UpsertMetadataArgs,
 ) -> Result<qdrant::UpsertMetadataResult, String> {
-    tracing::info!(
-        source_id = %args.source_id,
-        path = %args.path,
-        content_hash_prefix = %args.content_hash.chars().take(12).collect::<String>(),
-        "qdrant_upsert_metadata: start"
-    );
     qdrant::upsert_metadata(&app, &state, args).await
 }
 
@@ -781,13 +612,6 @@ async fn qdrant_upsert_embedding(
     state: tauri::State<'_, qdrant::QdrantState>,
     args: qdrant::UpsertEmbeddingArgs,
 ) -> Result<(), String> {
-    tracing::info!(
-        source_id = %args.source_id,
-        path = %args.path,
-        embedding_len = args.embedding.len(),
-        content_hash_prefix = %args.content_hash.chars().take(12).collect::<String>(),
-        "qdrant_upsert_embedding: start"
-    );
     qdrant::upsert_embedding(&app, &state, args).await
 }
 
@@ -797,12 +621,6 @@ async fn qdrant_semantic_search(
     state: tauri::State<'_, qdrant::QdrantState>,
     args: qdrant::SemanticSearchArgs,
 ) -> Result<Vec<qdrant::SemanticSearchHit>, String> {
-    tracing::info!(
-        source_id = %args.source_id,
-        query_vector_len = args.query_vector.len(),
-        limit = args.limit.unwrap_or(16),
-        "qdrant_semantic_search: start"
-    );
     qdrant::semantic_search(&app, &state, args).await
 }
 
@@ -812,7 +630,6 @@ async fn qdrant_count_points(
     state: tauri::State<'_, qdrant::QdrantState>,
     args: qdrant::CountPointsArgs,
 ) -> Result<qdrant::CountPointsResult, String> {
-    tracing::debug!(source_id = %args.source_id, "qdrant_count_points: start");
     qdrant::count_points(&app, &state, args).await
 }
 
@@ -822,8 +639,9 @@ async fn qdrant_delete_all_points(
     state: tauri::State<'_, qdrant::QdrantState>,
     args: qdrant::DeleteAllPointsArgs,
 ) -> Result<(), String> {
-    tracing::info!(source_id = %args.source_id, "qdrant_delete_all_points: start");
-    qdrant::delete_all_points(&app, &state, args).await
+    qdrant::delete_all_points(&app, &state, args.clone()).await?;
+    text_index::delete_all_for_source(&app, &args.source_id)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -832,12 +650,83 @@ async fn qdrant_delete_points_for_paths(
     state: tauri::State<'_, qdrant::QdrantState>,
     args: qdrant::DeletePointsForPathsArgs,
 ) -> Result<qdrant::DeletePointsForPathsResult, String> {
-    tracing::info!(
-        source_id = %args.source_id,
-        path_count = args.paths.len(),
-        "qdrant_delete_points_for_paths: start"
-    );
-    qdrant::delete_points_for_paths(&app, &state, args).await
+    let res = qdrant::delete_points_for_paths(&app, &state, args.clone()).await?;
+    text_index::delete_for_paths(&app, &args.source_id, &args.paths)?;
+    Ok(res)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HybridSearchArgs {
+    source_id: String,
+    query_text: String,
+    limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HybridSearchHit {
+    score: f32,
+    match_type: String,
+    file: qdrant::SemanticSearchFile,
+}
+
+#[tauri::command]
+async fn hybrid_search(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, qdrant::QdrantState>,
+    args: HybridSearchArgs,
+) -> Result<Vec<HybridSearchHit>, String> {
+    let limit = args.limit.unwrap_or(24).clamp(1, 256) as usize;
+    let mut out: Vec<HybridSearchHit> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    let direct = text_index::search_text(
+        &app,
+        text_index::SearchTextArgs {
+            source_id: args.source_id.clone(),
+            query: args.query_text.clone(),
+            limit: Some(limit as u32),
+        },
+    )?;
+    for hit in direct {
+        if seen.insert(hit.path.clone()) {
+            out.push(HybridSearchHit {
+                score: 1.0,
+                match_type: "textMatch".to_string(),
+                file: qdrant::SemanticSearchFile { path: hit.path },
+            });
+        }
+    }
+
+    let query_vector = embedding::embed_query_text(&args.query_text).await.ok();
+    if let Some(query_vector) = query_vector {
+        let content_hits = qdrant::semantic_search(
+            &app,
+            &state,
+            qdrant::SemanticSearchArgs {
+                source_id: args.source_id,
+                query_vector,
+                limit: Some(limit as u32),
+                channel: Some(qdrant::SemanticSearchChannel::Content),
+            },
+        )
+        .await
+        .unwrap_or_default();
+        for h in content_hits {
+            if seen.insert(h.file.path.clone()) {
+                out.push(HybridSearchHit {
+                    score: h.score,
+                    match_type: "semantic".to_string(),
+                    file: h.file,
+                });
+            }
+            if out.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(out.into_iter().take(limit).collect())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -893,22 +782,5 @@ struct EmbedQueryTextArgs {
 
 #[tauri::command]
 async fn embed_query_text(args: EmbedQueryTextArgs) -> Result<Vec<f32>, String> {
-    let started = std::time::Instant::now();
-    let text_len = args.text.chars().count();
-    let res = embedding::embed_query_text(&args.text).await;
-    match &res {
-        Ok(v) => tracing::info!(
-            text_len,
-            embedding_len = v.len(),
-            elapsed_ms = started.elapsed().as_millis(),
-            "embed_query_text: done"
-        ),
-        Err(err) => tracing::warn!(
-            text_len,
-            elapsed_ms = started.elapsed().as_millis(),
-            error = %err,
-            "embed_query_text: failed"
-        ),
-    }
-    res
+    embedding::embed_query_text(&args.text).await
 }
