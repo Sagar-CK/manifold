@@ -10,13 +10,16 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
-use tokio::sync::{watch, Mutex, Semaphore};
+use tokio::sync::{watch, Mutex};
 use walkdir::WalkDir;
 
 const OUTPUT_DIM: usize = 3072;
 const MAX_FILE_BYTES: u64 = 25 * 1024 * 1024; // 25MB
 const GEMINI_MODEL: &str = "models/gemini-embedding-2-preview";
 const GEMINI_OCR_MODEL: &str = "models/gemini-3-flash-preview";
+const GEMINI_EMBED_TIMEOUT_SECS: u64 = 120;
+const GEMINI_OCR_TIMEOUT_SECS: u64 = 120;
+const GEMINI_OCR_MAX_ATTEMPTS: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -196,7 +199,18 @@ async fn collect_pending_files(
         if !root.exists() {
             continue;
         }
-        for entry in WalkDir::new(root).follow_links(false).into_iter() {
+        for entry in WalkDir::new(root)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| {
+                if e.file_type().is_dir() {
+                    let p = e.path();
+                    !exclude_dirs.iter().any(|ex| is_under_dir(p, ex))
+                } else {
+                    true
+                }
+            })
+        {
             let entry = match entry {
                 Ok(e) => e,
                 Err(_) => continue,
@@ -280,7 +294,7 @@ struct GeminiClient {
 impl GeminiClient {
     fn new(api_key: String) -> Result<Self, String> {
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(25))
+            .connect_timeout(Duration::from_secs(15))
             .build()
             .map_err(|e| e.to_string())?;
         Ok(Self { http, api_key })
@@ -341,20 +355,29 @@ async fn gemini_embed_post(client: &GeminiClient, body: serde_json::Value) -> Re
     let mut backoff_ms: u64 = 400;
     loop {
         attempt += 1;
+        let started = Instant::now();
         let res = client
             .http
             .post(&url)
             .header("Content-Type", "application/json")
             .header("x-goog-api-key", &client.api_key)
+            .timeout(Duration::from_secs(GEMINI_EMBED_TIMEOUT_SECS))
             .json(&body)
             .send()
             .await
             .map_err(|e| {
-                tracing::error!(attempt, error = %e, "gemini embedContent request failed");
-                format!("Gemini embedContent request failed: {e}")
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                tracing::error!(
+                    attempt,
+                    elapsed_ms,
+                    error = %e,
+                    "gemini embedContent request failed"
+                );
+                format!("Gemini embedContent request failed after {}ms: {e}", elapsed_ms)
             })?;
 
         let status = res.status();
+        let elapsed_ms = started.elapsed().as_millis() as u64;
         if status.is_success() {
             let json: GeminiEmbedResponse = res
                 .json()
@@ -384,6 +407,7 @@ async fn gemini_embed_post(client: &GeminiClient, body: serde_json::Value) -> Re
         if retryable && attempt < 5 {
             tracing::error!(
                 attempt,
+                elapsed_ms,
                 status = status.as_u16(),
                 body = %text,
                 "gemini embedContent retryable failure"
@@ -394,6 +418,7 @@ async fn gemini_embed_post(client: &GeminiClient, body: serde_json::Value) -> Re
         }
         tracing::error!(
             attempt,
+            elapsed_ms,
             status = status.as_u16(),
             body = %text,
             "gemini embedContent failed"
@@ -432,6 +457,10 @@ async fn extract_text_with_gemini(
     mime_type: &str,
     bytes: Vec<u8>,
 ) -> Result<String, String> {
+    async fn sleep_ms(ms: u64) {
+        tokio::time::sleep(Duration::from_millis(ms)).await;
+    }
+
     let input_size_bytes = bytes.len();
     let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
     let body = serde_json::json!({
@@ -452,30 +481,54 @@ async fn extract_text_with_gemini(
         "https://generativelanguage.googleapis.com/v1beta/{}:generateContent",
         GEMINI_OCR_MODEL
     );
-    let res = client
-        .http
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .header("x-goog-api-key", &client.api_key)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| {
-            let chain = format_error_chain(&e);
-            tracing::error!(
-                file_path = %file_path,
-                mime_type = %mime_type,
-                model = GEMINI_OCR_MODEL,
-                url = %url,
-                input_size_bytes,
-                error = %chain,
-                "gemini text extraction request failed"
-            );
-            format!(
-                "Gemini text extraction request failed for {} ({}): {}",
-                file_path, mime_type, chain
-            )
-        })?;
+
+    let mut attempt = 0u32;
+    let mut backoff_ms: u64 = 800;
+    let res = loop {
+        attempt += 1;
+        let attempt_started = Instant::now();
+        match client
+            .http
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("x-goog-api-key", &client.api_key)
+            .timeout(Duration::from_secs(GEMINI_OCR_TIMEOUT_SECS))
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(res) => break res,
+            Err(e) => {
+                let attempt_elapsed_ms = attempt_started.elapsed().as_millis();
+                let chain = format_error_chain(&e);
+                let is_timeout = e.is_timeout();
+                let should_retry = is_timeout && attempt < GEMINI_OCR_MAX_ATTEMPTS;
+                tracing::error!(
+                    file_path = %file_path,
+                    mime_type = %mime_type,
+                    model = GEMINI_OCR_MODEL,
+                    url = %url,
+                    input_size_bytes,
+                    attempt,
+                    attempt_elapsed_ms,
+                    timeout_secs = GEMINI_OCR_TIMEOUT_SECS,
+                    is_timeout,
+                    will_retry = should_retry,
+                    error = %chain,
+                    "gemini text extraction request failed before HTTP response"
+                );
+                if should_retry {
+                    sleep_ms(backoff_ms).await;
+                    backoff_ms = std::cmp::min(6000, ((backoff_ms as f64) * 1.8).round() as u64);
+                    continue;
+                }
+                return Err(format!(
+                    "Gemini text extraction request failed for {} ({}): {} (no HTTP response)",
+                    file_path, mime_type, chain
+                ));
+            }
+        }
+    };
     let status = res.status();
     let headers = format!("{:?}", res.headers());
     let text = res.text().await.unwrap_or_default();
@@ -692,7 +745,6 @@ pub async fn start(
             max_parallelism,
             "embedding parallel workers configured"
         );
-        let semaphore = Arc::new(Semaphore::new(max_parallelism));
         let mut join_set = tokio::task::JoinSet::new();
         for pending in pending_files {
             if cancel_flag.load(Ordering::Relaxed) {
@@ -702,15 +754,39 @@ pub async fn start(
                 emit_error(&app2, &e);
                 break;
             }
-            let permit = match semaphore.clone().acquire_owned().await {
-                Ok(p) => p,
-                Err(_) => break,
-            };
+            while join_set.len() >= max_parallelism {
+                let Some(joined) = join_set.join_next().await else {
+                    break;
+                };
+                let completed = joined.unwrap_or(false);
+                processed = processed.saturating_add(1);
+                let mgr = app2.state::<EmbeddingManager>();
+                let mut s = mgr.state.lock().await;
+                s.processed = processed;
+                s.phase = if *pause_rx.borrow() {
+                    EmbeddingJobPhase::Paused
+                } else {
+                    EmbeddingJobPhase::Embedding
+                };
+                s.message = if completed {
+                    "Embedding in progress…".to_string()
+                } else {
+                    "Embedding in progress (some files failed)…".to_string()
+                };
+                emit_status(
+                    &app2,
+                    &EmbeddingJobStatus {
+                        phase: s.phase.clone(),
+                        processed: s.processed,
+                        total: s.total,
+                        message: s.message.clone(),
+                    },
+                );
+            }
             let app_for_file = app2.clone();
             let source_id_for_file = source_id.clone();
             let gemini_for_file = gemini.clone();
             join_set.spawn(async move {
-                let _permit = permit;
                 let path = pending.path.as_path();
                 let ext = pending.ext.clone();
                 let mime = pending.mime;

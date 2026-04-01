@@ -2,9 +2,23 @@ import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
-import { Settings } from "lucide-react";
+import { ListFilter, Settings } from "lucide-react";
 import { Button } from "../components/ui/button";
-import { Input } from "../components/ui/input";
+import { Spinner } from "../components/ui/spinner";
+import { Skeleton } from "../components/ui/skeleton";
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupInput,
+} from "../components/ui/input-group";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuTrigger,
+} from "../components/ui/dropdown-menu";
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -65,6 +79,11 @@ type SearchResult = {
   };
 };
 
+type MatchTypeFilter = {
+  textMatch: boolean;
+  semantic: boolean;
+};
+
 type SearchResultGroup = {
   key: string;
   primaryResult: SearchResult;
@@ -111,6 +130,12 @@ export function SearchPage({
   embedFailures: Array<{ path: string; reason: string }>;
 }) {
   const [query, setQuery] = useState("");
+  const [searchTypeMenuOpen, setSearchTypeMenuOpen] = useState(false);
+  const [matchTypeFilter, setMatchTypeFilter] = useState<MatchTypeFilter>({
+    textMatch: true,
+    semantic: true,
+  });
+  const [isSearching, setIsSearching] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
   const [embeddedCount, setEmbeddedCount] = useState<number | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
@@ -167,6 +192,31 @@ export function SearchPage({
     };
   }, [cfg.sourceId]);
 
+  useEffect(() => {
+    // Refresh once the embedding job is no longer running so empty-state text
+    // reflects the final indexed count without requiring a route remount.
+    if (embedding || hasPendingEmbeds) return;
+    if (embeddingPhase !== "done" && embeddingPhase !== "idle" && embeddingPhase !== "error") return;
+
+    let cancelled = false;
+    async function refreshCountAfterJobSettles() {
+      try {
+        const res = (await invoke("qdrant_count_points", {
+          args: { sourceId: cfg.sourceId },
+        })) as { count: number } | { count: string };
+        const count = typeof res.count === "string" ? Number.parseInt(res.count, 10) : res.count;
+        if (!cancelled) setEmbeddedCount(Number.isFinite(count) ? count : 0);
+      } catch {
+        if (!cancelled) setEmbeddedCount(null);
+      }
+    }
+
+    void refreshCountAfterJobSettles();
+    return () => {
+      cancelled = true;
+    };
+  }, [cfg.sourceId, embedding, hasPendingEmbeds, embeddingPhase]);
+
   async function runSearch(queryText: string) {
     const runId = ++searchRunSeqRef.current;
     latestRunRef.current = runId;
@@ -183,9 +233,7 @@ export function SearchPage({
       extensionCount: cfg.extensions.length,
     });
 
-    setHasSearched(true);
-    setResults([]);
-    setThumbByPath({});
+    setIsSearching(true);
     setSearchError(null);
     setOpenError(null);
 
@@ -197,6 +245,10 @@ export function SearchPage({
           sourceId: cfg.sourceId,
           queryText,
           limit: searchLimit,
+          searchTypes: [
+            ...(matchTypeFilter.textMatch ? ["text"] : []),
+            ...(matchTypeFilter.semantic ? ["semantic"] : []),
+          ],
         },
       })) as SearchResult[];
       logSearch(runId, "semantic search resolved", {
@@ -207,14 +259,27 @@ export function SearchPage({
       stageStartMs = performance.now();
     } catch (e) {
       logSearch(runId, "semantic search failed", { elapsedMs: Math.round(performance.now() - stageStartMs), error: String(e) }, "error");
-      setSearchError(String(e));
-      setResults([]);
+      if (latestRunRef.current === runId) setIsSearching(false);
+      if (latestRunRef.current === runId) {
+        setHasSearched(true);
+        setSearchError(String(e));
+        setResults([]);
+      }
       return;
     }
     const filtered =
       cfg.searchMode === "scoreThreshold"
         ? res.filter((r) => r.score >= cfg.scoreThreshold)
-        : res.slice(0, cfg.topK);
+        : (() => {
+            // Top-K should only cap semantic matches, not text matches.
+            let semanticSeen = 0;
+            return res.filter((r) => {
+              if (r.matchType !== "semantic") return true;
+              if (semanticSeen >= cfg.topK) return false;
+              semanticSeen += 1;
+              return true;
+            });
+          })();
 
     // Automatically ignore hits that are outside current selected folders/extensions.
     const selectedOnly = filtered.filter((r) => isPathSelected(r.file.path, cfg));
@@ -225,6 +290,8 @@ export function SearchPage({
       droppedByPathOrExt: filtered.length - selectedOnly.length,
     });
     stageStartMs = performance.now();
+    if (latestRunRef.current !== runId) return;
+    setHasSearched(true);
     setResults(selectedOnly);
     const cachedThumbsForSelection: Record<string, string> = {};
     for (const r of selectedOnly) {
@@ -232,6 +299,7 @@ export function SearchPage({
       if (cached) cachedThumbsForSelection[r.file.path] = cached;
     }
     setThumbByPath(cachedThumbsForSelection);
+    setIsSearching(false);
 
     const previewPaths = selectedOnly
       .map((r) => r.file.path)
@@ -289,11 +357,13 @@ export function SearchPage({
     const trimmed = query.trim();
     if (!trimmed) {
       setHasSearched(false);
+      setIsSearching(false);
       setResults([]);
       setThumbByPath({});
       return;
     }
 
+    setIsSearching(true);
     const timer = window.setTimeout(() => {
       if (SEARCH_DEBUG) {
         console.debug("[search] debounce fired", {
@@ -314,6 +384,8 @@ export function SearchPage({
     cfg.include,
     cfg.exclude,
     cfg.extensions,
+    matchTypeFilter.textMatch,
+    matchTypeFilter.semantic,
   ]);
 
   useEffect(() => {
@@ -326,9 +398,9 @@ export function SearchPage({
     });
   }, [results, thumbByPath]);
 
-  const showIndexedCountHint =
-    !hasSearched && results.length === 0 && typeof liveIndexedCount === "number" && liveIndexedCount > 0;
-  const groupedResults = groupResultsByContentHash(results);
+  const typeFilteredResults = results.filter((result) => matchTypeFilter[result.matchType]);
+  const groupedResults = groupResultsByContentHash(typeFilteredResults);
+  const hasMatchTypeEnabled = matchTypeFilter.textMatch || matchTypeFilter.semantic;
 
   return (
     <section className="flex min-h-[calc(100dvh-4rem)] flex-col">
@@ -346,19 +418,70 @@ export function SearchPage({
       </div>
 
       <div className="flex">
-        <Input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search across your files…"
-          className="flex-1"
-        />
+        <InputGroup>
+          <InputGroupInput
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search across your files…"
+            className="flex-1"
+            aria-label="Search query"
+          />
+          <InputGroupAddon align="inline-end">
+            <DropdownMenu open={searchTypeMenuOpen} onOpenChange={setSearchTypeMenuOpen}>
+              <DropdownMenuTrigger asChild>
+                <InputGroupButton
+                  variant={hasMatchTypeEnabled ? "ghost" : "secondary"}
+                  size="icon-xs"
+                  aria-label="Filter search types"
+                >
+                  <ListFilter className="size-3.5" />
+                </InputGroupButton>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" onPointerLeave={() => setSearchTypeMenuOpen(false)}>
+                <DropdownMenuGroup>
+                  <DropdownMenuCheckboxItem
+                    checked={matchTypeFilter.textMatch}
+                    onSelect={(event) => event.preventDefault()}
+                    onCheckedChange={(checked) => {
+                      setMatchTypeFilter((current) => {
+                        if (checked !== true && !current.semantic) return current;
+                        return {
+                          ...current,
+                          textMatch: checked === true,
+                        };
+                      });
+                    }}
+                  >
+                    Text match
+                  </DropdownMenuCheckboxItem>
+                  <DropdownMenuCheckboxItem
+                    checked={matchTypeFilter.semantic}
+                    onSelect={(event) => event.preventDefault()}
+                    onCheckedChange={(checked) => {
+                      setMatchTypeFilter((current) => {
+                        if (checked !== true && !current.textMatch) return current;
+                        return {
+                          ...current,
+                          semantic: checked === true,
+                        };
+                      });
+                    }}
+                  >
+                    Semantic
+                  </DropdownMenuCheckboxItem>
+                </DropdownMenuGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            {isSearching ? <Spinner className="size-3.5" /> : null}
+          </InputGroupAddon>
+        </InputGroup>
       </div>
 
       <div className="mt-5 flex-1">
         {openError ? (
           <div className="mb-3 text-center text-sm font-medium text-rose-700">Open error: {openError}</div>
         ) : null}
-        {results.length === 0 ? (
+        {groupedResults.length === 0 ? (
           !hasSearched ? (
             liveIndexedCount === 0 ? (
               <Link
@@ -372,6 +495,10 @@ export function SearchPage({
             <div className="text-center text-sm font-medium text-rose-700">
               Search error: {searchError}
             </div>
+          ) : !hasMatchTypeEnabled ? (
+            <div className="app-muted text-center">
+              Enable at least one search type (Text or Semantic).
+            </div>
           ) : (
             <div className="app-muted text-center">No results for “{query.trim()}”.</div>
           )
@@ -381,6 +508,7 @@ export function SearchPage({
               (() => {
                 const r = group.primaryResult;
                 const ext = r.file.path.split(".").pop()?.toLowerCase() ?? "";
+                const isPreviewImage = ext === "png" || ext === "jpg" || ext === "jpeg";
                 const isStacked = group.variants.length > 1;
                 return (
               <button
@@ -428,42 +556,40 @@ export function SearchPage({
                     setOpenError(String(e));
                   }
                 }}
-                className={`group relative flex flex-col items-center gap-2 min-w-0 rounded-lg p-1 transition-colors ${
-                  r.matchType === "textMatch"
-                    ? "bg-emerald-50 hover:bg-emerald-100/70"
-                    : "hover:bg-black/4"
-                }`}
+                className="group relative flex min-w-0 flex-col items-center gap-2 rounded-lg p-1 transition-opacity hover:opacity-90"
                 title={r.file.path}
               >
-                {isStacked ? (
-                  <div className="pointer-events-none absolute inset-0">
-                    <div className="absolute inset-x-1 top-1 h-full rounded-lg border border-black/10 bg-black/3" />
-                    <div className="absolute inset-x-2 top-2 h-full rounded-lg border border-black/10 bg-black/2" />
+                {cfg.showSimilarityOnHover ? (
+                  <div className="pointer-events-none absolute left-1/2 top-2 w-max -translate-x-1/2 rounded bg-black/75 px-2 py-1 text-[10px] font-medium leading-none tracking-wide text-white opacity-0 transition-opacity group-hover:opacity-100">
+                    {r.matchType === "textMatch"
+                      ? "Text match"
+                      : `Similarity ${formatSimilarityScore(r.score)}`}
                   </div>
                 ) : null}
-                <div className="pointer-events-none absolute right-2 top-2 rounded bg-black/75 px-2 py-1 text-[10px] font-medium leading-none tracking-wide text-white opacity-0 transition-opacity group-hover:opacity-100">
-                  {r.matchType === "textMatch"
-                    ? "Text match"
-                    : `Similarity ${formatSimilarityScore(r.score)}`}
-                </div>
-                {isStacked ? (
-                  <div className="pointer-events-none absolute left-2 top-2 rounded bg-black/80 px-2 py-1 text-[10px] font-medium leading-none tracking-wide text-white">
-                    {group.variants.length} copies
-                  </div>
-                ) : null}
-                <div className="h-24 w-full rounded-md bg-black/5 overflow-hidden flex items-center justify-center">
+                <div className="w-full px-1">
                   {thumbByPath[r.file.path] ? (
-                    <img src={thumbByPath[r.file.path]} className="h-full w-full object-contain" />
+                    <div className="mx-auto flex h-16 w-28 items-center justify-center">
+                      <img
+                        src={thumbByPath[r.file.path]}
+                        className="block max-h-full max-w-full rounded-lg object-contain"
+                      />
+                    </div>
                   ) : (
-                    <div className="h-11 w-11 rounded-md border border-black/10 bg-black/4 flex items-center justify-center">
-                      <span className="text-[10px] leading-none font-semibold text-black/60 uppercase tracking-wide">
-                        {fileTypeLabel(ext, "")}
-                      </span>
+                    <div className="mx-auto flex h-16 w-28 items-center justify-center">
+                      {isPreviewImage ? (
+                        <Skeleton className="h-16 w-28 rounded-lg" />
+                      ) : (
+                        <div className="flex h-11 w-11 items-center justify-center rounded-md border border-black/10 bg-black/4">
+                          <span className="text-[10px] leading-none font-semibold text-black/60 uppercase tracking-wide">
+                            {fileTypeLabel(ext, "")}
+                          </span>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
-                <div className="min-w-0 w-full">
-                  <div className="app-body text-center truncate">
+                <div className="w-full min-w-0">
+                  <div className="truncate text-center text-xs font-normal leading-tight text-black/80">
                     {r.file.path.split("/").pop() ?? r.file.path}
                   </div>
                 </div>
@@ -519,11 +645,6 @@ export function SearchPage({
       </AlertDialog>
 
       <div className="mt-auto pt-4">
-        {showIndexedCountHint ? (
-          <div className="app-muted mb-2 text-center">
-            {liveIndexedCount} file(s) indexed.
-          </div>
-        ) : null}
         <div className="flex min-h-24 items-center justify-center">
           <EmbeddingStatusPanel
             embedding={embedding}
@@ -533,6 +654,7 @@ export function SearchPage({
             total={embedProgress.total}
             lastEmbedError={lastEmbedError}
             embedFailures={embedFailures}
+            indexedCount={liveIndexedCount}
           />
         </div>
       </div>

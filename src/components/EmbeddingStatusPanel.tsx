@@ -22,6 +22,7 @@ export function EmbeddingStatusPanel({
   total,
   lastEmbedError,
   embedFailures,
+  indexedCount,
 }: {
   embedding: boolean;
   hasPendingEmbeds: boolean;
@@ -30,7 +31,14 @@ export function EmbeddingStatusPanel({
   total: number;
   lastEmbedError: string | null;
   embedFailures: EmbeddingFileFailure[];
+  indexedCount?: number | null;
 }) {
+  const showIndexedCount =
+    !embedding &&
+    !hasPendingEmbeds &&
+    typeof indexedCount === "number" &&
+    indexedCount > 0;
+
   return (
     <div className="w-full max-w-sm">
       <EmbeddingProgressBar
@@ -40,6 +48,9 @@ export function EmbeddingStatusPanel({
         processed={processed}
         total={total}
       />
+      {showIndexedCount ? (
+        <div className="mt-2 text-center text-xs text-black/50">{indexedCount} file(s) indexed.</div>
+      ) : null}
       {embedFailures.length > 0 ? (
         <div className="mt-2 text-center text-xs font-medium text-rose-700">
           {embedFailures.length} file(s) failed to embed. See logs for detail.

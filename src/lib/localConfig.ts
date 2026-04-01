@@ -8,6 +8,7 @@ export type LocalConfig = {
   scoreThreshold: number;
   searchMode: "topK" | "scoreThreshold";
   topK: number;
+  showSimilarityOnHover: boolean;
 };
 
 const KEY = "manifold:config:v1";
@@ -62,6 +63,7 @@ function defaultConfig(): LocalConfig {
     scoreThreshold: 0,
     searchMode: "topK",
     topK: 24,
+    showSimilarityOnHover: true,
   };
 }
 
@@ -93,6 +95,10 @@ export function loadConfig(): LocalConfig {
         typeof parsed.topK === "number"
           ? Math.max(1, Math.min(256, Math.floor(parsed.topK)))
           : defaultConfig().topK,
+      showSimilarityOnHover:
+        typeof parsed.showSimilarityOnHover === "boolean"
+          ? parsed.showSimilarityOnHover
+          : defaultConfig().showSimilarityOnHover,
     };
     saveConfig(cfg);
     return cfg;

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, Pause, Play, X } from "lucide-react";
 import { Button } from "./ui/button";
 import { Progress } from "./ui/progress";
@@ -40,25 +40,37 @@ export function EmbeddingProgressBar({
   const [isVisible, setIsVisible] = useState(false);
   const [isComplete, setIsComplete] = useState(false);
   const [isFading, setIsFading] = useState(false);
+  const prevPhaseRef = useRef<EmbeddingPhase>(embeddingPhase);
 
   const progressValue = useMemo(() => {
     if (total <= 0) return 0;
     return (processed / total) * 100;
   }, [processed, total]);
-
-  const active = embedding || hasPendingEmbeds;
+  const isScanning = embeddingPhase === "scanning";
+  const hasKnownWork = total > 0 || processed > 0;
+  const active = (embedding || hasPendingEmbeds) && (isScanning || hasKnownWork);
 
   useEffect(() => {
+    const prevPhase = prevPhaseRef.current;
+    const transitionedToDone =
+      embeddingPhase === "done" &&
+      (prevPhase === "scanning" ||
+        prevPhase === "embedding" ||
+        prevPhase === "paused" ||
+        prevPhase === "cancelling");
+
     if (active) {
       setIsVisible(true);
       setIsComplete(false);
       setIsFading(false);
+      prevPhaseRef.current = embeddingPhase;
       return;
     }
-    if (embeddingPhase === "done") {
+    if (transitionedToDone && hasKnownWork) {
       setIsVisible(true);
       setIsComplete(true);
       setIsFading(false);
+      prevPhaseRef.current = embeddingPhase;
       const fadeTimer = window.setTimeout(() => {
         setIsFading(true);
       }, 850);
@@ -73,8 +85,9 @@ export function EmbeddingProgressBar({
     setIsVisible(false);
     setIsComplete(false);
     setIsFading(false);
+    prevPhaseRef.current = embeddingPhase;
     return;
-  }, [active, embeddingPhase]);
+  }, [active, embeddingPhase, hasKnownWork]);
 
   if (!isVisible) return null;
 
@@ -87,18 +100,24 @@ export function EmbeddingProgressBar({
       ].join(" ")}
     >
       <div className="mb-1 text-center text-xs text-black/50">
-        Indexing {Math.max(0, processed)} / {total > 0 ? total : "..."} files
+        {isScanning ? "Scanning files..." : `Indexing ${Math.max(0, processed)} / ${total > 0 ? total : "..."} files`}
       </div>
       <div className="flex items-center gap-2">
-        <Progress
-          className="h-1.5 flex-1 transition-all duration-500"
-          trackClassName={isComplete ? "bg-emerald-100" : "bg-black/10"}
-          indicatorClassName={[
-            "transition-all duration-500",
-            isComplete ? "bg-emerald-500" : "bg-black",
-          ].join(" ")}
-          value={isComplete ? 100 : progressValue}
-        />
+        {isScanning ? (
+          <div className="embedding-scan-track h-1.5 flex-1 overflow-hidden rounded-full bg-zinc-200/80">
+            <div className="embedding-scan-indicator h-full w-2/5 rounded-full bg-zinc-400/80" />
+          </div>
+        ) : (
+          <Progress
+            className="h-1.5 flex-1 transition-all duration-500"
+            trackClassName={isComplete ? "bg-emerald-100" : "bg-black/10"}
+            indicatorClassName={[
+              "transition-all duration-500",
+              isComplete ? "bg-emerald-500" : "bg-black",
+            ].join(" ")}
+            value={isComplete ? 100 : progressValue}
+          />
+        )}
         {isComplete ? <Check className="h-3.5 w-3.5 text-emerald-600" aria-hidden="true" /> : null}
         {showControls && embedding ? (
           <div className="flex items-center gap-1">

@@ -1,5 +1,5 @@
 import "./App.css";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Route, Routes } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -32,7 +32,6 @@ type EmbeddingFileFailure = {
 
 export default function RouterApp() {
   const [cfg, setCfg] = useState<LocalConfig>(() => loadConfig());
-  const [embedding, setEmbedding] = useState(false);
   const [embeddingPhase, setEmbeddingPhase] = useState<EmbeddingJobPhase>("idle");
   const [envIssues, setEnvIssues] = useState<string[]>([]);
   const [embedProgress, setEmbedProgress] = useState({
@@ -40,10 +39,9 @@ export default function RouterApp() {
     total: 0,
     status: "All files indexed.",
   });
-  const [hasPendingEmbeds, setHasPendingEmbeds] = useState(false);
-  const [needsEmbedding, setNeedsEmbedding] = useState(false);
   const [lastEmbedError, setLastEmbedError] = useState<string | null>(null);
   const [embedFailures, setEmbedFailures] = useState<EmbeddingFileFailure[]>([]);
+  const lastAutoEmbedKeyRef = useRef<string>("");
 
   const geminiApiKey =
     (import.meta.env.VITE_GOOGLE_GENERATIVE_AI_API_KEY as string | undefined) ?? "";
@@ -63,6 +61,12 @@ export default function RouterApp() {
       }),
     [cfg.exclude, cfg.extensions, cfg.include, cfg.sourceId],
   );
+  const embedding =
+    embeddingPhase === "scanning" ||
+    embeddingPhase === "embedding" ||
+    embeddingPhase === "paused" ||
+    embeddingPhase === "cancelling";
+  const hasPendingEmbeds = embedding;
 
   useEffect(() => {
     let cancelled = false;
@@ -107,73 +111,17 @@ export default function RouterApp() {
   }, [cfg.exclude, cfg.extensions, cfg.include, cfg.sourceId, geminiApiKey]);
 
   useEffect(() => {
-    // Don't auto-embed on startup or config changes; let the user explicitly start it.
-    // But do preflight whether anything actually needs embedding to avoid showing a prompt when up-to-date.
-    if (embedding) return;
-    let cancelled = false;
-
-    async function refreshNeedsEmbedding() {
-      if (cfg.include.length === 0) {
-        setNeedsEmbedding(false);
-        setHasPendingEmbeds(false);
-        setEmbedProgress({ processed: 0, total: 0, status: "All files indexed." });
-        return;
-      }
-
-      try {
-        const res = (await invoke("scan_files_needs_embedding", {
-          args: {
-            scan: { include: cfg.include, exclude: cfg.exclude, extensions: cfg.extensions },
-            sourceId: cfg.sourceId,
-          },
-        })) as { totalSelected: number | string; needsEmbedding: boolean };
-
-        const needs = Boolean(res.needsEmbedding);
-        if (cancelled) return;
-
-        setNeedsEmbedding(needs);
-        setHasPendingEmbeds(needs);
-        setEmbedProgress({
-          processed: 0,
-          total: 0,
-          status: needs ? "Starting indexing…" : "All files indexed.",
-        });
-
-        // Auto-start embedding when selections change.
-        if (needs) {
-          try {
-            await runEmbed();
-          } catch (e) {
-            setLastEmbedError(String(e));
-          }
-        }
-      } catch (e) {
-        if (cancelled) return;
-        // If preflight fails, fall back to attempting an explicit start anyway.
-        setNeedsEmbedding(true);
-        setHasPendingEmbeds(true);
-        setEmbedProgress({
-          processed: 0,
-          total: 0,
-          status: "Starting indexing…",
-        });
-        setEnvIssues((prev) =>
-          prev.includes(`Indexing preflight failed: ${String(e)}`)
-            ? prev
-            : [...prev, `Indexing preflight failed: ${String(e)}`],
-        );
-        try {
-          await runEmbed();
-        } catch (err) {
-          setLastEmbedError(String(err));
-        }
-      }
+    if (cfg.include.length === 0) {
+      setEmbeddingPhase("idle");
+      setEmbedProgress({ processed: 0, total: 0, status: "All files indexed." });
+      return;
     }
-
-    void refreshNeedsEmbedding();
-    return () => {
-      cancelled = true;
-    };
+    if (embedding) return;
+    if (lastAutoEmbedKeyRef.current === autoEmbedKey) return;
+    lastAutoEmbedKeyRef.current = autoEmbedKey;
+    void runEmbed().catch((e) => {
+      setLastEmbedError(String(e));
+    });
   }, [autoEmbedKey, cfg.include.length, embedding, runEmbed]);
 
   useEffect(() => {
@@ -188,15 +136,9 @@ export default function RouterApp() {
         const s = event.payload;
         setEmbeddingPhase(s.phase);
         setEmbedProgress({ processed: s.processed, total: s.total, status: s.message });
-        const active =
-          s.phase === "scanning" || s.phase === "embedding" || s.phase === "paused" || s.phase === "cancelling";
-        setEmbedding(active);
-        setHasPendingEmbeds(active || needsEmbedding);
       });
       unlistenDone = await listen("embedding://done", () => {
-        setEmbedding(false);
         setEmbeddingPhase("done");
-        setHasPendingEmbeds(false);
       });
       unlistenError = await listen<{ message: string }>("embedding://error", (event) => {
         setLastEmbedError(event.payload.message);
@@ -217,13 +159,6 @@ export default function RouterApp() {
           total: status.total,
           status: status.message,
         });
-        const active =
-          status.phase === "scanning" ||
-          status.phase === "embedding" ||
-          status.phase === "paused" ||
-          status.phase === "cancelling";
-        setEmbedding(active);
-        setHasPendingEmbeds(active || needsEmbedding);
       } catch {
         // ignore
       }
@@ -237,7 +172,7 @@ export default function RouterApp() {
       unlistenError?.();
       unlistenFileFailed?.();
     };
-  }, [needsEmbedding]);
+  }, []);
 
   return (
     <main className="min-h-screen w-full bg-[#f6f7fb] text-black">

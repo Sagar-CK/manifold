@@ -1,4 +1,4 @@
-import { ArrowLeft, FolderPlus, Loader, Trash2 } from "lucide-react";
+import { ArrowLeft, FolderPlus, Trash2 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
@@ -27,6 +27,9 @@ import {
   ComboboxItem,
   ComboboxList,
 } from "../components/ui/combobox";
+import { Slider } from "../components/ui/slider";
+import { Switch } from "../components/ui/switch";
+import { Spinner } from "../components/ui/spinner";
 import { Toggle } from "../components/ui/toggle";
 
 const SEARCH_MODE_OPTIONS = [
@@ -158,9 +161,12 @@ export function SettingsPage({
     setClearingIndex(true);
     try {
       await invoke("qdrant_delete_all_points", { args: { sourceId: cfg.sourceId } });
+      if (embedding || hasPendingEmbeds) {
+        await onCancelEmbedding();
+      }
       // Bump sourceId to force a clean re-index cycle + avoid any stale per-source caches.
       const nextSourceId = crypto.randomUUID();
-      updateConfig({ ...cfg, sourceId: nextSourceId });
+      updateConfig({ ...cfg, sourceId: nextSourceId, include: [] });
       await refreshEmbeddedCount(nextSourceId);
       setConfirmClearOpen(false);
     } catch (e) {
@@ -563,21 +569,36 @@ export function SettingsPage({
                   <span>Minimum semantic score</span>
                   <span>{Math.round(cfg.scoreThreshold * 100)}%</span>
                 </div>
-                <input
-                  type="range"
+                <Slider
                   min={0}
                   max={100}
                   step={1}
-                  value={Math.round(cfg.scoreThreshold * 100)}
-                  onChange={(e) => {
-                    const next = Number.parseInt(e.target.value, 10);
-                    if (Number.isNaN(next)) return;
+                  value={[Math.round(cfg.scoreThreshold * 100)]}
+                  onValueChange={(value) => {
+                    const next = value?.[0];
+                    if (typeof next !== "number" || Number.isNaN(next)) return;
                     updateConfig({ ...cfg, scoreThreshold: Math.max(0, Math.min(1, next / 100)) });
                   }}
                   className="w-full"
                 />
               </div>
             )}
+          </div>
+
+          <div className="mt-5 flex items-center justify-between gap-3">
+            <div>
+              <div className="app-label">Show similarity on hover</div>
+              <div className="app-muted mt-1">
+                Shows the match badge when hovering a search result card.
+              </div>
+            </div>
+            <Switch
+              checked={cfg.showSimilarityOnHover}
+              onCheckedChange={(checked) => {
+                updateConfig({ ...cfg, showSimilarityOnHover: checked });
+              }}
+              aria-label="Toggle similarity badge on hover"
+            />
           </div>
 
         </div>
@@ -602,7 +623,7 @@ export function SettingsPage({
                 disabled={clearingIndex || embedding || hasPendingEmbeds || liveIndexedCount === 0}
               >
                 <Trash2 className="h-4 w-4" aria-hidden="true" />
-                {clearingIndex && <Loader className="h-4 w-4 animate-spin" aria-hidden="true" /> }
+                {clearingIndex && <Spinner className="h-4 w-4" aria-hidden="true" /> }
               </Button>
             </AlertDialogTrigger>
             <AlertDialogContent>
@@ -634,7 +655,7 @@ export function SettingsPage({
                 >
                   {clearingIndex ? (
                     <>
-                      <Loader className="h-4 w-4 animate-spin" aria-hidden="true" />
+                      <Spinner className="h-4 w-4" aria-hidden="true" />
                       Deleting...
                     </>
                   ) : (
@@ -761,7 +782,7 @@ export function SettingsPage({
             >
               {addIncludeLoading ? (
                 <>
-                  <Loader className="h-4 w-4 animate-spin" aria-hidden="true" />
+                  <Spinner className="h-4 w-4" aria-hidden="true" />
                   Confirming...
                 </>
               ) : (
@@ -819,7 +840,7 @@ export function SettingsPage({
             >
               {removeIncludeLoading ? (
                 <>
-                  <Loader className="h-4 w-4 animate-spin" aria-hidden="true" />
+                  <Spinner className="h-4 w-4" aria-hidden="true" />
                   Deleting...
                 </>
               ) : (

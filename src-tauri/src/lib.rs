@@ -662,6 +662,8 @@ struct HybridSearchArgs {
     source_id: String,
     query_text: String,
     limit: Option<u32>,
+    #[serde(default)]
+    search_types: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -685,59 +687,84 @@ async fn hybrid_search(
     state: tauri::State<'_, qdrant::QdrantState>,
     args: HybridSearchArgs,
 ) -> Result<Vec<HybridSearchHit>, String> {
-    let limit = args.limit.unwrap_or(24).clamp(1, 256) as usize;
+    let semantic_limit = args.limit.unwrap_or(24).clamp(1, 256) as usize;
     let mut out: Vec<HybridSearchHit> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    let direct = text_index::search_text(
-        &app,
-        text_index::SearchTextArgs {
-            source_id: args.source_id.clone(),
-            query: args.query_text.clone(),
-            limit: Some(limit as u32),
-        },
-    )?;
-    for hit in direct {
-        if seen.insert(hit.path.clone()) {
-            out.push(HybridSearchHit {
-                score: 1.0,
-                match_type: "textMatch".to_string(),
-                file: qdrant::SemanticSearchFile {
-                    path: hit.path,
-                    content_hash: hit.content_hash,
-                },
-            });
+    let mut include_text_matches = true;
+    let mut include_semantic_matches = true;
+    if !args.search_types.is_empty() {
+        let selected_types: std::collections::HashSet<String> = args
+            .search_types
+            .iter()
+            .map(|t| t.trim().to_ascii_lowercase())
+            .collect();
+        include_text_matches = selected_types.contains("text");
+        include_semantic_matches = selected_types.contains("semantic");
+    }
+
+    let direct = if include_text_matches {
+        text_index::search_text(
+            &app,
+            text_index::SearchTextArgs {
+                source_id: args.source_id.clone(),
+                query: args.query_text.clone(),
+                // Top-K applies to semantic matches; text hits get their own cap.
+                limit: Some(256),
+            },
+        )?
+    } else {
+        Vec::new()
+    };
+
+    if include_text_matches {
+        for hit in direct {
+            if seen.insert(hit.path.clone()) {
+                out.push(HybridSearchHit {
+                    score: 1.0,
+                    match_type: "textMatch".to_string(),
+                    file: qdrant::SemanticSearchFile {
+                        path: hit.path,
+                        content_hash: hit.content_hash,
+                    },
+                });
+            }
         }
     }
 
-    let query_vector = embedding::embed_query_text(&args.query_text).await.ok();
-    if let Some(query_vector) = query_vector {
+    if include_semantic_matches {
+        let query_vector = embedding::embed_query_text(&args.query_text).await.ok();
+        if let Some(query_vector) = query_vector {
         let content_hits = qdrant::semantic_search(
             &app,
             &state,
             qdrant::SemanticSearchArgs {
                 source_id: args.source_id,
                 query_vector,
-                limit: Some(limit as u32),
+                limit: Some(semantic_limit as u32),
                 channel: Some(qdrant::SemanticSearchChannel::Content),
             },
         )
         .await
         .unwrap_or_default();
-        for h in content_hits {
-            if seen.insert(h.file.path.clone()) {
-                out.push(HybridSearchHit {
-                    score: h.score,
-                    match_type: "semantic".to_string(),
-                    file: h.file,
-                });
-            }
-            if out.len() >= limit {
-                break;
+
+            let mut semantic_added = 0usize;
+            for h in content_hits {
+                if seen.insert(h.file.path.clone()) {
+                    out.push(HybridSearchHit {
+                        score: h.score,
+                        match_type: "semantic".to_string(),
+                        file: h.file,
+                    });
+                    semantic_added += 1;
+                }
+                if semantic_added >= semantic_limit {
+                    break;
+                }
             }
         }
     }
-    Ok(out.into_iter().take(limit).collect())
+    Ok(out)
 }
 
 #[tauri::command]
