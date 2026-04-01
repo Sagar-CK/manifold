@@ -3,7 +3,17 @@ import { Link } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { Settings } from "lucide-react";
+import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "../components/ui/alert-dialog";
 import type { LocalConfig } from "../lib/localConfig";
 import { EmbeddingStatusPanel } from "../components/EmbeddingStatusPanel";
 import { PageHeader } from "../components/PageHeader";
@@ -46,6 +56,43 @@ const SEARCH_DEBUG =
   (typeof window !== "undefined" && window.localStorage.getItem("manifold:debug:search") === "1");
 const THUMBNAIL_CONCURRENCY = 4;
 
+type SearchResult = {
+  score: number;
+  matchType: "textMatch" | "semantic";
+  file: {
+    path: string;
+    contentHash: string;
+  };
+};
+
+type SearchResultGroup = {
+  key: string;
+  primaryResult: SearchResult;
+  variants: SearchResult[];
+};
+
+function choosePrimaryResult(a: SearchResult, b: SearchResult) {
+  if (a.matchType !== b.matchType) {
+    return a.matchType === "textMatch" ? a : b;
+  }
+  return a.score >= b.score ? a : b;
+}
+
+function groupResultsByContentHash(results: SearchResult[]): SearchResultGroup[] {
+  const byHash = new Map<string, SearchResultGroup>();
+  for (const result of results) {
+    const key = result.file.contentHash || result.file.path;
+    const existing = byHash.get(key);
+    if (!existing) {
+      byHash.set(key, { key, primaryResult: result, variants: [result] });
+      continue;
+    }
+    existing.variants.push(result);
+    existing.primaryResult = choosePrimaryResult(existing.primaryResult, result);
+  }
+  return Array.from(byHash.values());
+}
+
 export function SearchPage({
   cfg,
   embedding,
@@ -68,20 +115,15 @@ export function SearchPage({
   const [embeddedCount, setEmbeddedCount] = useState<number | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [openError, setOpenError] = useState<string | null>(null);
-  const [results, setResults] = useState<
-    Array<{
-      score: number;
-      matchType: "textMatch" | "semantic";
-      file: {
-        path: string;
-      };
-    }>
-  >([]);
+  const [results, setResults] = useState<SearchResult[]>([]);
+  const [selectedGroupForOpen, setSelectedGroupForOpen] = useState<SearchResultGroup | null>(null);
+  const [pathChooserOpen, setPathChooserOpen] = useState(false);
   const [thumbByPath, setThumbByPath] = useState<Record<string, string>>({});
   const searchRunSeqRef = useRef(0);
   const latestRunRef = useRef(0);
   const runStartMsRef = useRef(0);
   const thumbCacheRef = useRef<Record<string, string>>({});
+  const fullTextCacheRef = useRef<Record<string, string>>({});
   const liveIndexedCount =
     embedding || hasPendingEmbeds
       ? Math.max(embeddedCount ?? 0, embedProgress.processed)
@@ -148,7 +190,7 @@ export function SearchPage({
     setOpenError(null);
 
     const searchLimit = cfg.searchMode === "topK" ? cfg.topK : 256;
-    let res: typeof results;
+    let res: SearchResult[];
     try {
       res = (await invoke("hybrid_search", {
         args: {
@@ -156,7 +198,7 @@ export function SearchPage({
           queryText,
           limit: searchLimit,
         },
-      })) as typeof results;
+      })) as SearchResult[];
       logSearch(runId, "semantic search resolved", {
         elapsedMs: Math.round(performance.now() - stageStartMs),
         rawResultCount: res.length,
@@ -171,8 +213,8 @@ export function SearchPage({
     }
     const filtered =
       cfg.searchMode === "scoreThreshold"
-        ? (res as typeof results).filter((r) => r.score >= cfg.scoreThreshold)
-        : (res as typeof results).slice(0, cfg.topK);
+        ? res.filter((r) => r.score >= cfg.scoreThreshold)
+        : res.slice(0, cfg.topK);
 
     // Automatically ignore hits that are outside current selected folders/extensions.
     const selectedOnly = filtered.filter((r) => isPathSelected(r.file.path, cfg));
@@ -286,6 +328,7 @@ export function SearchPage({
 
   const showIndexedCountHint =
     !hasSearched && results.length === 0 && typeof liveIndexedCount === "number" && liveIndexedCount > 0;
+  const groupedResults = groupResultsByContentHash(results);
 
   return (
     <section className="flex min-h-[calc(100dvh-4rem)] flex-col">
@@ -334,14 +377,50 @@ export function SearchPage({
           )
         ) : (
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
-            {results.map((r) => (
+            {groupedResults.map((group) => (
               (() => {
+                const r = group.primaryResult;
                 const ext = r.file.path.split(".").pop()?.toLowerCase() ?? "";
+                const isStacked = group.variants.length > 1;
                 return (
               <button
-                key={r.file.path}
+                key={group.key}
                 type="button"
+                onMouseEnter={() => {
+                  if (r.matchType !== "textMatch") return;
+                  const cached = fullTextCacheRef.current[r.file.path];
+                  if (cached) {
+                    console.log("[search][text-match:hover:full-text]", {
+                      path: r.file.path,
+                      fullText: cached,
+                    });
+                    return;
+                  }
+                  void (async () => {
+                    try {
+                      const fullText = (await invoke("text_index_full_text_for_path", {
+                        args: { sourceId: cfg.sourceId, path: r.file.path },
+                      })) as string | null;
+                      if (!fullText) return;
+                      fullTextCacheRef.current[r.file.path] = fullText;
+                      console.log("[search][text-match:hover:full-text]", {
+                        path: r.file.path,
+                        fullText,
+                      });
+                    } catch (e) {
+                      console.warn("[search][text-match:hover:full-text] failed", {
+                        path: r.file.path,
+                        error: String(e),
+                      });
+                    }
+                  })();
+                }}
                 onClick={async () => {
+                  if (isStacked) {
+                    setSelectedGroupForOpen(group);
+                    setPathChooserOpen(true);
+                    return;
+                  }
                   try {
                     setOpenError(null);
                     await openPath(r.file.path);
@@ -349,14 +428,29 @@ export function SearchPage({
                     setOpenError(String(e));
                   }
                 }}
-                className="group relative flex flex-col items-center gap-2 min-w-0 rounded-lg p-1 hover:bg-black/4 transition-colors"
+                className={`group relative flex flex-col items-center gap-2 min-w-0 rounded-lg p-1 transition-colors ${
+                  r.matchType === "textMatch"
+                    ? "bg-emerald-50 hover:bg-emerald-100/70"
+                    : "hover:bg-black/4"
+                }`}
                 title={r.file.path}
               >
+                {isStacked ? (
+                  <div className="pointer-events-none absolute inset-0">
+                    <div className="absolute inset-x-1 top-1 h-full rounded-lg border border-black/10 bg-black/3" />
+                    <div className="absolute inset-x-2 top-2 h-full rounded-lg border border-black/10 bg-black/2" />
+                  </div>
+                ) : null}
                 <div className="pointer-events-none absolute right-2 top-2 rounded bg-black/75 px-2 py-1 text-[10px] font-medium leading-none tracking-wide text-white opacity-0 transition-opacity group-hover:opacity-100">
                   {r.matchType === "textMatch"
                     ? "Text match"
                     : `Similarity ${formatSimilarityScore(r.score)}`}
                 </div>
+                {isStacked ? (
+                  <div className="pointer-events-none absolute left-2 top-2 rounded bg-black/80 px-2 py-1 text-[10px] font-medium leading-none tracking-wide text-white">
+                    {group.variants.length} copies
+                  </div>
+                ) : null}
                 <div className="h-24 w-full rounded-md bg-black/5 overflow-hidden flex items-center justify-center">
                   {thumbByPath[r.file.path] ? (
                     <img src={thumbByPath[r.file.path]} className="h-full w-full object-contain" />
@@ -380,6 +474,49 @@ export function SearchPage({
           </div>
         )}
       </div>
+
+      <AlertDialog
+        open={pathChooserOpen}
+        onOpenChange={(open) => {
+          setPathChooserOpen(open);
+          if (!open) setSelectedGroupForOpen(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Choose file to open</AlertDialogTitle>
+            <AlertDialogDescription>
+              These files have identical content. Select the path you want to view.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="max-h-64 space-y-2 overflow-y-auto">
+            {(selectedGroupForOpen?.variants ?? []).map((variant) => (
+              <Button
+                key={variant.file.path}
+                type="button"
+                variant="outline"
+                className="w-full justify-start truncate"
+                onClick={async () => {
+                  try {
+                    setOpenError(null);
+                    await openPath(variant.file.path);
+                    setPathChooserOpen(false);
+                    setSelectedGroupForOpen(null);
+                  } catch (e) {
+                    setOpenError(String(e));
+                  }
+                }}
+                title={variant.file.path}
+              >
+                {variant.file.path}
+              </Button>
+            ))}
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <div className="mt-auto pt-4">
         {showIndexedCountHint ? (

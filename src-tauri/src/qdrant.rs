@@ -90,8 +90,10 @@ pub struct SemanticSearchHit {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SemanticSearchFile {
     pub path: String,
+    pub content_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -284,6 +286,181 @@ fn truncate_for_log(s: &str, max: usize) -> String {
     format!("{}…(truncated)", &s[..max])
 }
 
+fn file_payload(source_id: &str, path: &str, content_hash: &str) -> serde_json::Value {
+    let file_name = std::path::Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_string();
+    let extension = std::path::Path::new(path)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    serde_json::json!({
+        "sourceId": source_id,
+        "path": path,
+        "contentHash": content_hash,
+        "fileName": file_name,
+        "extension": extension,
+    })
+}
+
+async fn find_content_vector_by_hash(
+    http: &reqwest::Client,
+    base: &str,
+    source_id: &str,
+    content_hash: &str,
+) -> Result<Option<Vec<f32>>, String> {
+    #[derive(Debug, Serialize)]
+    struct ScrollBody {
+        limit: u32,
+        with_vector: bool,
+        with_payload: bool,
+        filter: Filter,
+    }
+    #[derive(Debug, Serialize)]
+    struct Filter {
+        must: Vec<Condition>,
+    }
+    #[derive(Debug, Serialize)]
+    struct Condition {
+        key: &'static str,
+        r#match: MatchValue,
+    }
+    #[derive(Debug, Serialize)]
+    struct MatchValue {
+        value: String,
+    }
+    #[derive(Debug, Deserialize)]
+    struct ScrollResponse {
+        result: ScrollResult,
+    }
+    #[derive(Debug, Deserialize)]
+    struct ScrollResult {
+        points: Vec<ScrollPoint>,
+    }
+    #[derive(Debug, Deserialize)]
+    struct ScrollPoint {
+        vector: Option<serde_json::Value>,
+    }
+
+    let body = ScrollBody {
+        limit: 1,
+        with_vector: true,
+        with_payload: false,
+        filter: Filter {
+            must: vec![
+                Condition {
+                    key: "sourceId",
+                    r#match: MatchValue {
+                        value: source_id.to_string(),
+                    },
+                },
+                Condition {
+                    key: "contentHash",
+                    r#match: MatchValue {
+                        value: content_hash.to_string(),
+                    },
+                },
+            ],
+        },
+    };
+    let url = format!("{base}/collections/{CONTENT_COLLECTION_NAME}/points/scroll");
+    let res = http
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("qdrant scroll request failed: {e}"))?;
+    let status = res.status();
+    if !status.is_success() {
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("Failed to scroll points: HTTP {}: {text}", status));
+    }
+    let json: ScrollResponse = res
+        .json()
+        .await
+        .map_err(|e| format!("Failed to decode scroll response: {e}"))?;
+    let vector_value = json.result.points.into_iter().find_map(|p| p.vector);
+    let Some(vector_value) = vector_value else {
+        return Ok(None);
+    };
+    if let Some(arr) = vector_value.as_array() {
+        let values: Vec<f32> = arr
+            .iter()
+            .filter_map(|v| v.as_f64())
+            .map(|x| x as f32)
+            .collect();
+        if values.len() == VECTOR_DIM {
+            return Ok(Some(values));
+        }
+        return Ok(None);
+    }
+    if let Some(obj) = vector_value.as_object() {
+        for v in obj.values() {
+            if let Some(arr) = v.as_array() {
+                let values: Vec<f32> = arr
+                    .iter()
+                    .filter_map(|x| x.as_f64())
+                    .map(|x| x as f32)
+                    .collect();
+                if values.len() == VECTOR_DIM {
+                    return Ok(Some(values));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+async fn upsert_content_vector_for_path(
+    http: &reqwest::Client,
+    base: &str,
+    source_id: &str,
+    path: &str,
+    content_hash: &str,
+    embedding: &[f32],
+) -> Result<(), String> {
+    #[derive(Debug, Serialize)]
+    struct UpsertBody<'a> {
+        points: Vec<Point<'a>>,
+    }
+    #[derive(Debug, Serialize)]
+    struct Point<'a> {
+        id: String,
+        vector: &'a [f32],
+        payload: serde_json::Value,
+    }
+
+    let id = point_id(source_id, path);
+    let body = UpsertBody {
+        points: vec![Point {
+            id: id.to_string(),
+            vector: embedding,
+            payload: file_payload(source_id, path, content_hash),
+        }],
+    };
+    let url = format!("{base}/collections/{CONTENT_COLLECTION_NAME}/points?wait=true");
+    let res = http
+        .put(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("qdrant content copy upsert request failed: {e}"))?;
+    let status = res.status();
+    if !status.is_success() {
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("Failed to upsert copied content vector: HTTP {}: {text}", status));
+    }
+    Ok(())
+}
+
+fn hash_prefix(value: &str) -> &str {
+    let n = std::cmp::min(12, value.len());
+    &value[..n]
+}
+
 pub async fn upsert_metadata(app: &AppHandle, state: &QdrantState, args: UpsertMetadataArgs) -> Result<UpsertMetadataResult, String> {
     let (http, base) = instance(app, state).await?;
 
@@ -344,7 +521,35 @@ pub async fn upsert_metadata(app: &AppHandle, state: &QdrantState, args: UpsertM
         .and_then(|r| r.vector.as_ref())
         .is_some_and(|v| v.len() == VECTOR_DIM);
     let hash_matches = existing_hash.as_deref() == Some(args.content_hash.as_str());
-    let should_embed_content = !(hash_matches && content_has_vector);
+    let mut reusable_content_vector = hash_matches && content_has_vector;
+    if !reusable_content_vector {
+        if let Some(existing_vector) = find_content_vector_by_hash(&http, &base, &args.source_id, &args.content_hash).await? {
+            upsert_content_vector_for_path(
+                &http,
+                &base,
+                &args.source_id,
+                &args.path,
+                &args.content_hash,
+                &existing_vector,
+            )
+            .await?;
+            tracing::info!(
+                source_id = %args.source_id,
+                path = %args.path,
+                content_hash_prefix = %hash_prefix(&args.content_hash),
+                "embedding dedupe hit: reused existing content vector"
+            );
+            reusable_content_vector = true;
+        } else {
+            tracing::debug!(
+                source_id = %args.source_id,
+                path = %args.path,
+                content_hash_prefix = %hash_prefix(&args.content_hash),
+                "embedding dedupe miss: no reusable content vector found"
+            );
+        }
+    }
+    let should_embed_content = !reusable_content_vector;
     let should_embed_metadata = !(hash_matches && metadata_has_vector);
     Ok(UpsertMetadataResult {
         should_embed_content,
@@ -375,23 +580,7 @@ pub async fn upsert_embedding(app: &AppHandle, state: &QdrantState, args: Upsert
         payload: serde_json::Value,
     }
 
-    let file_name = std::path::Path::new(&args.path)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default()
-        .to_string();
-    let extension = std::path::Path::new(&args.path)
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let payload = serde_json::json!({
-        "sourceId": args.source_id,
-        "path": args.path,
-        "contentHash": args.content_hash,
-        "fileName": file_name,
-        "extension": extension,
-    });
+    let payload = file_payload(&args.source_id, &args.path, &args.content_hash);
     let body = UpsertBody {
         points: vec![Point {
             id: id.to_string(),
@@ -570,10 +759,16 @@ pub async fn semantic_search(app: &AppHandle, state: &QdrantState, args: Semanti
             .and_then(|v| v.get("path"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        if let Some(path) = path {
+        let content_hash = p
+            .payload
+            .as_ref()
+            .and_then(|v| v.get("contentHash"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        if let (Some(path), Some(content_hash)) = (path, content_hash) {
             out.push(SemanticSearchHit {
                 score: p.score,
-                file: SemanticSearchFile { path },
+                file: SemanticSearchFile { path, content_hash },
             });
         }
     }

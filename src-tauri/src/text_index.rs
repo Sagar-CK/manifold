@@ -11,7 +11,7 @@ pub struct UpsertTextArgs {
     pub source_id: String,
     pub path: String,
     pub content_hash: String,
-    pub normalized_text: String,
+    pub raw_text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +26,7 @@ pub struct SearchTextArgs {
 #[serde(rename_all = "camelCase")]
 pub struct TextSearchHit {
     pub path: String,
+    pub content_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,12 +34,32 @@ struct IndexEntry {
     source_id: String,
     path: String,
     content_hash: String,
+    #[serde(default)]
+    raw_text: String,
     normalized_text: String,
 }
 
 fn normalize_for_match(value: &str) -> String {
-    value
-        .to_lowercase()
+    let mut normalized = String::with_capacity(value.len());
+    let mut prev_is_alpha = false;
+    let mut prev_is_digit = false;
+    for c in value.chars() {
+        if c.is_alphanumeric() {
+            let is_alpha = c.is_ascii_alphabetic();
+            let is_digit = c.is_ascii_digit();
+            if !normalized.is_empty() && ((prev_is_alpha && is_digit) || (prev_is_digit && is_alpha)) {
+                normalized.push(' ');
+            }
+            normalized.push(c.to_ascii_lowercase());
+            prev_is_alpha = is_alpha;
+            prev_is_digit = is_digit;
+        } else {
+            normalized.push(' ');
+            prev_is_alpha = false;
+            prev_is_digit = false;
+        }
+    }
+    normalized
         .split_whitespace()
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
@@ -72,6 +93,7 @@ fn save_entries(app: &tauri::AppHandle, entries: &[IndexEntry]) -> Result<(), St
     std::fs::write(p, raw).map_err(|e| format!("failed to write text index: {e}"))
 }
 
+#[cfg(test)]
 pub fn normalize_text(value: &str) -> String {
     normalize_for_match(value)
 }
@@ -83,9 +105,23 @@ pub fn upsert_text(app: &tauri::AppHandle, args: UpsertTextArgs) -> Result<(), S
         source_id: args.source_id,
         path: args.path,
         content_hash: args.content_hash,
-        normalized_text: normalize_for_match(&args.normalized_text),
+        raw_text: args.raw_text.clone(),
+        normalized_text: normalize_for_match(&args.raw_text),
     });
     save_entries(app, &entries)
+}
+
+pub fn get_full_text_for_path(
+    app: &tauri::AppHandle,
+    source_id: &str,
+    path: &str,
+) -> Result<Option<String>, String> {
+    let entries = load_entries(app)?;
+    let value = entries
+        .into_iter()
+        .find(|e| e.source_id == source_id && e.path == path)
+        .map(|e| if e.raw_text.is_empty() { e.normalized_text } else { e.raw_text });
+    Ok(value)
 }
 
 pub fn delete_all_for_source(app: &tauri::AppHandle, source_id: &str) -> Result<(), String> {
@@ -107,14 +143,29 @@ pub fn search_text(app: &tauri::AppHandle, args: SearchTextArgs) -> Result<Vec<T
     if normalized_query.is_empty() {
         return Ok(Vec::new());
     }
+    let query_terms: Vec<&str> = normalized_query
+        .split_whitespace()
+        .filter(|t| !t.is_empty())
+        .collect();
+    if query_terms.is_empty() {
+        return Ok(Vec::new());
+    }
     let limit = args.limit.unwrap_or(32).clamp(1, 256) as usize;
     let mut out = Vec::new();
     for entry in entries {
         if entry.source_id != args.source_id {
             continue;
         }
-        if entry.normalized_text.contains(&normalized_query) {
-            out.push(TextSearchHit { path: entry.path });
+        let terms_source = normalize_for_match(&entry.normalized_text);
+        let terms: HashSet<&str> = terms_source
+            .split_whitespace()
+            .filter(|t| !t.is_empty())
+            .collect();
+        if query_terms.iter().all(|q| terms.contains(q)) {
+            out.push(TextSearchHit {
+                path: entry.path,
+                content_hash: entry.content_hash,
+            });
             if out.len() >= limit {
                 break;
             }

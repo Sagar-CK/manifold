@@ -106,7 +106,8 @@ pub fn run() {
             resume_embedding_job,
             cancel_embedding_job,
             embedding_job_status,
-            embed_query_text
+            embed_query_text,
+            text_index_full_text_for_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -671,6 +672,13 @@ struct HybridSearchHit {
     file: qdrant::SemanticSearchFile,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TextIndexFullTextArgs {
+    source_id: String,
+    path: String,
+}
+
 #[tauri::command]
 async fn hybrid_search(
     app: tauri::AppHandle,
@@ -694,7 +702,10 @@ async fn hybrid_search(
             out.push(HybridSearchHit {
                 score: 1.0,
                 match_type: "textMatch".to_string(),
-                file: qdrant::SemanticSearchFile { path: hit.path },
+                file: qdrant::SemanticSearchFile {
+                    path: hit.path,
+                    content_hash: hit.content_hash,
+                },
             });
         }
     }
@@ -727,6 +738,14 @@ async fn hybrid_search(
         }
     }
     Ok(out.into_iter().take(limit).collect())
+}
+
+#[tauri::command]
+async fn text_index_full_text_for_path(
+    app: tauri::AppHandle,
+    args: TextIndexFullTextArgs,
+) -> Result<Option<String>, String> {
+    text_index::get_full_text_for_path(&app, &args.source_id, &args.path)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -126,22 +126,6 @@ fn read_gemini_api_key() -> Result<String, String> {
     Ok(key)
 }
 
-fn should_emit(last_emit: &mut Instant, processed: u64, total: u64) -> bool {
-    if processed == 0 {
-        return true;
-    }
-    if processed >= total {
-        return true;
-    }
-    if processed % 25 == 0 {
-        return true;
-    }
-    if last_emit.elapsed() >= Duration::from_millis(250) {
-        return true;
-    }
-    false
-}
-
 fn emit_status(app: &tauri::AppHandle, status: &EmbeddingJobStatus) {
     let _ = app.emit("embedding://status", status);
 }
@@ -328,6 +312,21 @@ fn format_error_chain(err: &(dyn std::error::Error + 'static)) -> String {
     parts.join(": ")
 }
 
+fn truncate_for_log(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    for (i, ch) in s.chars().enumerate() {
+        if i >= max_chars {
+            break;
+        }
+        out.push(ch);
+    }
+    out.push_str("...(truncated)");
+    out
+}
+
 async fn gemini_embed_post(client: &GeminiClient, body: serde_json::Value) -> Result<Vec<f32>, String> {
     async fn sleep_ms(ms: u64) {
         tokio::time::sleep(Duration::from_millis(ms)).await;
@@ -429,9 +428,11 @@ async fn embed_with_gemini(
 
 async fn extract_text_with_gemini(
     client: &GeminiClient,
+    file_path: &str,
     mime_type: &str,
     bytes: Vec<u8>,
 ) -> Result<String, String> {
+    let input_size_bytes = bytes.len();
     let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
     let body = serde_json::json!({
         "contents": [{
@@ -461,10 +462,22 @@ async fn extract_text_with_gemini(
         .await
         .map_err(|e| {
             let chain = format_error_chain(&e);
-            tracing::error!(error = %chain, "gemini text extraction request failed");
-            format!("Gemini text extraction request failed: {chain}")
+            tracing::error!(
+                file_path = %file_path,
+                mime_type = %mime_type,
+                model = GEMINI_OCR_MODEL,
+                url = %url,
+                input_size_bytes,
+                error = %chain,
+                "gemini text extraction request failed"
+            );
+            format!(
+                "Gemini text extraction request failed for {} ({}): {}",
+                file_path, mime_type, chain
+            )
         })?;
     let status = res.status();
+    let headers = format!("{:?}", res.headers());
     let text = res.text().await.unwrap_or_default();
     if !status.is_success() {
         let api_message = serde_json::from_str::<serde_json::Value>(&text)
@@ -476,14 +489,20 @@ async fn extract_text_with_gemini(
                     .map(|s| s.to_string())
             });
         tracing::error!(
+            file_path = %file_path,
+            mime_type = %mime_type,
+            model = GEMINI_OCR_MODEL,
+            url = %url,
             status = status.as_u16(),
+            headers = %headers,
             api_message = ?api_message,
-            body = %text,
+            body = %truncate_for_log(&text, 4000),
             "gemini text extraction failed"
         );
         let details = api_message.unwrap_or(text);
         return Err(format!(
-            "Gemini text extraction failed (HTTP {}): {}",
+            "Gemini text extraction failed for {} (HTTP {}): {}",
+            file_path,
             status.as_u16(),
             details
         ));
@@ -565,7 +584,6 @@ pub async fn start(
     let app2 = app.clone();
     tauri::async_runtime::spawn(async move {
         let job_started = Instant::now();
-        let mut last_emit = Instant::now();
         let gemini = match GeminiClient::new(api_key.clone()) {
             Ok(c) => c,
             Err(e) => {
@@ -758,11 +776,19 @@ pub async fn start(
                 let text_handle = {
                     let gemini = gemini_for_file.clone();
                     let mime = mime_owned;
+                    let file_path_for_text = file_path.clone();
                     tokio::spawn(async move {
                         if pending.should_embed_content && supports_text_extraction(&ext) {
                             if let (Some(mime), Some(raw)) = (mime, bytes) {
                                 let started = Instant::now();
-                                let extracted = extract_text_with_gemini(&gemini, &mime, raw).await.ok();
+                                let extracted = extract_text_with_gemini(
+                                    &gemini,
+                                    &file_path_for_text,
+                                    &mime,
+                                    raw,
+                                )
+                                .await
+                                .ok();
                                 Ok::<(Option<String>, u128), String>((
                                     extracted,
                                     started.elapsed().as_millis(),
@@ -864,15 +890,14 @@ pub async fn start(
                     }
                     _ => metadata_text.clone(),
                 };
-                let normalized = text_index::normalize_text(&direct_match_text);
-                if !normalized.is_empty() {
+                if !direct_match_text.trim().is_empty() {
                     let _ = text_index::upsert_text(
                         &app_for_file,
                         text_index::UpsertTextArgs {
                             source_id: source_id_for_file.clone(),
                             path: file_path.clone(),
                             content_hash: sha256.clone(),
-                            normalized_text: normalized,
+                            raw_text: direct_match_text,
                         },
                     );
                 }
@@ -895,31 +920,28 @@ pub async fn start(
             let completed = joined.unwrap_or(false);
             // Count every finished file task (success or failure) so UI progress reflects real-time completion.
             processed = processed.saturating_add(1);
-            if should_emit(&mut last_emit, processed, total) {
-                let mgr = app2.state::<EmbeddingManager>();
-                let mut s = mgr.state.lock().await;
-                s.processed = processed;
-                s.phase = if *pause_rx.borrow() {
-                    EmbeddingJobPhase::Paused
-                } else {
-                    EmbeddingJobPhase::Embedding
-                };
-                s.message = if completed {
-                    "Embedding in progress…".to_string()
-                } else {
-                    "Embedding in progress (some files failed)…".to_string()
-                };
-                emit_status(
-                    &app2,
-                    &EmbeddingJobStatus {
-                        phase: s.phase.clone(),
-                        processed: s.processed,
-                        total: s.total,
-                        message: s.message.clone(),
-                    },
-                );
-                last_emit = Instant::now();
-            }
+            let mgr = app2.state::<EmbeddingManager>();
+            let mut s = mgr.state.lock().await;
+            s.processed = processed;
+            s.phase = if *pause_rx.borrow() {
+                EmbeddingJobPhase::Paused
+            } else {
+                EmbeddingJobPhase::Embedding
+            };
+            s.message = if completed {
+                "Embedding in progress…".to_string()
+            } else {
+                "Embedding in progress (some files failed)…".to_string()
+            };
+            emit_status(
+                &app2,
+                &EmbeddingJobStatus {
+                    phase: s.phase.clone(),
+                    processed: s.processed,
+                    total: s.total,
+                    message: s.message.clone(),
+                },
+            );
         }
 
         let cancelled = cancel_flag.load(Ordering::Relaxed);
