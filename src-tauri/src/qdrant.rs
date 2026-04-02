@@ -43,7 +43,7 @@ impl Default for QdrantState {
 }
 
 struct QdrantInstance {
-    base_url: String,
+    _base_url: String,
     client: Qdrant,
 }
 
@@ -135,6 +135,9 @@ fn point_id(source_id: &str, path: &str) -> PointId {
 fn build_qdrant_client(url: &str, timeout_ms: u64, connect_timeout_ms: Option<u64>) -> Result<Qdrant, String> {
     let mut builder = Qdrant::from_url(url).timeout(Duration::from_millis(timeout_ms));
     
+    // Disable startup version check that logs spam when local process is booting
+    builder.check_compatibility = false;
+
     if let Some(ct) = connect_timeout_ms {
         builder = builder.connect_timeout(Duration::from_millis(ct));
     }
@@ -334,7 +337,7 @@ async fn start_qdrant(app: &AppHandle, state: &QdrantState) -> Result<QdrantInst
     quick_ready(&client).await?;
     ensure_collection(&client, CONTENT_COLLECTION_NAME).await?;
     ensure_collection(&client, METADATA_COLLECTION_NAME).await?;
-    Ok(QdrantInstance { base_url: trimmed, client })
+    Ok(QdrantInstance { _base_url: trimmed, client })
 }
 
 async fn instance(app: &AppHandle, state: &QdrantState) -> Result<Qdrant, String> {
