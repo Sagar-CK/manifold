@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use tauri::Manager;
 
 const INDEX_FILE_NAME: &str = "text_index_v1.json";
@@ -30,13 +32,19 @@ pub struct TextSearchHit {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct IndexEntry {
-    source_id: String,
-    path: String,
-    content_hash: String,
+pub(crate) struct IndexEntry {
+    pub(crate) source_id: String,
+    pub(crate) path: String,
+    pub(crate) content_hash: String,
     #[serde(default)]
-    raw_text: String,
-    normalized_text: String,
+    pub(crate) raw_text: String,
+    pub(crate) normalized_text: String,
+}
+
+
+#[derive(Default, Debug)]
+pub struct TextIndexState {
+    pub entries: Arc<RwLock<Option<Vec<IndexEntry>>>>,
 }
 
 fn normalize_for_match(value: &str) -> String {
@@ -75,16 +83,25 @@ fn index_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(base.join(INDEX_FILE_NAME))
 }
 
-fn load_entries(app: &tauri::AppHandle) -> Result<Vec<IndexEntry>, String> {
+async fn ensure_loaded(app: &tauri::AppHandle, state: &TextIndexState) -> Result<(), String> {
+    let mut lock = state.entries.write().await;
+    if lock.is_some() {
+        return Ok(());
+    }
+
     let p = index_path(app)?;
     if !p.exists() {
-        return Ok(Vec::new());
+        *lock = Some(Vec::new());
+        return Ok(());
     }
     let raw = std::fs::read_to_string(&p).map_err(|e| format!("failed to read text index: {e}"))?;
     if raw.trim().is_empty() {
-        return Ok(Vec::new());
+        *lock = Some(Vec::new());
+        return Ok(());
     }
-    serde_json::from_str(&raw).map_err(|e| format!("failed to decode text index: {e}"))
+    let entries: Vec<IndexEntry> = serde_json::from_str(&raw).map_err(|e| format!("failed to decode text index: {e}"))?;
+    *lock = Some(entries);
+    Ok(())
 }
 
 fn save_entries(app: &tauri::AppHandle, entries: &[IndexEntry]) -> Result<(), String> {
@@ -98,8 +115,10 @@ pub fn normalize_text(value: &str) -> String {
     normalize_for_match(value)
 }
 
-pub fn upsert_text(app: &tauri::AppHandle, args: UpsertTextArgs) -> Result<(), String> {
-    let mut entries = load_entries(app)?;
+pub async fn upsert_text(app: &tauri::AppHandle, state: &TextIndexState, args: UpsertTextArgs) -> Result<(), String> {
+    ensure_loaded(app, state).await?;
+    let mut lock = state.entries.write().await;
+    let entries = lock.as_mut().unwrap();
     entries.retain(|e| !(e.source_id == args.source_id && e.path == args.path));
     entries.push(IndexEntry {
         source_id: args.source_id,
@@ -108,37 +127,44 @@ pub fn upsert_text(app: &tauri::AppHandle, args: UpsertTextArgs) -> Result<(), S
         raw_text: args.raw_text.clone(),
         normalized_text: normalize_for_match(&args.raw_text),
     });
-    save_entries(app, &entries)
+    save_entries(app, entries)
 }
 
-pub fn get_full_text_for_path(
+pub async fn get_full_text_for_path(
     app: &tauri::AppHandle,
+    state: &TextIndexState,
     source_id: &str,
     path: &str,
 ) -> Result<Option<String>, String> {
-    let entries = load_entries(app)?;
+    ensure_loaded(app, state).await?;
+    let lock = state.entries.read().await;
+    let entries = lock.as_ref().unwrap();
     let value = entries
-        .into_iter()
+        .iter()
         .find(|e| e.source_id == source_id && e.path == path)
-        .map(|e| if e.raw_text.is_empty() { e.normalized_text } else { e.raw_text });
+        .map(|e| if e.raw_text.is_empty() { e.normalized_text.clone() } else { e.raw_text.clone() });
     Ok(value)
 }
 
-pub fn delete_all_for_source(app: &tauri::AppHandle, source_id: &str) -> Result<(), String> {
-    let mut entries = load_entries(app)?;
+pub async fn delete_all_for_source(app: &tauri::AppHandle, state: &TextIndexState, source_id: &str) -> Result<(), String> {
+    ensure_loaded(app, state).await?;
+    let mut lock = state.entries.write().await;
+    let entries = lock.as_mut().unwrap();
     entries.retain(|e| e.source_id != source_id);
-    save_entries(app, &entries)
+    save_entries(app, entries)
 }
 
-pub fn delete_for_paths(app: &tauri::AppHandle, source_id: &str, paths: &[String]) -> Result<(), String> {
+pub async fn delete_for_paths(app: &tauri::AppHandle, state: &TextIndexState, source_id: &str, paths: &[String]) -> Result<(), String> {
+    ensure_loaded(app, state).await?;
     let path_set: HashSet<&str> = paths.iter().map(String::as_str).collect();
-    let mut entries = load_entries(app)?;
+    let mut lock = state.entries.write().await;
+    let entries = lock.as_mut().unwrap();
     entries.retain(|e| !(e.source_id == source_id && path_set.contains(e.path.as_str())));
-    save_entries(app, &entries)
+    save_entries(app, entries)
 }
 
-pub fn search_text(app: &tauri::AppHandle, args: SearchTextArgs) -> Result<Vec<TextSearchHit>, String> {
-    let entries = load_entries(app)?;
+pub async fn search_text(app: &tauri::AppHandle, state: &TextIndexState, args: SearchTextArgs) -> Result<Vec<TextSearchHit>, String> {
+    ensure_loaded(app, state).await?;
     let normalized_query = normalize_for_match(&args.query);
     if normalized_query.is_empty() {
         return Ok(Vec::new());
@@ -152,19 +178,25 @@ pub fn search_text(app: &tauri::AppHandle, args: SearchTextArgs) -> Result<Vec<T
     }
     let limit = args.limit.unwrap_or(32).clamp(1, 256) as usize;
     let mut out = Vec::new();
+    
+    let lock = state.entries.read().await;
+    let entries = lock.as_ref().unwrap();
+    
     for entry in entries {
         if entry.source_id != args.source_id {
             continue;
         }
-        let terms_source = normalize_for_match(&entry.normalized_text);
-        let terms: HashSet<&str> = terms_source
-            .split_whitespace()
-            .filter(|t| !t.is_empty())
-            .collect();
-        if query_terms.iter().all(|q| terms.contains(q)) {
+        // Entry is already normalized, check if all query terms are present as whole words
+        let terms_source = &entry.normalized_text;
+        
+        // Use word boundaries by checking surrounding characters or just splitting
+        // Since terms_source is already normalized (space-separated), we can split it
+        let entry_words: HashSet<&str> = terms_source.split_whitespace().collect();
+        
+        if query_terms.iter().all(|q| entry_words.contains(q)) {
             out.push(TextSearchHit {
-                path: entry.path,
-                content_hash: entry.content_hash,
+                path: entry.path.clone(),
+                content_hash: entry.content_hash.clone(),
             });
             if out.len() >= limit {
                 break;
@@ -173,6 +205,7 @@ pub fn search_text(app: &tauri::AppHandle, args: SearchTextArgs) -> Result<Vec<T
     }
     Ok(out)
 }
+
 
 #[cfg(test)]
 mod tests {

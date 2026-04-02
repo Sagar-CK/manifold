@@ -169,6 +169,7 @@ body {
     animation: embedding-scan-slide 1.25s ease-in-out infinite, embedding-scan-pulse 1.4s ease-in-out infinite;
     will-change: transform, opacity;
   }
+
 }
 
 @keyframes embedding-scan-slide {

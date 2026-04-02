@@ -12,6 +12,8 @@ use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 use tokio::sync::{watch, Mutex};
 use walkdir::WalkDir;
+use lru::LruCache;
+use std::num::NonZeroUsize;
 
 const OUTPUT_DIM: usize = 3072;
 const MAX_FILE_BYTES: u64 = 25 * 1024 * 1024; // 25MB
@@ -56,6 +58,7 @@ struct EmbeddingManagerState {
     message: String,
     pause_tx: watch::Sender<bool>,
     cancel_flag: Arc<AtomicBool>,
+    gemini_client: Option<GeminiClient>,
 }
 
 impl Default for EmbeddingManager {
@@ -70,6 +73,7 @@ impl Default for EmbeddingManager {
                 message: "Idle".to_string(),
                 pause_tx,
                 cancel_flag: Arc::new(AtomicBool::new(false)),
+                gemini_client: None,
             }),
         }
     }
@@ -85,7 +89,19 @@ impl EmbeddingManager {
             message: s.message.clone(),
         }
     }
+
+    pub async fn get_gemini_client(&self) -> Result<GeminiClient, String> {
+        let mut s = self.state.lock().await;
+        if let Some(client) = &s.gemini_client {
+            return Ok(client.clone());
+        }
+        let api_key = read_gemini_api_key()?;
+        let client = GeminiClient::new(api_key)?;
+        s.gemini_client = Some(client.clone());
+        Ok(client)
+    }
 }
+
 
 fn mime_type_for_ext(ext: &str) -> Option<&'static str> {
     match ext {
@@ -286,9 +302,10 @@ struct GeminiEmbeddingValues {
 }
 
 #[derive(Clone)]
-struct GeminiClient {
+pub struct GeminiClient {
     http: reqwest::Client,
     api_key: String,
+    query_cache: Arc<Mutex<LruCache<String, Vec<f32>>>>,
 }
 
 impl GeminiClient {
@@ -297,9 +314,19 @@ impl GeminiClient {
             .connect_timeout(Duration::from_secs(15))
             .build()
             .map_err(|e| e.to_string())?;
-        Ok(Self { http, api_key })
+        let query_cache = Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(128).unwrap())));
+        Ok(Self { http, api_key, query_cache })
     }
 }
+
+impl std::fmt::Debug for GeminiClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GeminiClient")
+            .field("api_key", &"REDACTED")
+            .finish()
+    }
+}
+
 
 fn l2_normalize_vec(mut v: Vec<f32>) -> Vec<f32> {
     let mut sum_sq: f64 = 0.0;
@@ -356,7 +383,7 @@ async fn gemini_embed_post(client: &GeminiClient, body: serde_json::Value) -> Re
     loop {
         attempt += 1;
         let started = Instant::now();
-        let res = client
+        let res = match client
             .http
             .post(&url)
             .header("Content-Type", "application/json")
@@ -365,16 +392,30 @@ async fn gemini_embed_post(client: &GeminiClient, body: serde_json::Value) -> Re
             .json(&body)
             .send()
             .await
-            .map_err(|e| {
+        {
+            Ok(r) => r,
+            Err(e) => {
                 let elapsed_ms = started.elapsed().as_millis() as u64;
+                let chain = format_error_chain(&e);
+                let should_retry = attempt < 5;
                 tracing::error!(
                     attempt,
                     elapsed_ms,
-                    error = %e,
-                    "gemini embedContent request failed"
+                    will_retry = should_retry,
+                    error = %chain,
+                    "gemini embedContent request failed before HTTP response"
                 );
-                format!("Gemini embedContent request failed after {}ms: {e}", elapsed_ms)
-            })?;
+                if should_retry {
+                    sleep_ms(backoff_ms).await;
+                    backoff_ms = std::cmp::min(5000, ((backoff_ms as f64) * 1.8).round() as u64);
+                    continue;
+                }
+                return Err(format!(
+                    "Gemini embedContent request failed after {}ms: {}",
+                    elapsed_ms, chain
+                ));
+            }
+        };
 
         let status = res.status();
         let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -501,8 +542,7 @@ async fn extract_text_with_gemini(
             Err(e) => {
                 let attempt_elapsed_ms = attempt_started.elapsed().as_millis();
                 let chain = format_error_chain(&e);
-                let is_timeout = e.is_timeout();
-                let should_retry = is_timeout && attempt < GEMINI_OCR_MAX_ATTEMPTS;
+                let should_retry = attempt < GEMINI_OCR_MAX_ATTEMPTS;
                 tracing::error!(
                     file_path = %file_path,
                     mime_type = %mime_type,
@@ -512,7 +552,6 @@ async fn extract_text_with_gemini(
                     attempt,
                     attempt_elapsed_ms,
                     timeout_secs = GEMINI_OCR_TIMEOUT_SECS,
-                    is_timeout,
                     will_retry = should_retry,
                     error = %chain,
                     "gemini text extraction request failed before HTTP response"
@@ -583,21 +622,36 @@ async fn extract_text_with_gemini(
 }
 
 /// Embed a search query using the same API key env as file embedding (Rust-side).
-pub async fn embed_query_text(text: &str) -> Result<Vec<f32>, String> {
-    let api_key = read_gemini_api_key()?;
-    let client = GeminiClient::new(api_key)?;
+pub async fn embed_query_text(app: &tauri::AppHandle, text: &str) -> Result<Vec<f32>, String> {
+    let mgr = app.state::<EmbeddingManager>();
+    let client = mgr.get_gemini_client().await?;
     embed_query_text_with_client(&client, text).await
 }
 
 async fn embed_query_text_with_client(client: &GeminiClient, text: &str) -> Result<Vec<f32>, String> {
+    {
+        let mut cache = client.query_cache.lock().await;
+        if let Some(v) = cache.get(text) {
+            return Ok(v.clone());
+        }
+    }
+
     let body = serde_json::json!({
         "content": {
             "parts": [{ "text": text }]
         },
         "output_dimensionality": OUTPUT_DIM
     });
-    gemini_embed_post(client, body).await
+    let v = gemini_embed_post(client, body).await?;
+
+    {
+        let mut cache = client.query_cache.lock().await;
+        cache.put(text.to_string(), v.clone());
+    }
+
+    Ok(v)
 }
+
 
 pub async fn start(
     app: tauri::AppHandle,
@@ -797,7 +851,6 @@ pub async fn start(
                     match std::fs::read(path) {
                         Ok(b) => Some(b),
                         Err(e) => {
-                            emit_error(&app_for_file, &e.to_string());
                             emit_file_failed(&app_for_file, path, &format!("file read failed: {e}"));
                             return false;
                         }
@@ -894,7 +947,6 @@ pub async fn start(
                 let (content_embedding, content_elapsed) = match content_res {
                     Ok(v) => v,
                     Err(e) => {
-                        emit_error(&app_for_file, &e);
                         emit_file_failed(&app_for_file, path, &format!("embedding request failed: {e}"));
                         return false;
                     }
@@ -904,7 +956,6 @@ pub async fn start(
                 let (metadata_embedding, metadata_elapsed) = match metadata_res {
                     Ok(v) => v,
                     Err(e) => {
-                        emit_error(&app_for_file, &e);
                         emit_file_failed(&app_for_file, path, &format!("metadata embedding failed: {e}"));
                         return false;
                     }
@@ -931,7 +982,6 @@ pub async fn start(
                     )
                     .await
                     {
-                        emit_error(&app_for_file, &e);
                         emit_file_failed(&app_for_file, path, &format!("vector upsert failed: {e}"));
                         return false;
                     }
@@ -950,7 +1000,6 @@ pub async fn start(
                     )
                     .await
                     {
-                        emit_error(&app_for_file, &e);
                         emit_file_failed(
                             &app_for_file,
                             path,
@@ -967,15 +1016,17 @@ pub async fn start(
                     _ => metadata_text.clone(),
                 };
                 if !direct_match_text.trim().is_empty() {
+                    let text_index_state = app_for_file.state::<text_index::TextIndexState>();
                     let _ = text_index::upsert_text(
                         &app_for_file,
+                        &text_index_state,
                         text_index::UpsertTextArgs {
                             source_id: source_id_for_file.clone(),
                             path: file_path.clone(),
                             content_hash: sha256.clone(),
                             raw_text: direct_match_text,
                         },
-                    );
+                    ).await;
                 }
                 tracing::info!(
                     path = %file_path,

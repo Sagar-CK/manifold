@@ -175,8 +175,8 @@ export default function RouterApp() {
   }, []);
 
   return (
-    <main className="min-h-screen w-full bg-[#f6f7fb] text-black">
-      <div className="mx-auto max-w-5xl px-6 py-8">
+    <main className="h-screen w-full overflow-hidden bg-[#f6f7fb] text-black">
+      <div className="mx-auto flex h-full max-w-5xl flex-col px-6 py-8">
         <EnvIssuesBanner issues={envIssues} />
         <Routes>
           <Route

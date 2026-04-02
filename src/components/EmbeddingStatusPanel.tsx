@@ -55,7 +55,7 @@ export function EmbeddingStatusPanel({
         <div className="mt-2 text-center text-xs font-medium text-rose-700">
           {embedFailures.length} file(s) failed to embed. See logs for detail.
         </div>
-      ) : lastEmbedError ? (
+      ) : lastEmbedError && lastEmbedError !== "Cancelled" ? (
         <div className="mt-2 text-center text-xs font-medium text-rose-700">
           Embedding encountered an error. See logs for detail.
         </div>

@@ -1,0 +1,8 @@
+[package]
+name = "qdrant_test"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+qdrant-client = "1.17"
+tokio = { version = "1.50.0", features = ["rt-multi-thread", "macros"] }

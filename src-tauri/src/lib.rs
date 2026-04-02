@@ -1,4 +1,5 @@
 use base64::Engine;
+use pdfium_render::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -6,6 +7,8 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Duration;
+use tauri::Manager;
 use walkdir::WalkDir;
 
 mod qdrant;
@@ -13,6 +16,7 @@ mod embedding;
 mod text_index;
 
 const THUMB_CACHE_MAX_ENTRIES: usize = 512;
+const THUMB_CACHE_SCHEMA_VERSION: &str = "v2";
 
 #[derive(Debug, Clone)]
 struct ThumbnailCacheEntry {
@@ -28,8 +32,51 @@ struct ThumbnailCache {
     entries: Mutex<HashMap<String, ThumbnailCacheEntry>>,
 }
 
-fn thumbnail_cache_key(path: &str, max_edge: u32) -> String {
-    format!("{path}::{max_edge}")
+fn thumbnail_cache_key(path: &str, max_edge: u32, page: u16) -> String {
+    format!("{path}::{page}::{max_edge}")
+}
+
+fn thumbnail_fingerprint(mtime_ms: i64, size_bytes: u64) -> String {
+    format!("{mtime_ms}:{size_bytes}")
+}
+
+fn thumbnail_disk_cache_path(
+    app: &tauri::AppHandle,
+    cache_key: &str,
+    fingerprint: &str,
+) -> Result<PathBuf, String> {
+    let mut dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+    dir.push("thumbnails");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut hasher = Sha256::new();
+    hasher.update(THUMB_CACHE_SCHEMA_VERSION.as_bytes());
+    hasher.update(cache_key.as_bytes());
+    hasher.update(fingerprint.as_bytes());
+    let file_name = format!("{}.b64", hex::encode(hasher.finalize()));
+    Ok(dir.join(file_name))
+}
+
+fn load_disk_thumbnail_base64(
+    app: &tauri::AppHandle,
+    cache_key: &str,
+    fingerprint: &str,
+) -> Result<Option<String>, String> {
+    let path = thumbnail_disk_cache_path(app, cache_key, fingerprint)?;
+    match fs::read_to_string(path) {
+        Ok(data) => Ok(Some(data)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+fn store_disk_thumbnail_base64(
+    app: &tauri::AppHandle,
+    cache_key: &str,
+    fingerprint: &str,
+    png_base64: &str,
+) -> Result<(), String> {
+    let path = thumbnail_disk_cache_path(app, cache_key, fingerprint)?;
+    fs::write(path, png_base64.as_bytes()).map_err(|e| e.to_string())
 }
 
 fn thumbnail_file_kind(path: &Path) -> String {
@@ -45,6 +92,57 @@ fn render_image_thumbnail_base64(path: &Path, max_edge: u32) -> Result<String, S
     let resized = img.thumbnail(max_edge, max_edge);
     let mut out = Vec::new();
     resized
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(out))
+}
+
+fn load_pdfium(candidates: &[PathBuf]) -> Result<Pdfium, String> {
+    let mut attempted: Vec<String> = Vec::new();
+    for dir in candidates {
+        let lib_path = Pdfium::pdfium_platform_library_name_at_path(dir);
+        attempted.push(lib_path.display().to_string());
+        if let Ok(bindings) = Pdfium::bind_to_library(&lib_path) {
+            return Ok(Pdfium::new(bindings));
+        }
+    }
+    let bindings = Pdfium::bind_to_system_library().map_err(|e| {
+        let attempted_list = if attempted.is_empty() {
+            "none".to_string()
+        } else {
+            attempted.join(", ")
+        };
+        format!(
+            "pdf thumbnail renderer unavailable: could not load PDFium from candidates [{attempted_list}] or system library ({e}). Install PDFium or bundle it for this platform."
+        )
+    })?;
+    Ok(Pdfium::new(bindings))
+}
+
+fn render_pdf_thumbnail_base64(
+    path: &Path,
+    max_edge: u32,
+    page: u16,
+    pdfium_candidates: &[PathBuf],
+) -> Result<String, String> {
+    let pdfium = load_pdfium(pdfium_candidates)?;
+    let document = pdfium.load_pdf_from_file(path, None).map_err(|e| e.to_string())?;
+    let page = document
+        .pages()
+        .iter()
+        .nth(page as usize)
+        .ok_or_else(|| format!("pdf page out of range: {page}"))?;
+
+    let rendered = page
+        .render_with_config(
+            &PdfRenderConfig::new()
+                .set_target_width(max_edge as i32)
+                .set_maximum_height(max_edge as i32),
+        )
+        .map_err(|e| e.to_string())?;
+    let image = rendered.as_image();
+    let mut out = Vec::new();
+    image
         .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
         .map_err(|e| e.to_string())?;
     Ok(base64::engine::general_purpose::STANDARD.encode(out))
@@ -80,12 +178,21 @@ fn init_logging() {
 pub fn run() {
     load_env();
     init_logging();
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .manage(qdrant::QdrantState::default())
         .manage(embedding::EmbeddingManager::default())
+        .manage(text_index::TextIndexState::default())
         .manage(ThumbnailCache::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let qdrant_state = app_handle.state::<qdrant::QdrantState>();
+                let _ = qdrant::ensure_started(&app_handle, &qdrant_state).await;
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             scan_files,
             scan_files_count,
@@ -109,8 +216,16 @@ pub fn run() {
             embed_query_text,
             text_index_full_text_for_path
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+    app.run(|app_handle, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            tauri::async_runtime::block_on(async move {
+                let qdrant_state = app_handle.state::<qdrant::QdrantState>();
+                qdrant::shutdown(&qdrant_state).await;
+            });
+        }
+    });
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -519,6 +634,8 @@ fn read_file_base64(args: ReadFileArgs) -> Result<ReadFileBase64Result, String> 
 pub struct ThumbnailArgs {
     pub path: String,
     pub max_edge: u32,
+    #[serde(default)]
+    pub page: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -529,6 +646,7 @@ pub struct ThumbnailResult {
 /// Best-effort thumbnailing for supported files.
 #[tauri::command]
 async fn thumbnail_image_base64_png(
+    app: tauri::AppHandle,
     cache: tauri::State<'_, ThumbnailCache>,
     args: ThumbnailArgs,
 ) -> Result<ThumbnailResult, String> {
@@ -541,7 +659,35 @@ async fn thumbnail_image_base64_png(
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
     let size_bytes = meta.len();
-    let cache_key = thumbnail_cache_key(&args.path, args.max_edge);
+    let max_edge = args.max_edge.clamp(48, 512);
+    let page = args.page;
+    let cache_key = thumbnail_cache_key(&args.path, max_edge, page);
+    let fingerprint = thumbnail_fingerprint(mtime_ms, size_bytes);
+    let mut pdfium_candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(override_dir) = std::env::var("MANIFOLD_PDFIUM_LIB_DIR") {
+        let trimmed = override_dir.trim();
+        if !trimmed.is_empty() {
+            pdfium_candidates.push(PathBuf::from(trimmed));
+        }
+    }
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        pdfium_candidates.push(resource_dir.join("pdfium"));
+        pdfium_candidates.push(resource_dir);
+    }
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            pdfium_candidates.push(exe_dir.to_path_buf());
+            pdfium_candidates.push(exe_dir.join("pdfium"));
+            if let Some(src_tauri_dir) = exe_dir.parent().and_then(|p| p.parent()) {
+                // Dev mode convenience: allow loading from `src-tauri/resources/pdfium`.
+                pdfium_candidates.push(src_tauri_dir.join("resources").join("pdfium"));
+                pdfium_candidates.push(src_tauri_dir.join("resources"));
+            }
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        pdfium_candidates.push(cwd);
+    }
 
     {
         let guard = cache
@@ -557,17 +703,50 @@ async fn thumbnail_image_base64_png(
         }
     }
 
-    let max_edge = args.max_edge;
+    if let Some(png_base64) = load_disk_thumbnail_base64(&app, &cache_key, &fingerprint)? {
+        let mut guard = cache
+            .entries
+            .lock()
+            .map_err(|_| "thumbnail cache lock poisoned".to_string())?;
+        if guard.len() >= THUMB_CACHE_MAX_ENTRIES {
+            guard.clear();
+        }
+        guard.insert(
+            cache_key.clone(),
+            ThumbnailCacheEntry {
+                mtime_ms,
+                size_bytes,
+                png_base64: png_base64.clone(),
+            },
+        );
+        return Ok(ThumbnailResult { png_base64 });
+    }
+
     let path_for_kind = path.clone();
-    let png_base64_res = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+    let render_task = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         match thumbnail_file_kind(&path_for_kind).as_str() {
             "png" | "jpg" | "jpeg" => render_image_thumbnail_base64(&path, max_edge),
+            "pdf" => render_pdf_thumbnail_base64(&path, max_edge, page, &pdfium_candidates),
             ext => Err(format!("thumbnail unsupported file type: {ext}")),
         }
-    })
-    .await
-    .map_err(|e| format!("thumbnail task join error: {e}"))?;
-    let png_base64 = png_base64_res?;
+    });
+    let png_base64_res = tokio::time::timeout(Duration::from_secs(8), render_task)
+        .await
+        .map_err(|_| "thumbnail render timed out".to_string())?
+        .map_err(|e| format!("thumbnail task join error: {e}"))?;
+    let png_base64 = match png_base64_res {
+        Ok(value) => value,
+        Err(err) => {
+            tracing::warn!(
+                path = %args.path,
+                max_edge = max_edge,
+                page = page,
+                error = %err,
+                "thumbnail generation failed"
+            );
+            return Err(err);
+        }
+    };
 
     {
         let mut guard = cache
@@ -578,7 +757,7 @@ async fn thumbnail_image_base64_png(
             guard.clear();
         }
         guard.insert(
-            cache_key,
+            cache_key.clone(),
             ThumbnailCacheEntry {
                 mtime_ms,
                 size_bytes,
@@ -586,6 +765,7 @@ async fn thumbnail_image_base64_png(
             },
         );
     }
+    let _ = store_disk_thumbnail_base64(&app, &cache_key, &fingerprint, &png_base64);
 
     Ok(ThumbnailResult { png_base64 })
 }
@@ -638,10 +818,11 @@ async fn qdrant_count_points(
 async fn qdrant_delete_all_points(
     app: tauri::AppHandle,
     state: tauri::State<'_, qdrant::QdrantState>,
+    text_index_state: tauri::State<'_, text_index::TextIndexState>,
     args: qdrant::DeleteAllPointsArgs,
 ) -> Result<(), String> {
     qdrant::delete_all_points(&app, &state, args.clone()).await?;
-    text_index::delete_all_for_source(&app, &args.source_id)?;
+    text_index::delete_all_for_source(&app, &text_index_state, &args.source_id).await?;
     Ok(())
 }
 
@@ -649,12 +830,14 @@ async fn qdrant_delete_all_points(
 async fn qdrant_delete_points_for_paths(
     app: tauri::AppHandle,
     state: tauri::State<'_, qdrant::QdrantState>,
+    text_index_state: tauri::State<'_, text_index::TextIndexState>,
     args: qdrant::DeletePointsForPathsArgs,
 ) -> Result<qdrant::DeletePointsForPathsResult, String> {
     let res = qdrant::delete_points_for_paths(&app, &state, args.clone()).await?;
-    text_index::delete_for_paths(&app, &args.source_id, &args.paths)?;
+    text_index::delete_for_paths(&app, &text_index_state, &args.source_id, &args.paths).await?;
     Ok(res)
 }
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -684,13 +867,11 @@ struct TextIndexFullTextArgs {
 #[tauri::command]
 async fn hybrid_search(
     app: tauri::AppHandle,
-    state: tauri::State<'_, qdrant::QdrantState>,
     args: HybridSearchArgs,
 ) -> Result<Vec<HybridSearchHit>, String> {
-    let semantic_limit = args.limit.unwrap_or(24).clamp(1, 256) as usize;
-    let mut out: Vec<HybridSearchHit> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+    let semantic_limit = args.limit.unwrap_or(24).clamp(1, 256) as usize;
+    
     let mut include_text_matches = true;
     let mut include_semantic_matches = true;
     if !args.search_types.is_empty() {
@@ -703,21 +884,52 @@ async fn hybrid_search(
         include_semantic_matches = selected_types.contains("semantic");
     }
 
-    let direct = if include_text_matches {
-        text_index::search_text(
-            &app,
-            text_index::SearchTextArgs {
-                source_id: args.source_id.clone(),
-                query: args.query_text.clone(),
-                // Top-K applies to semantic matches; text hits get their own cap.
-                limit: Some(256),
-            },
-        )?
+    // Parallelize text and semantic search
+    let text_task = if include_text_matches {
+        let app_clone = app.clone();
+        let args_clone = args.clone();
+        Some(tauri::async_runtime::spawn(async move {
+            let text_state = app_clone.state::<text_index::TextIndexState>();
+            text_index::search_text(
+                &app_clone,
+                &text_state,
+                text_index::SearchTextArgs {
+                    source_id: args_clone.source_id,
+                    query: args_clone.query_text,
+                    limit: Some(256),
+                },
+            ).await
+        }))
     } else {
-        Vec::new()
+        None
     };
 
-    if include_text_matches {
+    let semantic_task = if include_semantic_matches {
+        let app_clone = app.clone();
+        let args_clone = args.clone();
+        Some(tauri::async_runtime::spawn(async move {
+            let qdrant_state = app_clone.state::<qdrant::QdrantState>();
+            let query_vector = embedding::embed_query_text(&app_clone, &args_clone.query_text).await?;
+            qdrant::semantic_search(
+                &app_clone,
+                &qdrant_state,
+                qdrant::SemanticSearchArgs {
+                    source_id: args_clone.source_id,
+                    query_vector,
+                    limit: Some(semantic_limit as u32),
+                    channel: Some(qdrant::SemanticSearchChannel::Content),
+                },
+            ).await
+        }))
+    } else {
+        None
+    };
+
+    let mut out: Vec<HybridSearchHit> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    if let Some(task) = text_task {
+        let direct = task.await.map_err(|e| format!("text search task failed: {e}"))??;
         for hit in direct {
             if seen.insert(hit.path.clone()) {
                 out.push(HybridSearchHit {
@@ -732,48 +944,36 @@ async fn hybrid_search(
         }
     }
 
-    if include_semantic_matches {
-        let query_vector = embedding::embed_query_text(&args.query_text).await.ok();
-        if let Some(query_vector) = query_vector {
-        let content_hits = qdrant::semantic_search(
-            &app,
-            &state,
-            qdrant::SemanticSearchArgs {
-                source_id: args.source_id,
-                query_vector,
-                limit: Some(semantic_limit as u32),
-                channel: Some(qdrant::SemanticSearchChannel::Content),
-            },
-        )
-        .await
-        .unwrap_or_default();
-
-            let mut semantic_added = 0usize;
-            for h in content_hits {
-                if seen.insert(h.file.path.clone()) {
-                    out.push(HybridSearchHit {
-                        score: h.score,
-                        match_type: "semantic".to_string(),
-                        file: h.file,
-                    });
-                    semantic_added += 1;
-                }
-                if semantic_added >= semantic_limit {
-                    break;
-                }
+    if let Some(task) = semantic_task {
+        let content_hits = task.await.map_err(|e| format!("semantic search task failed: {e}"))??;
+        let mut semantic_added = 0usize;
+        for h in content_hits {
+            if seen.insert(h.file.path.clone()) {
+                out.push(HybridSearchHit {
+                    score: h.score,
+                    match_type: "semantic".to_string(),
+                    file: h.file,
+                });
+                semantic_added += 1;
+            }
+            if semantic_added >= semantic_limit {
+                break;
             }
         }
     }
+
     Ok(out)
 }
 
 #[tauri::command]
 async fn text_index_full_text_for_path(
     app: tauri::AppHandle,
+    text_index_state: tauri::State<'_, text_index::TextIndexState>,
     args: TextIndexFullTextArgs,
 ) -> Result<Option<String>, String> {
-    text_index::get_full_text_for_path(&app, &args.source_id, &args.path)
+    text_index::get_full_text_for_path(&app, &text_index_state, &args.source_id, &args.path).await
 }
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -827,6 +1027,7 @@ struct EmbedQueryTextArgs {
 }
 
 #[tauri::command]
-async fn embed_query_text(args: EmbedQueryTextArgs) -> Result<Vec<f32>, String> {
-    embedding::embed_query_text(&args.text).await
+async fn embed_query_text(app: tauri::AppHandle, args: EmbedQueryTextArgs) -> Result<Vec<f32>, String> {
+    embedding::embed_query_text(&app, &args.text).await
 }
+

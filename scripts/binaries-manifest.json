@@ -1,0 +1,70 @@
+{
+  "qdrantVersion": "v1.17.1",
+  "pdfiumVersion": "chromium%2F7350",
+  "targets": {
+    "darwin-arm64": {
+      "qdrant": {
+        "archiveUrl": "https://github.com/qdrant/qdrant/releases/download/v1.17.1/qdrant-aarch64-apple-darwin.tar.gz",
+        "archiveSha256": "adf795d7c2ac9d93677517fd58b119e9bb5bc8fc5143ac9b581a6f8264def8da",
+        "archiveType": "tar.gz",
+        "binaryPathInArchive": "qdrant",
+        "outputBinaryName": "qdrant"
+      },
+      "pdfium": {
+        "archiveUrl": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7350/pdfium-mac-arm64.tgz",
+        "archiveSha256": "279d69972954968a61ffab26ac60dc1b80066133e8f5e82cb3ee47d1df5cd28e",
+        "archiveType": "tar.gz",
+        "binaryPathInArchive": "lib/libpdfium.dylib",
+        "outputBinaryName": "libpdfium.dylib"
+      }
+    },
+    "darwin-x64": {
+      "qdrant": {
+        "archiveUrl": "https://github.com/qdrant/qdrant/releases/download/v1.17.1/qdrant-x86_64-apple-darwin.tar.gz",
+        "archiveSha256": "d7308c504afa58eb4aa2bd0c655252c324aea04891ac079b6b8764b33fa7dc15",
+        "archiveType": "tar.gz",
+        "binaryPathInArchive": "qdrant",
+        "outputBinaryName": "qdrant"
+      },
+      "pdfium": {
+        "archiveUrl": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7350/pdfium-mac-x64.tgz",
+        "archiveSha256": "bb438ecbf93b4a906b412f19a53ece371c03eb020e0a89a2686142a4c382349b",
+        "archiveType": "tar.gz",
+        "binaryPathInArchive": "lib/libpdfium.dylib",
+        "outputBinaryName": "libpdfium.dylib"
+      }
+    },
+    "linux-x64": {
+      "qdrant": {
+        "archiveUrl": "https://github.com/qdrant/qdrant/releases/download/v1.17.1/qdrant-x86_64-unknown-linux-gnu.tar.gz",
+        "archiveSha256": "318a3b1c548161ad476f9ff70b654787a20fc46685e3e1c2b7dd88b363ef3d58",
+        "archiveType": "tar.gz",
+        "binaryPathInArchive": "qdrant",
+        "outputBinaryName": "qdrant"
+      },
+      "pdfium": {
+        "archiveUrl": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7350/pdfium-linux-x64.tgz",
+        "archiveSha256": "5a53c802a970d7d1414c0d2fdd8a0900e239b3e7e4eff7a5ddcbd433322606f2",
+        "archiveType": "tar.gz",
+        "binaryPathInArchive": "lib/libpdfium.so",
+        "outputBinaryName": "libpdfium.so"
+      }
+    },
+    "win32-x64": {
+      "qdrant": {
+        "archiveUrl": "https://github.com/qdrant/qdrant/releases/download/v1.17.1/qdrant-x86_64-pc-windows-msvc.zip",
+        "archiveSha256": "fe28df5993a9f9830b1e7290e2e341becf3c91366941b73b4322a05e4f91585c",
+        "archiveType": "zip",
+        "binaryPathInArchive": "qdrant.exe",
+        "outputBinaryName": "qdrant.exe"
+      },
+      "pdfium": {
+        "archiveUrl": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7350/pdfium-win-x64.tgz",
+        "archiveSha256": "0289ee5f6beaa001c1fa0fc96dfdbc2f0238cd4b1cfc72a75ac473fa191dfbe6",
+        "archiveType": "tar.gz",
+        "binaryPathInArchive": "bin/pdfium.dll",
+        "outputBinaryName": "pdfium.dll"
+      }
+    }
+  }
+}

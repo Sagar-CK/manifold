@@ -6,6 +6,7 @@ import { ListFilter, Settings } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { Spinner } from "../components/ui/spinner";
 import { Skeleton } from "../components/ui/skeleton";
+import { ScrollArea } from "../components/ui/scroll-area";
 import {
   InputGroup,
   InputGroupAddon,
@@ -144,10 +145,12 @@ export function SearchPage({
   const [selectedGroupForOpen, setSelectedGroupForOpen] = useState<SearchResultGroup | null>(null);
   const [pathChooserOpen, setPathChooserOpen] = useState(false);
   const [thumbByPath, setThumbByPath] = useState<Record<string, string>>({});
+  const [thumbFailedByPath, setThumbFailedByPath] = useState<Record<string, true>>({});
   const searchRunSeqRef = useRef(0);
   const latestRunRef = useRef(0);
   const runStartMsRef = useRef(0);
   const thumbCacheRef = useRef<Record<string, string>>({});
+  const thumbFailedRef = useRef<Record<string, true>>({});
   const fullTextCacheRef = useRef<Record<string, string>>({});
   const liveIndexedCount =
     embedding || hasPendingEmbeds
@@ -294,19 +297,23 @@ export function SearchPage({
     setHasSearched(true);
     setResults(selectedOnly);
     const cachedThumbsForSelection: Record<string, string> = {};
+    const failedThumbsForSelection: Record<string, true> = {};
     for (const r of selectedOnly) {
       const cached = thumbCacheRef.current[r.file.path];
       if (cached) cachedThumbsForSelection[r.file.path] = cached;
+      if (thumbFailedRef.current[r.file.path]) failedThumbsForSelection[r.file.path] = true;
     }
     setThumbByPath(cachedThumbsForSelection);
+    setThumbFailedByPath(failedThumbsForSelection);
     setIsSearching(false);
 
     const previewPaths = selectedOnly
       .map((r) => r.file.path)
       .filter((p) => {
         if (thumbCacheRef.current[p]) return false;
+        if (thumbFailedRef.current[p]) return false;
         const ext = p.split(".").pop()?.toLowerCase() ?? "";
-        return ext === "png" || ext === "jpg" || ext === "jpeg";
+        return ext === "png" || ext === "jpg" || ext === "jpeg" || ext === "pdf";
       });
     void (async () => {
       const thumbStartMs = performance.now();
@@ -317,22 +324,42 @@ export function SearchPage({
 
       const workers = Array.from({ length: workerCount }, async () => {
         while (nextIndex < previewPaths.length) {
+          if (latestRunRef.current !== runId) return;
           const current = nextIndex;
           nextIndex += 1;
           const p = previewPaths[current];
           thumbAttempts += 1;
           try {
             const thumb = (await invoke("thumbnail_image_base64_png", {
-              args: { path: p, max_edge: 96 },
+              args: { path: p, max_edge: 96, page: 0 },
             })) as { png_base64: string };
             const dataUrl = `data:image/png;base64,${thumb.png_base64}`;
             thumbCacheRef.current[p] = dataUrl;
+            delete thumbFailedRef.current[p];
             thumbSuccesses += 1;
             if (latestRunRef.current === runId) {
               setThumbByPath((m) => ({ ...m, [p]: dataUrl }));
+              setThumbFailedByPath((m) => {
+                if (!m[p]) return m;
+                const next = { ...m };
+                delete next[p];
+                return next;
+              });
             }
-          } catch {
-            // ignore thumb errors
+          } catch (e) {
+            thumbFailedRef.current[p] = true;
+            logSearch(
+              runId,
+              "thumbnail generation failed",
+              {
+                path: p,
+                error: String(e),
+              },
+              "warn",
+            );
+            if (latestRunRef.current === runId) {
+              setThumbFailedByPath((m) => ({ ...m, [p]: true }));
+            }
           }
         }
       });
@@ -403,7 +430,7 @@ export function SearchPage({
   const hasMatchTypeEnabled = matchTypeFilter.textMatch || matchTypeFilter.semantic;
 
   return (
-    <section className="flex min-h-[calc(100dvh-4rem)] flex-col">
+    <section className="flex h-full min-h-0 flex-col">
       <div className="relative flex flex-col items-center justify-center text-center gap-2 mb-6">
         <Link
           to="/settings"
@@ -477,128 +504,131 @@ export function SearchPage({
         </InputGroup>
       </div>
 
-      <div className="mt-5 flex-1">
+      <div className="mt-5 min-h-0 flex-1">
         {openError ? (
           <div className="mb-3 text-center text-sm font-medium text-rose-700">Open error: {openError}</div>
         ) : null}
-        {groupedResults.length === 0 ? (
-          !hasSearched ? (
-            liveIndexedCount === 0 ? (
-              <Link
-                to="/settings"
-                className="app-muted mx-auto block w-fit underline underline-offset-4 hover:text-black"
-              >
-                No files indexed yet. Open Settings to add folders.
-              </Link>
-            ) : null
-          ) : searchError ? (
-            <div className="text-center text-sm font-medium text-rose-700">
-              Search error: {searchError}
-            </div>
-          ) : !hasMatchTypeEnabled ? (
-            <div className="app-muted text-center">
-              Enable at least one search type (Text or Semantic).
-            </div>
+        <ScrollArea className="h-full pr-3">
+          {groupedResults.length === 0 ? (
+            !hasSearched ? (
+              liveIndexedCount === 0 ? (
+                <Link
+                  to="/settings"
+                  className="app-muted mx-auto block w-fit underline underline-offset-4 hover:text-black"
+                >
+                  No files indexed yet. Open Settings to add folders.
+                </Link>
+              ) : null
+            ) : searchError ? (
+              <div className="text-center text-sm font-medium text-rose-700">
+                Search error: {searchError}
+              </div>
+            ) : !hasMatchTypeEnabled ? (
+              <div className="app-muted text-center">
+                Enable at least one search type (Text or Semantic).
+              </div>
+            ) : (
+              <div className="app-muted text-center">No results for “{query.trim()}”.</div>
+            )
           ) : (
-            <div className="app-muted text-center">No results for “{query.trim()}”.</div>
-          )
-        ) : (
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
-            {groupedResults.map((group) => (
-              (() => {
-                const r = group.primaryResult;
-                const ext = r.file.path.split(".").pop()?.toLowerCase() ?? "";
-                const isPreviewImage = ext === "png" || ext === "jpg" || ext === "jpeg";
-                const isStacked = group.variants.length > 1;
-                return (
-              <button
-                key={group.key}
-                type="button"
-                onMouseEnter={() => {
-                  if (r.matchType !== "textMatch") return;
-                  const cached = fullTextCacheRef.current[r.file.path];
-                  if (cached) {
-                    console.log("[search][text-match:hover:full-text]", {
-                      path: r.file.path,
-                      fullText: cached,
-                    });
-                    return;
-                  }
-                  void (async () => {
-                    try {
-                      const fullText = (await invoke("text_index_full_text_for_path", {
-                        args: { sourceId: cfg.sourceId, path: r.file.path },
-                      })) as string | null;
-                      if (!fullText) return;
-                      fullTextCacheRef.current[r.file.path] = fullText;
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+              {groupedResults.map((group) => (
+                (() => {
+                  const r = group.primaryResult;
+                  const ext = r.file.path.split(".").pop()?.toLowerCase() ?? "";
+                  const isPreviewImage = ext === "png" || ext === "jpg" || ext === "jpeg";
+                  const isPreviewFile = isPreviewImage || ext === "pdf";
+                  const isStacked = group.variants.length > 1;
+                  return (
+                <button
+                  key={group.key}
+                  type="button"
+                  onMouseEnter={() => {
+                    if (r.matchType !== "textMatch") return;
+                    const cached = fullTextCacheRef.current[r.file.path];
+                    if (cached) {
                       console.log("[search][text-match:hover:full-text]", {
                         path: r.file.path,
-                        fullText,
+                        fullText: cached,
                       });
-                    } catch (e) {
-                      console.warn("[search][text-match:hover:full-text] failed", {
-                        path: r.file.path,
-                        error: String(e),
-                      });
+                      return;
                     }
-                  })();
-                }}
-                onClick={async () => {
-                  if (isStacked) {
-                    setSelectedGroupForOpen(group);
-                    setPathChooserOpen(true);
-                    return;
-                  }
-                  try {
-                    setOpenError(null);
-                    await openPath(r.file.path);
-                  } catch (e) {
-                    setOpenError(String(e));
-                  }
-                }}
-                className="group relative flex min-w-0 flex-col items-center gap-2 rounded-lg p-1 transition-opacity hover:opacity-90"
-                title={r.file.path}
-              >
-                {cfg.showSimilarityOnHover ? (
-                  <div className="pointer-events-none absolute left-1/2 top-2 w-max -translate-x-1/2 rounded bg-black/75 px-2 py-1 text-[10px] font-medium leading-none tracking-wide text-white opacity-0 transition-opacity group-hover:opacity-100">
-                    {r.matchType === "textMatch"
-                      ? "Text match"
-                      : `Similarity ${formatSimilarityScore(r.score)}`}
-                  </div>
-                ) : null}
-                <div className="w-full px-1">
-                  {thumbByPath[r.file.path] ? (
-                    <div className="mx-auto flex h-16 w-28 items-center justify-center">
-                      <img
-                        src={thumbByPath[r.file.path]}
-                        className="block max-h-full max-w-full rounded-lg object-contain"
-                      />
+                    void (async () => {
+                      try {
+                        const fullText = (await invoke("text_index_full_text_for_path", {
+                          args: { sourceId: cfg.sourceId, path: r.file.path },
+                        })) as string | null;
+                        if (!fullText) return;
+                        fullTextCacheRef.current[r.file.path] = fullText;
+                        console.log("[search][text-match:hover:full-text]", {
+                          path: r.file.path,
+                          fullText,
+                        });
+                      } catch (e) {
+                        console.warn("[search][text-match:hover:full-text] failed", {
+                          path: r.file.path,
+                          error: String(e),
+                        });
+                      }
+                    })();
+                  }}
+                  onClick={async () => {
+                    if (isStacked) {
+                      setSelectedGroupForOpen(group);
+                      setPathChooserOpen(true);
+                      return;
+                    }
+                    try {
+                      setOpenError(null);
+                      await openPath(r.file.path);
+                    } catch (e) {
+                      setOpenError(String(e));
+                    }
+                  }}
+                  className="group relative flex min-w-0 flex-col items-center gap-2 rounded-lg p-1 transition-opacity hover:opacity-90"
+                  title={r.file.path}
+                >
+                  {cfg.showSimilarityOnHover ? (
+                    <div className="pointer-events-none absolute left-1/2 top-2 w-max -translate-x-1/2 rounded bg-black/75 px-2 py-1 text-[10px] font-medium leading-none tracking-wide text-white opacity-0 transition-opacity group-hover:opacity-100">
+                      {r.matchType === "textMatch"
+                        ? "Text match"
+                        : `Similarity ${formatSimilarityScore(r.score)}`}
                     </div>
-                  ) : (
-                    <div className="mx-auto flex h-16 w-28 items-center justify-center">
-                      {isPreviewImage ? (
-                        <Skeleton className="h-16 w-28 rounded-lg" />
-                      ) : (
-                        <div className="flex h-11 w-11 items-center justify-center rounded-md border border-black/10 bg-black/4">
-                          <span className="text-[10px] leading-none font-semibold text-black/60 uppercase tracking-wide">
-                            {fileTypeLabel(ext, "")}
-                          </span>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-                <div className="w-full min-w-0">
-                  <div className="truncate text-center text-xs font-normal leading-tight text-black/80">
-                    {r.file.path.split("/").pop() ?? r.file.path}
+                  ) : null}
+                  <div className="w-full px-1">
+                    {thumbByPath[r.file.path] ? (
+                      <div className="mx-auto flex h-16 w-28 items-center justify-center">
+                        <img
+                          src={thumbByPath[r.file.path]}
+                          className="block max-h-full max-w-full rounded-lg object-contain"
+                        />
+                      </div>
+                    ) : (
+                      <div className="mx-auto flex h-16 w-28 items-center justify-center">
+                        {isPreviewFile && !thumbFailedByPath[r.file.path] ? (
+                          <Skeleton className="h-16 w-28 rounded-md" />
+                        ) : (
+                          <div className="flex h-11 w-11 items-center justify-center rounded-md border border-black/10 bg-black/4">
+                            <span className="text-[10px] leading-none font-semibold text-black/60 uppercase tracking-wide">
+                              {fileTypeLabel(ext, "")}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
-                </div>
-              </button>
-                );
-              })()
-            ))}
-          </div>
-        )}
+                  <div className="w-full min-w-0">
+                    <div className="truncate text-center text-xs font-normal leading-tight text-black/80">
+                      {r.file.path.split("/").pop() ?? r.file.path}
+                    </div>
+                  </div>
+                </button>
+                  );
+                })()
+              ))}
+            </div>
+          )}
+        </ScrollArea>
       </div>
 
       <AlertDialog

@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "setup:binaries": "node ./scripts/setup-binaries.mjs",
+    "setup:dev": "node ./scripts/setup-dev.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.3.0",
