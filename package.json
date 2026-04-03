@@ -8,8 +8,12 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "qdrant:up": "docker compose up -d",
+    "qdrant:down": "docker compose down",
     "setup:binaries": "node ./scripts/setup-binaries.mjs",
-    "setup:dev": "node ./scripts/setup-dev.mjs"
+    "setup:dev": "node ./scripts/setup-dev.mjs",
+    "setup:pdfium": "node ./scripts/setup-binaries.mjs --pdfium-only",
+    "setup:qdrant-binary": "node ./scripts/setup-binaries.mjs --qdrant-only"
   },
   "dependencies": {
     "@base-ui/react": "^1.3.0",

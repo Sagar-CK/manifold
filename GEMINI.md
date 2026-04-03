@@ -7,10 +7,10 @@ Manifold is a native desktop application for local file indexing and semantic se
 - **Core Tech Stack:**
   - **Frontend:** React 19, TypeScript, Vite, React Router (HashRouter).
   - **Backend (Tauri Shell):** Rust (Tauri v2).
-  - **Vector Database:** Qdrant (bundled local binary, auto-started as a sidecar).
+  - **Vector Database:** Qdrant — **Docker** in local dev (default); **bundled binary** in packaged releases when `MANIFOLD_QDRANT_URL` is unset.
   - **Embeddings:** Google Gemini (`models/gemini-embedding-2-preview`).
   - **Styling:** Tailwind CSS v4 + shadcn-style components.
-  - **PDF Support:** PDFium for high-quality PDF thumbnail rendering.
+  - **PDF Support:** PDFium (dynamic library) via `pdfium-render` for PDF thumbnail rendering.
 
 - **Key Features:**
   - Indexing of local files (images, PDFs, audio, video).
@@ -29,40 +29,63 @@ Manifold is a native desktop application for local file indexing and semantic se
   - `src/qdrant.rs`: Qdrant client and vector operations.
   - `src/embedding.rs`: Gemini embedding pipeline and job management.
   - `src/text_index.rs`: Simple local text index for direct keyword matching.
-  - `resources/`: Directory for bundled binaries (Qdrant, PDFium).
+  - `resources/`: Bundled native binaries for releases (Qdrant, PDFium); dev typically uses Docker for Qdrant.
 - `scripts/`: Development and build automation scripts.
-  - `setup-dev.mjs`: One-command bootstrap for contributors.
-  - `setup-binaries.mjs`: Downloads platform-specific binaries.
+  - `setup-dev.mjs`: Contributor bootstrap — PDFium + `.env.local` (see README).
+  - `setup-binaries.mjs`: Downloads pinned platform binaries; supports `--pdfium-only` and `--qdrant-only`.
+- `docker-compose.yml`: Local Qdrant for development (version pinned with `binaries-manifest.json`).
 
 ## Building and Running
 
 ### Prerequisites
+
 - [pnpm](https://pnpm.io/)
 - Rust/Cargo
 - Google Gemini API Key
+- Docker (recommended for local dev Qdrant)
 
 ### Development Workflow
-1.  **Install dependencies:**
-    ```bash
-    pnpm install
-    ```
-2.  **Bootstrap local binaries and environment:**
-    ```bash
-    pnpm setup:dev
-    ```
-    This creates `.env.local` and downloads Qdrant/PDFium binaries to `src-tauri/resources/`.
-3.  **Configure API Key:**
-    Add your key to `.env.local`:
-    ```env
-    MANIFOLD_GEMINI_API_KEY=your_api_key_here
-    ```
-4.  **Run in development mode:**
-    ```bash
-    pnpm tauri dev
-    ```
+
+1. **Install dependencies:**
+
+   ```bash
+   pnpm install
+   ```
+
+2. **Bootstrap PDFium and env:**
+
+   ```bash
+   pnpm setup:dev
+   ```
+
+   This creates `.env.local` from `.env.example` (if missing) and downloads **PDFium** to `src-tauri/resources/pdfium/`. It does **not** download the Qdrant binary by default.
+
+3. **Start Qdrant (Docker):**
+
+   ```bash
+   pnpm qdrant:up
+   ```
+
+   `.env.example` sets `MANIFOLD_QDRANT_URL=http://127.0.0.1:6333` so the app talks to Docker instead of spawning a local binary.
+
+4. **Configure API key:** Add your key to `.env.local`:
+
+   ```env
+   MANIFOLD_GEMINI_API_KEY=your_api_key_here
+   ```
+
+5. **Run in development mode:**
+
+   ```bash
+   pnpm tauri dev
+   ```
 
 ### Production Build
+
+Install **both** Qdrant and PDFium before building installers:
+
 ```bash
+pnpm setup:binaries
 pnpm tauri build
 ```
 

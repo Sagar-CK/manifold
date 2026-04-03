@@ -9,10 +9,10 @@ This app's thumbnail loader checks Tauri resource locations first, including:
 - `<app resources>/pdfium/`
 - `<app resources>/`
 
-Default setup (recommended):
-1) Run `pnpm setup:binaries` from repo root.
-2) The script downloads and verifies the pinned PDFium artifact.
-3) It installs the expected library file in this folder.
+Default setup:
+1) **Local dev:** `pnpm setup:dev` (PDFium only; see repo README for Qdrant via Docker).
+2) **Release / full binary install:** `pnpm setup:binaries` from repo root (Qdrant + PDFium).
+3) The script downloads and verifies the pinned PDFium artifact and installs the library here.
 
 Manual setup (advanced/fallback):
 - You can still place the platform library here yourself.

@@ -130,7 +130,18 @@ async function installComponent(name, spec, outputDir) {
   }
 }
 
+function parseArgs(argv) {
+  const pdfiumOnly = argv.includes("--pdfium-only");
+  const qdrantOnly = argv.includes("--qdrant-only");
+  if (pdfiumOnly && qdrantOnly) {
+    throw new Error("Use only one of --pdfium-only or --qdrant-only");
+  }
+  return { pdfiumOnly, qdrantOnly, installAll: !pdfiumOnly && !qdrantOnly };
+}
+
 async function main() {
+  const { pdfiumOnly, qdrantOnly, installAll } = parseArgs(process.argv.slice(2));
+
   const manifest = JSON.parse(await readFile(manifestPath, "utf-8"));
   const key = targetKey();
   const target = manifest.targets?.[key];
@@ -141,13 +152,20 @@ async function main() {
   const qdrantOut = path.join(repoRoot, "src-tauri", "resources", "qdrant");
   const pdfiumOut = path.join(repoRoot, "src-tauri", "resources", "pdfium");
 
-  await installComponent("qdrant", target.qdrant, qdrantOut);
-  await installComponent("pdfium", target.pdfium, pdfiumOut);
+  const installQdrant = installAll || qdrantOnly;
+  const installPdfium = installAll || pdfiumOnly;
 
-  if (!existsSync(path.join(qdrantOut, target.qdrant.outputBinaryName))) {
+  if (installQdrant) {
+    await installComponent("qdrant", target.qdrant, qdrantOut);
+  }
+  if (installPdfium) {
+    await installComponent("pdfium", target.pdfium, pdfiumOut);
+  }
+
+  if (installQdrant && !existsSync(path.join(qdrantOut, target.qdrant.outputBinaryName))) {
     throw new Error("Qdrant binary install failed unexpectedly");
   }
-  if (!existsSync(path.join(pdfiumOut, target.pdfium.outputBinaryName))) {
+  if (installPdfium && !existsSync(path.join(pdfiumOut, target.pdfium.outputBinaryName))) {
     throw new Error("PDFium binary install failed unexpectedly");
   }
   console.log("\n[setup:binaries] Completed successfully.");

@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Rust / Cargo (any crate in the repo, e.g. src-tauri/, qdrant_test/)
+target/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
@@ -24,3 +27,4 @@ dist-ssr
 *.sw?
 
 qdrant_storage/
+qdrant_storage_dev/
