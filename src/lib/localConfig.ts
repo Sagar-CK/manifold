@@ -4,6 +4,8 @@ export type LocalConfig = {
   sourceId: string;
   include: string[];
   exclude: string[];
+  /** When true, skip common dependency/build/cache folder names (see defaultFolderExcludes.ts). Default true. */
+  useDefaultFolderExcludes: boolean;
   extensions: SupportedExt[];
   scoreThreshold: number;
   searchMode: "topK" | "scoreThreshold";
@@ -59,6 +61,7 @@ function defaultConfig(): LocalConfig {
     sourceId: crypto.randomUUID(),
     include: [],
     exclude: [],
+    useDefaultFolderExcludes: true,
     extensions: ["png", "jpg", "jpeg", "pdf", "mp3", "wav", "mp4", "mov"],
     scoreThreshold: 0,
     searchMode: "topK",
@@ -82,6 +85,10 @@ export function loadConfig(): LocalConfig {
       sourceId: parsed.sourceId ?? crypto.randomUUID(),
       include: collapseIncludeFolders(parsed.include ?? []),
       exclude: parsed.exclude ?? [],
+      useDefaultFolderExcludes:
+        typeof parsed.useDefaultFolderExcludes === "boolean"
+          ? parsed.useDefaultFolderExcludes
+          : defaultConfig().useDefaultFolderExcludes,
       extensions: (parsed.extensions as SupportedExt[] | undefined) ?? defaultConfig().extensions,
       scoreThreshold:
         typeof parsed.scoreThreshold === "number"

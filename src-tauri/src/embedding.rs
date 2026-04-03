@@ -1,4 +1,4 @@
-use crate::{compute_sha256, is_under_dir, normalize_ext, normalize_path_key, ScanFilesArgs};
+use crate::{compute_sha256, is_path_excluded, normalize_ext, normalize_path_key, ScanFilesArgs};
 use crate::qdrant;
 use crate::text_index;
 use base64::Engine;
@@ -207,6 +207,7 @@ async fn collect_pending_files(
 ) -> Result<Vec<PendingEmbeddingFile>, String> {
     let include_dirs: Vec<PathBuf> = args.include.iter().map(PathBuf::from).collect();
     let exclude_dirs: Vec<PathBuf> = args.exclude.iter().map(PathBuf::from).collect();
+    let use_default_folder_excludes = args.use_default_folder_excludes;
     let allowed_exts: std::collections::HashSet<String> =
         args.extensions.iter().map(|e| normalize_ext(e)).collect();
 
@@ -225,7 +226,7 @@ async fn collect_pending_files(
             .filter_entry(|e| {
                 if e.file_type().is_dir() {
                     let p = e.path();
-                    !exclude_dirs.iter().any(|ex| is_under_dir(p, ex))
+                    !is_path_excluded(p, &exclude_dirs, use_default_folder_excludes)
                 } else {
                     true
                 }
@@ -242,7 +243,7 @@ async fn collect_pending_files(
                 continue;
             }
             let path = entry.path();
-            if exclude_dirs.iter().any(|ex| is_under_dir(path, ex)) {
+            if is_path_excluded(path, &exclude_dirs, use_default_folder_excludes) {
                 continue;
             }
             let path_key = normalize_path_key(path);

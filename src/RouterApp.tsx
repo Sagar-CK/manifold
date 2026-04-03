@@ -57,9 +57,10 @@ export default function RouterApp() {
         include: [...cfg.include].sort(),
         exclude: [...cfg.exclude].sort(),
         extensions: [...cfg.extensions].sort(),
+        useDefaultFolderExcludes: cfg.useDefaultFolderExcludes,
         sourceId: cfg.sourceId,
       }),
-    [cfg.exclude, cfg.extensions, cfg.include, cfg.sourceId],
+    [cfg.exclude, cfg.extensions, cfg.include, cfg.sourceId, cfg.useDefaultFolderExcludes],
   );
   const embedding =
     embeddingPhase === "scanning" ||
@@ -104,11 +105,16 @@ export default function RouterApp() {
     setEmbedFailures([]);
     await invoke("start_embedding_job", {
       args: {
-        scan: { include: cfg.include, exclude: cfg.exclude, extensions: cfg.extensions },
+        scan: {
+          include: cfg.include,
+          exclude: cfg.exclude,
+          extensions: cfg.extensions,
+          useDefaultFolderExcludes: cfg.useDefaultFolderExcludes,
+        },
         sourceId: cfg.sourceId,
       },
     });
-  }, [cfg.exclude, cfg.extensions, cfg.include, cfg.sourceId, geminiApiKey]);
+  }, [cfg.exclude, cfg.extensions, cfg.include, cfg.sourceId, cfg.useDefaultFolderExcludes, geminiApiKey]);
 
   useEffect(() => {
     if (cfg.include.length === 0) {

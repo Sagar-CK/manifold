@@ -230,10 +230,93 @@ pub fn run() {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ScanFilesArgs {
     pub include: Vec<String>,
     pub exclude: Vec<String>,
     pub extensions: Vec<String>,
+    #[serde(default = "default_true")]
+    pub use_default_folder_excludes: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Built-in directory name segments to skip when `use_default_folder_excludes` is true.
+/// Keep in sync with `defaultFolderExcludes.ts` (`DEFAULT_FOLDER_EXCLUDE_SEGMENTS`).
+fn default_folder_exclude_segments() -> &'static [&'static str] {
+    &[
+        ".bzr",
+        ".cache",
+        ".eslintcache",
+        ".fseventsd",
+        ".git",
+        ".gradle",
+        ".hg",
+        ".mypy_cache",
+        ".next",
+        ".nuget",
+        ".nuxt",
+        ".nyc_output",
+        ".output",
+        ".parcel-cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".Spotlight-V100",
+        ".svn",
+        ".svelte-kit",
+        ".TemporaryItems",
+        ".Trash",
+        ".turbo",
+        ".venv",
+        "__pycache__",
+        "bin",
+        "bower_components",
+        "build",
+        "Carthage",
+        "coverage",
+        "DerivedData",
+        "dist",
+        "env",
+        "htmlcov",
+        "jspm_packages",
+        "node_modules",
+        "obj",
+        "out",
+        "Pods",
+        "target",
+        "venv",
+        "virtualenv",
+    ]
+}
+
+fn path_has_default_excluded_segment(path: &Path) -> bool {
+    for c in path.components() {
+        if let std::path::Component::Normal(os) = c {
+            let Some(name) = os.to_str() else {
+                continue;
+            };
+            if default_folder_exclude_segments()
+                .iter()
+                .any(|seg| name.eq_ignore_ascii_case(seg))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+pub fn is_path_excluded(
+    path: &Path,
+    user_excludes: &[PathBuf],
+    use_default_folder_excludes: bool,
+) -> bool {
+    if user_excludes.iter().any(|ex| is_under_dir(path, ex)) {
+        return true;
+    }
+    use_default_folder_excludes && path_has_default_excluded_segment(path)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -295,6 +378,7 @@ async fn scan_files(args: ScanFilesArgs) -> Result<Vec<ScannedFile>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let include_dirs: Vec<PathBuf> = args.include.iter().map(PathBuf::from).collect();
         let exclude_dirs: Vec<PathBuf> = args.exclude.iter().map(PathBuf::from).collect();
+        let use_default_folder_excludes = args.use_default_folder_excludes;
         let allowed_exts: std::collections::HashSet<String> =
             args.extensions.iter().map(|e| normalize_ext(e)).collect();
 
@@ -311,7 +395,7 @@ async fn scan_files(args: ScanFilesArgs) -> Result<Vec<ScannedFile>, String> {
                     // Avoid descending into excluded directories (prevents unnecessary IO + permission errors).
                     if e.file_type().is_dir() {
                         let p = e.path();
-                        !exclude_dirs.iter().any(|ex| is_under_dir(p, ex))
+                        !is_path_excluded(p, &exclude_dirs, use_default_folder_excludes)
                     } else {
                         true
                     }
@@ -330,6 +414,9 @@ async fn scan_files(args: ScanFilesArgs) -> Result<Vec<ScannedFile>, String> {
                     continue;
                 }
                 let path = entry.path();
+                if is_path_excluded(path, &exclude_dirs, use_default_folder_excludes) {
+                    continue;
+                }
                 let path_key = normalize_path_key(path);
                 if !seen_paths.insert(path_key) {
                     continue;
@@ -389,6 +476,7 @@ async fn scan_files_count(args: ScanFilesArgs) -> Result<ScanFilesCountResult, S
     tauri::async_runtime::spawn_blocking(move || {
         let include_dirs: Vec<PathBuf> = args.include.iter().map(PathBuf::from).collect();
         let exclude_dirs: Vec<PathBuf> = args.exclude.iter().map(PathBuf::from).collect();
+        let use_default_folder_excludes = args.use_default_folder_excludes;
         let allowed_exts: std::collections::HashSet<String> =
             args.extensions.iter().map(|e| normalize_ext(e)).collect();
 
@@ -404,7 +492,7 @@ async fn scan_files_count(args: ScanFilesArgs) -> Result<ScanFilesCountResult, S
                 .filter_entry(|e| {
                     if e.file_type().is_dir() {
                         let p = e.path();
-                        !exclude_dirs.iter().any(|ex| is_under_dir(p, ex))
+                        !is_path_excluded(p, &exclude_dirs, use_default_folder_excludes)
                     } else {
                         true
                     }
@@ -423,6 +511,9 @@ async fn scan_files_count(args: ScanFilesArgs) -> Result<ScanFilesCountResult, S
                     continue;
                 }
                 let path = entry.path();
+                if is_path_excluded(path, &exclude_dirs, use_default_folder_excludes) {
+                    continue;
+                }
                 let path_key = normalize_path_key(path);
                 if !seen_paths.insert(path_key) {
                     continue;
@@ -450,6 +541,7 @@ async fn scan_files_estimate(args: ScanFilesArgs) -> Result<ScanFilesEstimateRes
     tauri::async_runtime::spawn_blocking(move || {
         let include_dirs: Vec<PathBuf> = args.include.iter().map(PathBuf::from).collect();
         let exclude_dirs: Vec<PathBuf> = args.exclude.iter().map(PathBuf::from).collect();
+        let use_default_folder_excludes = args.use_default_folder_excludes;
         let allowed_exts: std::collections::HashSet<String> =
             args.extensions.iter().map(|e| normalize_ext(e)).collect();
 
@@ -473,7 +565,7 @@ async fn scan_files_estimate(args: ScanFilesArgs) -> Result<ScanFilesEstimateRes
                 .filter_entry(|e| {
                     if e.file_type().is_dir() {
                         let p = e.path();
-                        !exclude_dirs.iter().any(|ex| is_under_dir(p, ex))
+                        !is_path_excluded(p, &exclude_dirs, use_default_folder_excludes)
                     } else {
                         true
                     }
@@ -492,6 +584,9 @@ async fn scan_files_estimate(args: ScanFilesArgs) -> Result<ScanFilesEstimateRes
                     continue;
                 }
                 let path = entry.path();
+                if is_path_excluded(path, &exclude_dirs, use_default_folder_excludes) {
+                    continue;
+                }
                 let path_key = normalize_path_key(path);
                 if !seen_paths.insert(path_key) {
                     continue;

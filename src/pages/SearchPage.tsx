@@ -30,6 +30,7 @@ import {
   AlertDialogTitle,
 } from "../components/ui/alert-dialog";
 import type { LocalConfig } from "../lib/localConfig";
+import { pathHasDefaultExcludedSegment } from "../lib/defaultFolderExcludes";
 import { EmbeddingStatusPanel } from "../components/EmbeddingStatusPanel";
 import { PageHeader } from "../components/PageHeader";
 
@@ -55,10 +56,12 @@ function isPathSelected(path: string, cfg: LocalConfig) {
 
   const inInclude =
     include.length === 0 ? true : include.some((root) => p === root || p.startsWith(`${root}/`));
-  const inExclude = exclude.some((root) => p === root || p.startsWith(`${root}/`));
+  const inUserExclude = exclude.some((root) => p === root || p.startsWith(`${root}/`));
+  const inDefaultFolderExclude =
+    cfg.useDefaultFolderExcludes && pathHasDefaultExcludedSegment(p);
   const extSelected = cfg.extensions.length === 0 || cfg.extensions.includes(ext);
 
-  return inInclude && !inExclude && extSelected;
+  return inInclude && !inUserExclude && !inDefaultFolderExclude && extSelected;
 }
 
 function formatSimilarityScore(score: number) {
@@ -410,6 +413,7 @@ export function SearchPage({
     cfg.topK,
     cfg.include,
     cfg.exclude,
+    cfg.useDefaultFolderExcludes,
     cfg.extensions,
     matchTypeFilter.textMatch,
     matchTypeFilter.semantic,

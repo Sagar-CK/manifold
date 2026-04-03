@@ -112,6 +112,8 @@ export function SettingsPage({
   const [addIncludeError, setAddIncludeError] = useState<string | null>(null);
   const [includeToAdd, setIncludeToAdd] = useState<string | null>(null);
   const [includeAddEstimate, setIncludeAddEstimate] = useState<IncludeFolderEstimate | null>(null);
+  const [confirmDisableDefaultExcludesOpen, setConfirmDisableDefaultExcludesOpen] =
+    useState(false);
   const liveIndexedCount =
     embedding || hasPendingEmbeds
       ? Math.max(embeddedCount ?? 0, embedProgress.processed)
@@ -234,6 +236,7 @@ export function SettingsPage({
           include: [path],
           exclude: cfg.exclude,
           extensions: cfg.extensions,
+          useDefaultFolderExcludes: cfg.useDefaultFolderExcludes,
         },
       })) as {
         total: number | string;
@@ -474,6 +477,30 @@ export function SettingsPage({
                 ))
               )}
             </div>
+          </div>
+
+          <div className="mt-5 flex items-start justify-between gap-3">
+            <div>
+              <div className="app-label">Skip common dependency and build folders</div>
+              <div className="app-muted mt-1 max-w-xl">
+                Skips folders such as <span className="font-mono">node_modules</span>,{" "}
+                <span className="font-mono">.git</span>, and <span className="font-mono">dist</span>{" "}
+                so indexing stays focused on your own files. Turning this off can add a very large
+                number of files and increase API cost.
+              </div>
+            </div>
+            <Switch
+              checked={cfg.useDefaultFolderExcludes}
+              onCheckedChange={(checked) => {
+                if (checked) {
+                  updateConfig({ ...cfg, useDefaultFolderExcludes: true });
+                } else {
+                  setConfirmDisableDefaultExcludesOpen(true);
+                }
+              }}
+              aria-label="Skip common dependency and build folders"
+              className="shrink-0"
+            />
           </div>
         </div>
 
@@ -833,6 +860,33 @@ export function SettingsPage({
               ) : (
                 "Delete"
               )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog
+        open={confirmDisableDefaultExcludesOpen}
+        onOpenChange={setConfirmDisableDefaultExcludesOpen}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-black">
+              Turn off automatic folder skipping?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              Scanning and embedding may include many more files from dependencies, build outputs, and
+              caches. Indexing will be slower and API usage costs can increase significantly.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="h-auto min-h-9 px-3 py-2">Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="h-auto min-h-9 px-3 py-2"
+              onClick={() => {
+                updateConfig({ ...cfg, useDefaultFolderExcludes: false });
+              }}
+            >
+              Turn off skipping
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
