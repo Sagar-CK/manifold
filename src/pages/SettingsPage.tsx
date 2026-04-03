@@ -106,7 +106,6 @@ export function SettingsPage({
   const [includeToRemove, setIncludeToRemove] = useState<string | null>(null);
   const [confirmRemoveIncludeOpen, setConfirmRemoveIncludeOpen] = useState(false);
   const [removeIncludeLoading, setRemoveIncludeLoading] = useState(false);
-  const [removeIncludeAffectedCount, setRemoveIncludeAffectedCount] = useState<number | null>(null);
   const [removeIncludeError, setRemoveIncludeError] = useState<string | null>(null);
   const [confirmAddIncludeOpen, setConfirmAddIncludeOpen] = useState(false);
   const [addIncludeLoading, setAddIncludeLoading] = useState(false);
@@ -160,10 +159,14 @@ export function SettingsPage({
     setClearIndexError(null);
     setClearingIndex(true);
     try {
-      await invoke("qdrant_delete_all_points", { args: { sourceId: cfg.sourceId } });
-      if (embedding || hasPendingEmbeds) {
-        await onCancelEmbedding();
+      try {
+        if (embedding || hasPendingEmbeds) {
+          await onCancelEmbedding();
+        }
+      } catch {
+        // Job may have finished between render and invoke; still clear Qdrant.
       }
+      await invoke("qdrant_delete_all_points", { args: { sourceId: cfg.sourceId } });
       // Bump sourceId to force a clean re-index cycle + avoid any stale per-source caches.
       const nextSourceId = crypto.randomUUID();
       updateConfig({ ...cfg, sourceId: nextSourceId, include: [] });
@@ -176,25 +179,10 @@ export function SettingsPage({
     }
   }
 
-  async function prepareRemoveIncludeFolder(path: string) {
+  function prepareRemoveIncludeFolder(path: string) {
     setIncludeToRemove(path);
     setRemoveIncludeError(null);
-    setRemoveIncludeAffectedCount(null);
     setConfirmRemoveIncludeOpen(true);
-    try {
-      const res = (await invoke("scan_files_count", {
-        args: {
-          include: [path],
-          exclude: cfg.exclude,
-          extensions: cfg.extensions,
-        },
-      })) as { total: number } | { total: string };
-      const total = typeof res.total === "string" ? Number.parseInt(res.total, 10) : res.total;
-      setRemoveIncludeAffectedCount(Number.isFinite(total) ? total : 0);
-    } catch (e) {
-      setRemoveIncludeError(String(e));
-      setRemoveIncludeAffectedCount(0);
-    }
   }
 
   async function removeIncludeFolderAndVectors() {
@@ -202,31 +190,31 @@ export function SettingsPage({
     setRemoveIncludeError(null);
     setRemoveIncludeLoading(true);
     try {
-      const scanned = (await invoke("scan_files", {
-        args: {
-          include: [includeToRemove],
-          exclude: cfg.exclude,
-          extensions: cfg.extensions,
-        },
-      })) as Array<{ path: string }>;
-      const paths = scanned.map((file) => file.path);
-      if (paths.length > 0) {
-        await invoke("qdrant_delete_points_for_paths", {
-          args: {
-            sourceId: cfg.sourceId,
-            paths,
-          },
-        });
+      try {
+        if (embedding || hasPendingEmbeds) {
+          await onCancelEmbedding();
+        }
+      } catch {
+        // Job may have finished between render and invoke.
       }
+      await invoke("qdrant_delete_points_for_include_path", {
+        args: {
+          sourceId: cfg.sourceId,
+          includePath: includeToRemove,
+        },
+      });
       const nextInclude = cfg.include.filter((x) => x !== includeToRemove);
       updateConfig({ ...cfg, include: nextInclude });
       if (nextInclude.length === 0 && (embedding || hasPendingEmbeds)) {
-        await onCancelEmbedding();
+        try {
+          await onCancelEmbedding();
+        } catch {
+          // ignore
+        }
       }
       await refreshEmbeddedCount(cfg.sourceId);
       setConfirmRemoveIncludeOpen(false);
       setIncludeToRemove(null);
-      setRemoveIncludeAffectedCount(null);
     } catch (e) {
       setRemoveIncludeError(String(e));
     } finally {
@@ -431,8 +419,8 @@ export function SettingsPage({
                       className="text-destructive hover:bg-destructive/10 hover:text-destructive"
                       aria-label={`Remove include folder ${formatPathForDisplay(p)}`}
                       title="Remove include folder"
-                      onClick={async () => {
-                        await prepareRemoveIncludeFolder(p);
+                      onClick={() => {
+                        prepareRemoveIncludeFolder(p);
                       }}
                     >
                       <Trash2 className="h-4 w-4" aria-hidden="true" />
@@ -620,7 +608,7 @@ export function SettingsPage({
             <AlertDialogTrigger asChild>
               <Button
                 variant="destructive"
-                disabled={clearingIndex || embedding || hasPendingEmbeds || liveIndexedCount === 0}
+                disabled={clearingIndex || liveIndexedCount === 0}
               >
                 <Trash2 className="h-4 w-4" aria-hidden="true" />
                 {clearingIndex && <Spinner className="h-4 w-4" aria-hidden="true" /> }
@@ -798,7 +786,6 @@ export function SettingsPage({
           setConfirmRemoveIncludeOpen(open);
           if (!open && !removeIncludeLoading) {
             setIncludeToRemove(null);
-            setRemoveIncludeAffectedCount(null);
             setRemoveIncludeError(null);
           }
         }}
@@ -806,11 +793,11 @@ export function SettingsPage({
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle className="text-black">
-              Remove include folder and delete {removeIncludeAffectedCount ?? "..."} vectors?
+              Remove this include folder and its vectors?
             </AlertDialogTitle>
             <AlertDialogDescription>
-              This removes the folder from include paths and deletes vectors for{" "}
-              {removeIncludeAffectedCount ?? "..."} file(s) in this folder.
+              This removes the folder from your include paths and deletes indexed vectors for files in
+              that folder. Your files on disk are not deleted.
             </AlertDialogDescription>
           </AlertDialogHeader>
           {removeIncludeError ? (

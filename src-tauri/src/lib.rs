@@ -208,6 +208,7 @@ pub fn run() {
             qdrant_count_points,
             qdrant_delete_all_points,
             qdrant_delete_points_for_paths,
+            qdrant_delete_points_for_include_path,
             start_embedding_job,
             pause_embedding_job,
             resume_embedding_job,
@@ -835,6 +836,38 @@ async fn qdrant_delete_points_for_paths(
 ) -> Result<qdrant::DeletePointsForPathsResult, String> {
     let res = qdrant::delete_points_for_paths(&app, &state, args.clone()).await?;
     text_index::delete_for_paths(&app, &text_index_state, &args.source_id, &args.paths).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+async fn qdrant_delete_points_for_include_path(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, qdrant::QdrantState>,
+    text_index_state: tauri::State<'_, text_index::TextIndexState>,
+    args: qdrant::DeletePointsForIncludePathArgs,
+) -> Result<qdrant::DeletePointsForPathsResult, String> {
+    let paths =
+        qdrant::paths_under_include_root(&app, &state, &args.source_id, &args.include_path).await?;
+    let res = if paths.is_empty() {
+        qdrant::DeletePointsForPathsResult { deleted_count: 0 }
+    } else {
+        qdrant::delete_points_for_paths(
+            &app,
+            &state,
+            qdrant::DeletePointsForPathsArgs {
+                source_id: args.source_id.clone(),
+                paths,
+            },
+        )
+        .await?
+    };
+    text_index::delete_for_paths_under_include(
+        &app,
+        &text_index_state,
+        &args.source_id,
+        std::path::Path::new(&args.include_path),
+    )
+    .await?;
     Ok(res)
 }
 

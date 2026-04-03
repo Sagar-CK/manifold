@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tauri::AppHandle;
@@ -43,7 +43,6 @@ impl Default for QdrantState {
 }
 
 struct QdrantInstance {
-    _base_url: String,
     client: Qdrant,
 }
 
@@ -337,7 +336,7 @@ async fn start_qdrant(app: &AppHandle, state: &QdrantState) -> Result<QdrantInst
     quick_ready(&client).await?;
     ensure_collection(&client, CONTENT_COLLECTION_NAME).await?;
     ensure_collection(&client, METADATA_COLLECTION_NAME).await?;
-    Ok(QdrantInstance { _base_url: trimmed, client })
+    Ok(QdrantInstance { client })
 }
 
 async fn instance(app: &AppHandle, state: &QdrantState) -> Result<Qdrant, String> {
@@ -741,6 +740,64 @@ pub struct DeletePointsForPathsArgs {
 #[serde(rename_all = "camelCase")]
 pub struct DeletePointsForPathsResult {
     pub deleted_count: u64,
+}
+
+/// Lists indexed file paths under `include_path` by scanning Qdrant payloads (no disk hashing).
+pub async fn paths_under_include_root(
+    app: &AppHandle,
+    state: &QdrantState,
+    source_id: &str,
+    include_path: &str,
+) -> Result<Vec<String>, String> {
+    let client = instance(app, state).await?;
+    let root = Path::new(include_path);
+    let filter = Filter::must([Condition::matches("sourceId", source_id.to_string())]);
+    let mut paths: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut offset: Option<PointId> = None;
+
+    loop {
+        let mut builder = ScrollPointsBuilder::new(CONTENT_COLLECTION_NAME)
+            .filter(filter.clone())
+            .limit(256)
+            .with_payload(true)
+            .with_vectors(false);
+        if let Some(ref o) = offset {
+            builder = builder.offset(o.clone());
+        }
+
+        let res = client
+            .scroll(builder)
+            .await
+            .map_err(|e| format!("qdrant scroll (paths under include) failed: {e}"))?;
+
+        for p in res.result {
+            let path_str = p.payload.get("path").and_then(|v| match &v.kind {
+                Some(qdrant_client::qdrant::value::Kind::StringValue(s)) => Some(s.clone()),
+                _ => None,
+            });
+            if let Some(path_str) = path_str {
+                let file_path = Path::new(&path_str);
+                if crate::is_under_dir(file_path, root) && seen.insert(path_str.clone()) {
+                    paths.push(path_str);
+                }
+            }
+        }
+
+        offset = res.next_page_offset;
+        if offset.is_none() {
+            break;
+        }
+    }
+
+    Ok(paths)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletePointsForIncludePathArgs {
+    pub source_id: String,
+    pub include_path: String,
 }
 
 pub async fn delete_all_points(app: &AppHandle, state: &QdrantState, args: DeleteAllPointsArgs) -> Result<(), String> {

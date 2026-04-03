@@ -203,6 +203,7 @@ async fn collect_pending_files(
     qdrant_state: &qdrant::QdrantState,
     args: &ScanFilesArgs,
     source_id: &str,
+    cancel_flag: &Arc<AtomicBool>,
 ) -> Result<Vec<PendingEmbeddingFile>, String> {
     let include_dirs: Vec<PathBuf> = args.include.iter().map(PathBuf::from).collect();
     let exclude_dirs: Vec<PathBuf> = args.exclude.iter().map(PathBuf::from).collect();
@@ -212,6 +213,9 @@ async fn collect_pending_files(
     let mut out: Vec<PendingEmbeddingFile> = Vec::new();
     let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
     for root in include_dirs {
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Ok(Vec::new());
+        }
         if !root.exists() {
             continue;
         }
@@ -227,6 +231,9 @@ async fn collect_pending_files(
                 }
             })
         {
+            if cancel_flag.load(Ordering::Relaxed) {
+                return Ok(Vec::new());
+            }
             let entry = match entry {
                 Ok(e) => e,
                 Err(_) => continue,
@@ -722,7 +729,15 @@ pub async fn start(
 
         let qdrant_state = app2.state::<qdrant::QdrantState>();
         let scan_started = Instant::now();
-        let pending_files = match collect_pending_files(&app2, &qdrant_state, &args, &source_id).await {
+        let pending_files = match collect_pending_files(
+            &app2,
+            &qdrant_state,
+            &args,
+            &source_id,
+            &cancel_flag,
+        )
+        .await
+        {
             Ok(v) => v,
             Err(e) => {
                 emit_error(&app2, &e);

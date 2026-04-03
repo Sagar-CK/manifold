@@ -163,6 +163,26 @@ pub async fn delete_for_paths(app: &tauri::AppHandle, state: &TextIndexState, so
     save_entries(app, entries)
 }
 
+/// Removes text-index rows for any file path under `include_root` (same semantics as include-folder removal).
+pub async fn delete_for_paths_under_include(
+    app: &tauri::AppHandle,
+    state: &TextIndexState,
+    source_id: &str,
+    include_root: &std::path::Path,
+) -> Result<(), String> {
+    ensure_loaded(app, state).await?;
+    let mut lock = state.entries.write().await;
+    let entries = lock.as_mut().unwrap();
+    entries.retain(|e| {
+        if e.source_id != source_id {
+            return true;
+        }
+        let p = std::path::Path::new(&e.path);
+        !crate::is_under_dir(p, include_root)
+    });
+    save_entries(app, entries)
+}
+
 pub async fn search_text(app: &tauri::AppHandle, state: &TextIndexState, args: SearchTextArgs) -> Result<Vec<TextSearchHit>, String> {
     ensure_loaded(app, state).await?;
     let normalized_query = normalize_for_match(&args.query);

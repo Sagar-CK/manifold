@@ -2397,7 +2397,6 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tokio",
- "tonic",
  "tracing",
  "tracing-subscriber",
  "url",

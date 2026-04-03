@@ -37,6 +37,5 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 lru = "0.16.3"
 qdrant-client = "1.17"
-tonic = "0.12"
 url = "2.5.8"
 
