@@ -38,4 +38,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 lru = "0.16.3"
 qdrant-client = "1.17"
 url = "2.5.8"
+rand = "0.8"
 
