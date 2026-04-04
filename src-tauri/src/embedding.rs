@@ -1,4 +1,6 @@
-use crate::{compute_sha256, is_path_excluded, normalize_ext, normalize_path_key, ScanFilesArgs};
+use crate::{
+    compute_sha256, walk_scan_candidates, MAX_EMBED_FILE_BYTES, ScanFilesArgs,
+};
 use crate::qdrant;
 use crate::text_index;
 use base64::Engine;
@@ -11,12 +13,10 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 use tokio::sync::{watch, Mutex};
-use walkdir::WalkDir;
 use lru::LruCache;
 use std::num::NonZeroUsize;
 
 const OUTPUT_DIM: usize = 3072;
-const MAX_FILE_BYTES: u64 = 25 * 1024 * 1024; // 25MB
 const GEMINI_MODEL: &str = "models/gemini-embedding-2-preview";
 const GEMINI_OCR_MODEL: &str = "models/gemini-3-flash-preview";
 const GEMINI_EMBED_TIMEOUT_SECS: u64 = 120;
@@ -150,6 +150,11 @@ fn emit_status(app: &tauri::AppHandle, status: &EmbeddingJobStatus) {
 }
 
 fn emit_error(app: &tauri::AppHandle, message: &str) {
+    if message == "Cancelled" {
+        tracing::info!("embedding job cancelled");
+    } else {
+        tracing::error!(message = %message, "embedding job error");
+    }
     let _ = app.emit(
         "embedding://error",
         serde_json::json!({ "message": message }),
@@ -178,6 +183,8 @@ struct PendingEmbeddingFile {
     content_hash: String,
     should_embed_content: bool,
     should_embed_metadata: bool,
+    size_bytes: u64,
+    mtime_ms: i64,
 }
 
 async fn wait_if_paused(
@@ -205,93 +212,50 @@ async fn collect_pending_files(
     source_id: &str,
     cancel_flag: &Arc<AtomicBool>,
 ) -> Result<Vec<PendingEmbeddingFile>, String> {
-    let include_dirs: Vec<PathBuf> = args.include.iter().map(PathBuf::from).collect();
-    let exclude_dirs: Vec<PathBuf> = args.exclude.iter().map(PathBuf::from).collect();
-    let use_default_folder_excludes = args.use_default_folder_excludes;
-    let allowed_exts: std::collections::HashSet<String> =
-        args.extensions.iter().map(|e| normalize_ext(e)).collect();
+    let args_clone = args.clone();
+    let candidates = tokio::task::spawn_blocking(move || {
+        walk_scan_candidates(&args_clone, MAX_EMBED_FILE_BYTES)
+    })
+    .await
+    .map_err(|e| format!("collect_pending_files: walk join error: {e}"))??;
+
+    let index = qdrant::load_source_preflight_index(app, qdrant_state, source_id).await?;
 
     let mut out: Vec<PendingEmbeddingFile> = Vec::new();
-    let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for root in include_dirs {
+    for c in candidates {
         if cancel_flag.load(Ordering::Relaxed) {
             return Ok(Vec::new());
         }
-        if !root.exists() {
-            continue;
-        }
-        for entry in WalkDir::new(root)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(|e| {
-                if e.file_type().is_dir() {
-                    let p = e.path();
-                    !is_path_excluded(p, &exclude_dirs, use_default_folder_excludes)
-                } else {
-                    true
-                }
-            })
-        {
-            if cancel_flag.load(Ordering::Relaxed) {
-                return Ok(Vec::new());
-            }
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let path = entry.path();
-            if is_path_excluded(path, &exclude_dirs, use_default_folder_excludes) {
-                continue;
-            }
-            let path_key = normalize_path_key(path);
-            if !seen_paths.insert(path_key) {
-                continue;
-            }
-            let ext = path
-                .extension()
-                .and_then(|s| s.to_str())
-                .map(normalize_ext);
-            let Some(ext) = ext else { continue };
-            if !allowed_exts.is_empty() && !allowed_exts.contains(&ext) {
-                continue;
-            }
-            let mime = mime_type_for_ext(&ext);
-            let meta = match std::fs::metadata(path) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            if meta.len() > MAX_FILE_BYTES {
-                continue;
-            }
-            let content_hash = match compute_sha256(path, 1024 * 1024 * 128) {
+        let path_str = c.path.to_string_lossy().to_string();
+        let content_hash = if let Some(h) = qdrant::reuse_hash_if_fingerprint_matches(
+            &path_str,
+            c.size_bytes,
+            c.mtime_ms,
+            &index,
+        ) {
+            h
+        } else {
+            match compute_sha256(&c.path, 1024 * 1024 * 128) {
                 Ok(h) => h,
                 Err(_) => continue,
-            };
-            let should_embed = qdrant::upsert_metadata(
-                app,
-                qdrant_state,
-                qdrant::UpsertMetadataArgs {
-                    source_id: source_id.to_string(),
-                    path: path.to_string_lossy().to_string(),
-                    content_hash: content_hash.clone(),
-                },
-            )
-            .await?;
-            if !should_embed.should_embed_content && !should_embed.should_embed_metadata {
-                continue;
             }
-            out.push(PendingEmbeddingFile {
-                path: path.to_path_buf(),
-                ext,
-                mime,
-                content_hash,
-                should_embed_content: should_embed.should_embed_content,
-                should_embed_metadata: should_embed.should_embed_metadata,
-            });
+        };
+        let should_embed =
+            qdrant::decide_embedding_need_from_index(&path_str, &content_hash, &index);
+        if !should_embed.should_embed_content && !should_embed.should_embed_metadata {
+            continue;
         }
+        let mime = mime_type_for_ext(&c.ext);
+        out.push(PendingEmbeddingFile {
+            path: c.path,
+            ext: c.ext,
+            mime,
+            content_hash,
+            should_embed_content: should_embed.should_embed_content,
+            should_embed_metadata: should_embed.should_embed_metadata,
+            size_bytes: c.size_bytes,
+            mtime_ms: c.mtime_ms,
+        });
     }
     Ok(out)
 }
@@ -861,6 +825,8 @@ pub async fn start(
                 let ext = pending.ext.clone();
                 let mime = pending.mime;
                 let sha256 = pending.content_hash;
+                let size_bytes = pending.size_bytes;
+                let mtime_ms = pending.mtime_ms;
                 let file_path = path.to_string_lossy().to_string();
                 let file_started = Instant::now();
                 let bytes = if pending.should_embed_content {
@@ -993,6 +959,8 @@ pub async fn start(
                             source_id: source_id_for_file.clone(),
                             path: file_path.clone(),
                             content_hash: sha256.clone(),
+                            size_bytes,
+                            mtime_ms,
                             embedding,
                         },
                     )
@@ -1011,6 +979,8 @@ pub async fn start(
                             source_id: source_id_for_file.clone(),
                             path: file_path.clone(),
                             content_hash: sha256.clone(),
+                            size_bytes,
+                            mtime_ms,
                             metadata_embedding,
                         },
                     )

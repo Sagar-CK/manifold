@@ -57,7 +57,10 @@ export function EmbeddingStatusPanel({
         </div>
       ) : lastEmbedError && lastEmbedError !== "Cancelled" ? (
         <div className="mt-2 text-center text-xs font-medium text-rose-700">
-          Embedding encountered an error. See logs for detail.
+          <div>Embedding encountered an error.</div>
+          <pre className="mt-1 max-h-32 overflow-y-auto whitespace-pre-wrap break-words text-left font-mono text-[10px] font-normal leading-snug text-rose-800/90">
+            {lastEmbedError}
+          </pre>
         </div>
       ) : null}
     </div>

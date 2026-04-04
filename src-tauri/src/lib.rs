@@ -243,6 +243,128 @@ fn default_true() -> bool {
     true
 }
 
+/// Max file size (bytes) eligible for embedding and embed preflight scans.
+pub const MAX_EMBED_FILE_BYTES: u64 = 25 * 1024 * 1024;
+
+#[derive(Debug, Clone)]
+pub struct ScanWalkCandidate {
+    pub path: PathBuf,
+    pub size_bytes: u64,
+    pub mtime_ms: i64,
+    pub ext: String,
+}
+
+fn file_mtime_ms(meta: &std::fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Walk include roots and return file candidates (extension filter, excludes, size cap).
+pub fn walk_scan_candidates(
+    args: &ScanFilesArgs,
+    max_file_bytes: u64,
+) -> Result<Vec<ScanWalkCandidate>, String> {
+    let include_dirs: Vec<PathBuf> = args.include.iter().map(PathBuf::from).collect();
+    let exclude_dirs: Vec<PathBuf> = args.exclude.iter().map(PathBuf::from).collect();
+    let use_default_folder_excludes = args.use_default_folder_excludes;
+    let allowed_exts: std::collections::HashSet<String> =
+        args.extensions.iter().map(|e| normalize_ext(e)).collect();
+
+    let mut out: Vec<ScanWalkCandidate> = Vec::new();
+    let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for root in include_dirs {
+        if !root.exists() {
+            continue;
+        }
+        for entry in WalkDir::new(&root)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| {
+                if e.file_type().is_dir() {
+                    let p = e.path();
+                    !is_path_excluded(p, &exclude_dirs, use_default_folder_excludes)
+                } else {
+                    true
+                }
+            })
+        {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(err) => {
+                    if !is_walk_permission_denied(&err) {
+                        // skip non-permission walk errors
+                    }
+                    continue;
+                }
+            };
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.path();
+            if is_path_excluded(path, &exclude_dirs, use_default_folder_excludes) {
+                continue;
+            }
+            let path_key = normalize_path_key(path);
+            if !seen_paths.insert(path_key) {
+                continue;
+            }
+            let ext = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(normalize_ext);
+            let Some(ext) = ext else { continue };
+            if !allowed_exts.is_empty() && !allowed_exts.contains(&ext) {
+                continue;
+            }
+            let meta = match fs::metadata(path) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if meta.len() > max_file_bytes {
+                continue;
+            }
+            out.push(ScanWalkCandidate {
+                path: path.to_path_buf(),
+                size_bytes: meta.len(),
+                mtime_ms: file_mtime_ms(&meta),
+                ext,
+            });
+        }
+    }
+
+    Ok(out)
+}
+
+/// Returns true if any candidate still needs content or metadata embedding (uses preflight index + hash).
+pub fn any_candidate_needs_embedding(
+    candidates: Vec<ScanWalkCandidate>,
+    index: qdrant::SourcePreflightIndex,
+) -> Result<bool, String> {
+    for c in candidates {
+        let path_str = c.path.to_string_lossy().to_string();
+        let content_hash =
+            if let Some(h) = qdrant::reuse_hash_if_fingerprint_matches(
+                &path_str,
+                c.size_bytes,
+                c.mtime_ms,
+                &index,
+            ) {
+                h
+            } else {
+                compute_sha256(&c.path, 1024 * 1024 * 128)?
+            };
+        let d = qdrant::decide_embedding_need_from_index(&path_str, &content_hash, &index);
+        if d.should_embed_content || d.should_embed_metadata {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Built-in directory name segments to skip when `use_default_folder_excludes` is true.
 /// Keep in sync with `defaultFolderExcludes.ts` (`DEFAULT_FOLDER_EXCLUDE_SEGMENTS`).
 fn default_folder_exclude_segments() -> &'static [&'static str] {
@@ -656,42 +778,33 @@ async fn scan_files_needs_embedding(
     state: tauri::State<'_, qdrant::QdrantState>,
     args: ScanFilesNeedsEmbeddingArgs,
 ) -> Result<ScanFilesNeedsEmbeddingResult, String> {
-    // Scan + hash in a blocking task to avoid freezing the runtime.
-    let scanned = scan_files(args.scan).await?;
-    let total_selected = scanned.len() as u64;
+    let scan = args.scan.clone();
+    let candidates = tauri::async_runtime::spawn_blocking(move || {
+        walk_scan_candidates(&scan, MAX_EMBED_FILE_BYTES)
+    })
+    .await
+    .map_err(|e| format!("scan_files_needs_embedding: join error: {e}"))??;
 
-    // If nothing is selected, nothing needs embedding.
-    if scanned.is_empty() {
+    let total_selected = candidates.len() as u64;
+
+    if candidates.is_empty() {
         return Ok(ScanFilesNeedsEmbeddingResult {
             total_selected,
             needs_embedding: false,
         });
     }
 
-    // Early-exit as soon as we find one file that needs embedding.
-    for f in scanned {
-        let res = qdrant::upsert_metadata(
-            &app,
-            &state,
-            qdrant::UpsertMetadataArgs {
-                source_id: args.source_id.clone(),
-                path: f.path,
-                content_hash: f.sha256,
-            },
-        )
-        .await?;
+    let index = qdrant::load_source_preflight_index(&app, &state, &args.source_id).await?;
 
-        if res.should_embed_content || res.should_embed_metadata {
-            return Ok(ScanFilesNeedsEmbeddingResult {
-                total_selected,
-                needs_embedding: true,
-            });
-        }
-    }
+    let needs_embedding = tauri::async_runtime::spawn_blocking(move || {
+        any_candidate_needs_embedding(candidates, index)
+    })
+    .await
+    .map_err(|e| format!("scan_files_needs_embedding: join error: {e}"))??;
 
     Ok(ScanFilesNeedsEmbeddingResult {
         total_selected,
-        needs_embedding: false,
+        needs_embedding,
     })
 }
 

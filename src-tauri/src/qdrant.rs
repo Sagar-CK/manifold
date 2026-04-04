@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -7,6 +8,7 @@ use std::time::Duration;
 use tauri::AppHandle;
 use tauri::Manager;
 use tokio::sync::Mutex;
+use tracing::info;
 
 use qdrant_client::Qdrant;
 use qdrant_client::qdrant::{
@@ -15,6 +17,7 @@ use qdrant_client::qdrant::{
     CountPointsBuilder, PointId
 };
 use qdrant_client::Payload;
+use qdrant_client::qdrant::Value;
 
 const CONTENT_COLLECTION_NAME: &str = "manifold_files_content_v2";
 const METADATA_COLLECTION_NAME: &str = "manifold_files_metadata_v2";
@@ -50,6 +53,53 @@ struct QdrantInstance {
 struct QdrantRuntimeState {
     child: Option<Child>,
     base_url: Option<String>,
+    /// HTTP port for the Qdrant Web UI when this process chose it (bundled) or inferred default layout.
+    http_dashboard_port: Option<u16>,
+}
+
+fn trim_env_var(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// `qdrant_client` uses gRPC; the dashboard is served on HTTP (often one less than :6334 → :6333).
+fn dashboard_url_hint(grpc_endpoint: &str, http_port: Option<u16>) -> String {
+    if let Some(port) = http_port {
+        return format!("http://127.0.0.1:{port}/dashboard#/collections");
+    }
+    if let Ok(u) = url::Url::parse(grpc_endpoint) {
+        if let Some(host) = u.host_str() {
+            if u.port() == Some(6334) {
+                return format!("http://{host}:6333/dashboard#/collections");
+            }
+        }
+    }
+    format!("(Qdrant Web UI is on the HTTP port for this instance; gRPC endpoint is {grpc_endpoint})")
+}
+
+fn external_connection_dashboard_hint(grpc_endpoint: &str) -> String {
+    if let Some(http) = trim_env_var("MANIFOLD_QDRANT_URL") {
+        format!(
+            "{}/dashboard#/collections",
+            http.trim_end_matches('/')
+        )
+    } else {
+        dashboard_url_hint(grpc_endpoint, None)
+    }
+}
+
+fn log_qdrant_connected(connection_mode: &str, grpc_endpoint: &str, dashboard_url: &str) {
+    info!(
+        target: "manifold::qdrant",
+        connection_mode,
+        grpc_endpoint = %grpc_endpoint,
+        dashboard_url = %dashboard_url,
+        content_collection = CONTENT_COLLECTION_NAME,
+        metadata_collection = METADATA_COLLECTION_NAME,
+        "Qdrant connected; use dashboard_url to inspect collections in the Web UI"
+    );
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +123,8 @@ pub struct UpsertEmbeddingArgs {
     pub source_id: String,
     pub path: String,
     pub content_hash: String,
+    pub size_bytes: u64,
+    pub mtime_ms: i64,
     pub embedding: Vec<f32>,
 }
 
@@ -82,6 +134,8 @@ pub struct UpsertMetadataEmbeddingArgs {
     pub source_id: String,
     pub path: String,
     pub content_hash: String,
+    pub size_bytes: u64,
+    pub mtime_ms: i64,
     pub metadata_embedding: Vec<f32>,
 }
 
@@ -264,6 +318,7 @@ async fn ensure_runtime_base_url(app: &AppHandle, state: &QdrantState) -> Result
             {
                 runtime.child = None;
                 runtime.base_url = None;
+                runtime.http_dashboard_port = None;
                 return Err(format!(
                     "Bundled Qdrant exited unexpectedly with status {status}. Check application logs."
                 ));
@@ -280,6 +335,7 @@ async fn ensure_runtime_base_url(app: &AppHandle, state: &QdrantState) -> Result
     if quick_ready(&default_client).await.is_ok() {
         let mut runtime = state.runtime.lock().await;
         runtime.base_url = Some(default_url.clone());
+        runtime.http_dashboard_port = Some(6333);
         return Ok(default_url);
     }
 
@@ -309,6 +365,7 @@ async fn ensure_runtime_base_url(app: &AppHandle, state: &QdrantState) -> Result
         let mut runtime = state.runtime.lock().await;
         runtime.child = Some(child);
         runtime.base_url = Some(base_url.clone());
+        runtime.http_dashboard_port = Some(http_port);
     }
 
     let client = build_qdrant_client(&base_url, 500, None)?;
@@ -325,17 +382,43 @@ async fn ensure_runtime_base_url(app: &AppHandle, state: &QdrantState) -> Result
 }
 
 async fn start_qdrant(app: &AppHandle, state: &QdrantState) -> Result<QdrantInstance, String> {
-    let trimmed = if let Some(url) = configured_qdrant_url() {
+    let env_grpc_url = configured_qdrant_url();
+    let uses_env_config = env_grpc_url.is_some();
+    let trimmed = if let Some(url) = env_grpc_url {
         url
     } else {
         ensure_runtime_base_url(app, state).await?
     };
-    
+
     let client = build_qdrant_client(&trimmed, 5000, Some(350))?;
 
     quick_ready(&client).await?;
     ensure_collection(&client, CONTENT_COLLECTION_NAME).await?;
     ensure_collection(&client, METADATA_COLLECTION_NAME).await?;
+
+    let (connection_mode, dashboard_url) = {
+        let rt = state.runtime.lock().await;
+        if uses_env_config {
+            let mode = if trim_env_var("MANIFOLD_QDRANT_GRPC_URL").is_some() {
+                "configured_grpc_override"
+            } else {
+                "configured_http_env"
+            };
+            (mode, external_connection_dashboard_hint(&trimmed))
+        } else if rt.child.is_some() {
+            (
+                "bundled_binary",
+                dashboard_url_hint(&trimmed, rt.http_dashboard_port),
+            )
+        } else {
+            (
+                "reuse_existing_default_grpc",
+                dashboard_url_hint(&trimmed, rt.http_dashboard_port),
+            )
+        }
+    };
+    log_qdrant_connected(connection_mode, &trimmed, &dashboard_url);
+
     Ok(QdrantInstance { client })
 }
 
@@ -371,7 +454,16 @@ async fn instance(app: &AppHandle, state: &QdrantState) -> Result<Qdrant, String
     Ok(inst.client.clone())
 }
 
-fn file_payload(source_id: &str, path: &str, content_hash: &str) -> Payload {
+fn file_payload(
+    source_id: &str,
+    path: &str,
+    content_hash: &str,
+    size_bytes: u64,
+    mtime_ms: i64,
+) -> Payload {
+    use qdrant_client::qdrant::value::Kind;
+    use qdrant_client::qdrant::Value;
+
     let file_name = std::path::Path::new(path)
         .file_name()
         .and_then(|s| s.to_str())
@@ -389,87 +481,171 @@ fn file_payload(source_id: &str, path: &str, content_hash: &str) -> Payload {
     payload.insert("contentHash", content_hash.to_string());
     payload.insert("fileName", file_name);
     payload.insert("extension", extension);
+    payload.insert(
+        "sizeBytes",
+        Value {
+            kind: Some(Kind::IntegerValue(size_bytes as i64)),
+        },
+    );
+    payload.insert(
+        "mtimeMs",
+        Value {
+            kind: Some(Kind::IntegerValue(mtime_ms)),
+        },
+    );
     payload
 }
 
-async fn find_content_vector_by_hash(
-    client: &Qdrant,
+/// Indexed state for one path from the content collection (scroll, no vectors).
+#[derive(Debug, Clone, Default)]
+pub struct ContentIndexEntry {
+    pub content_hash: Option<String>,
+    pub size_bytes: Option<u64>,
+    pub mtime_ms: Option<i64>,
+}
+
+/// Per-source index for embedding preflight (batched scrolls).
+#[derive(Debug, Clone, Default)]
+pub struct SourcePreflightIndex {
+    pub content_by_path: HashMap<String, ContentIndexEntry>,
+    pub metadata_paths: HashSet<String>,
+}
+
+fn payload_string_field(payload: &std::collections::HashMap<String, Value>, key: &str) -> Option<String> {
+    payload.get(key).and_then(|v| match &v.kind {
+        Some(qdrant_client::qdrant::value::Kind::StringValue(s)) => Some(s.clone()),
+        _ => None,
+    })
+}
+
+fn payload_u64_field(payload: &std::collections::HashMap<String, Value>, key: &str) -> Option<u64> {
+    payload.get(key).and_then(|v| match &v.kind {
+        Some(qdrant_client::qdrant::value::Kind::IntegerValue(i)) => Some(*i as u64),
+        Some(qdrant_client::qdrant::value::Kind::DoubleValue(d)) => Some(*d as u64),
+        _ => None,
+    })
+}
+
+fn payload_i64_field(payload: &std::collections::HashMap<String, Value>, key: &str) -> Option<i64> {
+    payload.get(key).and_then(|v| match &v.kind {
+        Some(qdrant_client::qdrant::value::Kind::IntegerValue(i)) => Some(*i),
+        Some(qdrant_client::qdrant::value::Kind::DoubleValue(d)) => Some(*d as i64),
+        _ => None,
+    })
+}
+
+/// Loads path → content payload fields and metadata path set in two scrolls (payload only, no vectors).
+pub async fn load_source_preflight_index(
+    app: &AppHandle,
+    state: &QdrantState,
     source_id: &str,
-    content_hash: &str,
-) -> Result<Option<Vec<f32>>, String> {
-    let filter = Filter::must([
-        Condition::matches("sourceId", source_id.to_string()),
-        Condition::matches("contentHash", content_hash.to_string()),
-    ]);
+) -> Result<SourcePreflightIndex, String> {
+    let client = instance(app, state).await?;
+    let filter = Filter::must([Condition::matches("sourceId", source_id.to_string())]);
 
-    let res = client
-        .scroll(
-            ScrollPointsBuilder::new(CONTENT_COLLECTION_NAME)
-                .limit(1)
-                .with_vectors(true)
-                .with_payload(false)
-                .filter(filter),
-        )
-        .await
-        .map_err(|e| format!("qdrant scroll request failed: {e}"))?;
+    let mut content_by_path: HashMap<String, ContentIndexEntry> = HashMap::new();
+    let mut offset: Option<PointId> = None;
+    loop {
+        let mut builder = ScrollPointsBuilder::new(CONTENT_COLLECTION_NAME)
+            .filter(filter.clone())
+            .limit(256)
+            .with_payload(true)
+            .with_vectors(false);
+        if let Some(ref o) = offset {
+            builder = builder.offset(o.clone());
+        }
+        let res = client
+            .scroll(builder)
+            .await
+            .map_err(|e| format!("qdrant scroll (preflight content) failed: {e}"))?;
 
-    let Some(point) = res.result.into_iter().next() else {
-        return Ok(None);
-    };
+        for p in res.result {
+            let path_str = payload_string_field(&p.payload, "path");
+            let Some(path_str) = path_str else {
+                continue;
+            };
+            content_by_path.insert(
+                path_str,
+                ContentIndexEntry {
+                    content_hash: payload_string_field(&p.payload, "contentHash"),
+                    size_bytes: payload_u64_field(&p.payload, "sizeBytes"),
+                    mtime_ms: payload_i64_field(&p.payload, "mtimeMs"),
+                },
+            );
+        }
+        offset = res.next_page_offset;
+        if offset.is_none() {
+            break;
+        }
+    }
 
-    let Some(vectors) = point.vectors else {
-        return Ok(None);
-    };
+    let mut metadata_paths: HashSet<String> = HashSet::new();
+    offset = None;
+    loop {
+        let mut builder = ScrollPointsBuilder::new(METADATA_COLLECTION_NAME)
+            .filter(filter.clone())
+            .limit(256)
+            .with_payload(true)
+            .with_vectors(false);
+        if let Some(ref o) = offset {
+            builder = builder.offset(o.clone());
+        }
+        let res = client
+            .scroll(builder)
+            .await
+            .map_err(|e| format!("qdrant scroll (preflight metadata) failed: {e}"))?;
 
-    use qdrant_client::qdrant::vectors_output::VectorsOptions;
-    let vector = match vectors.vectors_options {
-        Some(VectorsOptions::Vector(v)) => match v.vector {
-            Some(qdrant_client::qdrant::vector_output::Vector::Dense(d)) => d.data,
-            _ => return Ok(None),
-        },
-        Some(VectorsOptions::Vectors(v)) => {
-            if let Some(v) = v.vectors.values().next() {
-                match &v.vector {
-                    Some(qdrant_client::qdrant::vector_output::Vector::Dense(d)) => d.data.clone(),
-                    _ => return Ok(None),
-                }
-            } else {
-                return Ok(None);
+        for p in res.result {
+            if let Some(path_str) = payload_string_field(&p.payload, "path") {
+                metadata_paths.insert(path_str);
             }
         }
-        None => return Ok(None),
-    };
-
-    if vector.len() == VECTOR_DIM {
-        return Ok(Some(vector));
+        offset = res.next_page_offset;
+        if offset.is_none() {
+            break;
+        }
     }
-    
-    Ok(None)
+
+    Ok(SourcePreflightIndex {
+        content_by_path,
+        metadata_paths,
+    })
 }
 
-async fn upsert_content_vector_for_path(
-    client: &Qdrant,
-    source_id: &str,
+/// Path-local only: reuse vectors when this path's stored hash matches and points exist in Qdrant.
+pub fn decide_embedding_need_from_index(
     path: &str,
     content_hash: &str,
-    embedding: &[f32],
-) -> Result<(), String> {
-    let id = point_id(source_id, path);
-    let payload = file_payload(source_id, path, content_hash);
+    index: &SourcePreflightIndex,
+) -> UpsertMetadataResult {
+    let entry = index.content_by_path.get(path);
+    let stored_hash = entry.and_then(|e| e.content_hash.as_deref());
+    let hash_matches = stored_hash == Some(content_hash);
+    let content_indexed = entry.is_some();
+    let metadata_has_vector = index.metadata_paths.contains(path);
 
-    let point = PointStruct::new(id, embedding.to_vec(), payload);
-    
-    client
-        .upsert_points(UpsertPointsBuilder::new(CONTENT_COLLECTION_NAME, vec![point]).wait(true))
-        .await
-        .map_err(|e| format!("qdrant content copy upsert request failed: {e}"))?;
-        
-    Ok(())
+    let reusable_content_vector = content_indexed && hash_matches;
+    let should_embed_content = !reusable_content_vector;
+    let should_embed_metadata = !(hash_matches && metadata_has_vector);
+    UpsertMetadataResult {
+        should_embed_content,
+        should_embed_metadata,
+    }
 }
 
-fn hash_prefix(value: &str) -> &str {
-    let n = std::cmp::min(12, value.len());
-    &value[..n]
+/// If Qdrant has the same size+mtime fingerprint, return stored content hash (skip full-file read).
+pub fn reuse_hash_if_fingerprint_matches(
+    path: &str,
+    disk_size_bytes: u64,
+    disk_mtime_ms: i64,
+    index: &SourcePreflightIndex,
+) -> Option<String> {
+    let e = index.content_by_path.get(path)?;
+    if e.size_bytes == Some(disk_size_bytes) && e.mtime_ms == Some(disk_mtime_ms) {
+        e.content_hash.clone()
+    } else {
+        None
+    }
 }
 
 pub async fn upsert_metadata(app: &AppHandle, state: &QdrantState, args: UpsertMetadataArgs) -> Result<UpsertMetadataResult, String> {
@@ -500,7 +676,7 @@ pub async fn upsert_metadata(app: &AppHandle, state: &QdrantState, args: UpsertM
     let content_has_vector = content_point
         .as_ref()
         .and_then(|p| p.vectors.as_ref())
-        .is_some(); // We assume it's valid if it exists.
+        .is_some();
 
     let metadata_has_vector = metadata_point
         .as_ref()
@@ -508,38 +684,11 @@ pub async fn upsert_metadata(app: &AppHandle, state: &QdrantState, args: UpsertM
         .is_some();
 
     let hash_matches = existing_hash.as_deref() == Some(args.content_hash.as_str());
-    let mut reusable_content_vector = hash_matches && content_has_vector;
+    let reusable_content_vector = hash_matches && content_has_vector;
 
-    if !reusable_content_vector {
-        if let Some(existing_vector) = find_content_vector_by_hash(&client, &args.source_id, &args.content_hash).await? {
-            upsert_content_vector_for_path(
-                &client,
-                &args.source_id,
-                &args.path,
-                &args.content_hash,
-                &existing_vector,
-            )
-            .await?;
-            tracing::info!(
-                source_id = %args.source_id,
-                path = %args.path,
-                content_hash_prefix = %hash_prefix(&args.content_hash),
-                "embedding dedupe hit: reused existing content vector"
-            );
-            reusable_content_vector = true;
-        } else {
-            tracing::debug!(
-                source_id = %args.source_id,
-                path = %args.path,
-                content_hash_prefix = %hash_prefix(&args.content_hash),
-                "embedding dedupe miss: no reusable content vector found"
-            );
-        }
-    }
-    
     let should_embed_content = !reusable_content_vector;
     let should_embed_metadata = !(hash_matches && metadata_has_vector);
-    
+
     Ok(UpsertMetadataResult {
         should_embed_content,
         should_embed_metadata,
@@ -557,8 +706,14 @@ pub async fn upsert_embedding(app: &AppHandle, state: &QdrantState, args: Upsert
 
     let client = instance(app, state).await?;
     let id = point_id(&args.source_id, &args.path);
-    let payload = file_payload(&args.source_id, &args.path, &args.content_hash);
-    
+    let payload = file_payload(
+        &args.source_id,
+        &args.path,
+        &args.content_hash,
+        args.size_bytes,
+        args.mtime_ms,
+    );
+
     let point = PointStruct::new(id, args.embedding, payload);
 
     client
@@ -584,7 +739,13 @@ pub async fn upsert_metadata_embedding(
     
     let client = instance(app, state).await?;
     let id = point_id(&args.source_id, &args.path);
-    let payload = file_payload(&args.source_id, &args.path, &args.content_hash);
+    let payload = file_payload(
+        &args.source_id,
+        &args.path,
+        &args.content_hash,
+        args.size_bytes,
+        args.mtime_ms,
+    );
 
     let point = PointStruct::new(id, args.metadata_embedding, payload);
 
@@ -717,6 +878,7 @@ pub async fn shutdown(state: &QdrantState) {
     }
     let mut runtime = state.runtime.lock().await;
     runtime.base_url = None;
+    runtime.http_dashboard_port = None;
     if let Some(mut child) = runtime.child.take() {
         let _ = child.kill();
         let _ = child.wait();

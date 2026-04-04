@@ -1,5 +1,9 @@
 # Manifold
 
+<p align="center">
+  <img src="src/assets/manifold-icon.jpg" alt="Manifold logo" width="96" height="96" />
+</p>
+
 Native desktop app for local file indexing and search using Tauri + React, Gemini embeddings, and local Qdrant.
 
 ## What it does
@@ -11,6 +15,18 @@ Native desktop app for local file indexing and search using Tauri + React, Gemin
   - direct text matches (local text index)
   - semantic vector matches (Qdrant)
 - Shows image thumbnails in results when available.
+
+## Architecture (overview)
+
+At a simple level, the pieces work like this:
+
+1. **React UI** — You choose folders, extensions, and run search; it talks to the backend through Tauri commands.
+2. **Rust backend** — Scans files on disk, fingerprints them with hashes, and drives the indexing job (what to embed, what changed).
+3. **Gemini (cloud)** — Produces embeddings and optional extracted text/OCR from supported file types. The app does not run local ML models for that step.
+4. **Qdrant (local)** — Stores vectors in **two collections**: one for **file content** semantics and one for **metadata** (paths/names-style signals). Search blends these with the text index below.
+5. **Local text index** — Keeps normalized text for **keyword / substring-style** matches so results can mix “exact text hit” with “semantically similar.”
+
+**Where Qdrant runs:** In **development**, you typically use **Docker** (`pnpm qdrant:up`) so the DB is easy to reset and inspect. In **production / packaged installs**, the app can **start a bundled Qdrant binary** when `MANIFOLD_QDRANT_URL` is unset, or you can still point at any external Qdrant with that env var.
 
 ## Stack
 
@@ -48,7 +64,12 @@ The default `.env.example` points `MANIFOLD_QDRANT_URL` at `http://127.0.0.1:633
 pnpm qdrant:up
 ```
 
-Dashboard: [http://localhost:6333/dashboard](http://localhost:6333/dashboard)
+**Qdrant Web UI (dev):** Qdrant includes a browser **dashboard** (collections, console, tutorials) on the same HTTP port as the REST API. For local Docker dev, open:
+
+- **[http://127.0.0.1:6333/dashboard](http://127.0.0.1:6333/dashboard)** — recommended baseline URL.
+- On **macOS**, prefer **`127.0.0.1`** over **`localhost`** if the UI and `curl` ever disagree: two different processes can bind **IPv4** vs **IPv6** loopback on the same port, which looks like “empty collections in the UI” while `GET /collections` on the other address still works.
+
+Manifold creates collections named `manifold_files_content_v2` and `manifold_files_metadata_v2` (see `src-tauri/src/qdrant.rs`).
 
 ### 4) Configure Gemini in `.env.local`
 

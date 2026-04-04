@@ -12,7 +12,7 @@ dist
 dist-ssr
 *.local
 
-# Rust / Cargo (any crate in the repo, e.g. src-tauri/, qdrant_test/)
+# Rust / Cargo (any crate in the repo, e.g. src-tauri/)
 target/
 
 # Editor directories and files
