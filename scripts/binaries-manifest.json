@@ -1,6 +1,6 @@
 {
   "qdrantVersion": "v1.17.1",
-  "pdfiumVersion": "chromium%2F7350",
+  "pdfiumVersion": "chromium%2F7543",
   "targets": {
     "darwin-arm64": {
       "qdrant": {
@@ -11,8 +11,8 @@
         "outputBinaryName": "qdrant"
       },
       "pdfium": {
-        "archiveUrl": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7350/pdfium-mac-arm64.tgz",
-        "archiveSha256": "279d69972954968a61ffab26ac60dc1b80066133e8f5e82cb3ee47d1df5cd28e",
+        "archiveUrl": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7543/pdfium-mac-arm64.tgz",
+        "archiveSha256": "41c269723b4711793de70ff34e65c00fa79907d6c023741837579e906b846faa",
         "archiveType": "tar.gz",
         "binaryPathInArchive": "lib/libpdfium.dylib",
         "outputBinaryName": "libpdfium.dylib"
@@ -27,8 +27,8 @@
         "outputBinaryName": "qdrant"
       },
       "pdfium": {
-        "archiveUrl": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7350/pdfium-mac-x64.tgz",
-        "archiveSha256": "bb438ecbf93b4a906b412f19a53ece371c03eb020e0a89a2686142a4c382349b",
+        "archiveUrl": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7543/pdfium-mac-x64.tgz",
+        "archiveSha256": "2510460ac106f14b884598a0da3f53a99e23d79512acf027c5e101c2bb2f26cb",
         "archiveType": "tar.gz",
         "binaryPathInArchive": "lib/libpdfium.dylib",
         "outputBinaryName": "libpdfium.dylib"
@@ -43,8 +43,8 @@
         "outputBinaryName": "qdrant"
       },
       "pdfium": {
-        "archiveUrl": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7350/pdfium-linux-x64.tgz",
-        "archiveSha256": "5a53c802a970d7d1414c0d2fdd8a0900e239b3e7e4eff7a5ddcbd433322606f2",
+        "archiveUrl": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7543/pdfium-linux-x64.tgz",
+        "archiveSha256": "9329a3c4b19b3c8d0a93af5440f44be84e4bd879a204e47b1a7a160e96809da4",
         "archiveType": "tar.gz",
         "binaryPathInArchive": "lib/libpdfium.so",
         "outputBinaryName": "libpdfium.so"
@@ -59,8 +59,8 @@
         "outputBinaryName": "qdrant.exe"
       },
       "pdfium": {
-        "archiveUrl": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7350/pdfium-win-x64.tgz",
-        "archiveSha256": "0289ee5f6beaa001c1fa0fc96dfdbc2f0238cd4b1cfc72a75ac473fa191dfbe6",
+        "archiveUrl": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7543/pdfium-win-x64.tgz",
+        "archiveSha256": "0b08b606792a6cc593426efdefc6622611bce446d9e0270743846956ea1554ca",
         "archiveType": "tar.gz",
         "binaryPathInArchive": "bin/pdfium.dll",
         "outputBinaryName": "pdfium.dll"
