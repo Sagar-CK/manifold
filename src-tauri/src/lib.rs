@@ -282,6 +282,7 @@ pub fn run() {
             qdrant_similar_by_path,
             hybrid_search,
             qdrant_count_points,
+            qdrant_scroll_content_vectors,
             qdrant_delete_all_points,
             qdrant_delete_points_for_paths,
             qdrant_delete_points_for_include_path,
@@ -1082,6 +1083,15 @@ async fn qdrant_count_points(
     args: qdrant::CountPointsArgs,
 ) -> Result<qdrant::CountPointsResult, String> {
     qdrant::count_points(&app, &state, args).await
+}
+
+#[tauri::command]
+async fn qdrant_scroll_content_vectors(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, qdrant::QdrantState>,
+    args: qdrant::ScrollContentVectorsArgs,
+) -> Result<qdrant::ScrollContentVectorsResult, String> {
+    qdrant::scroll_content_vectors(&app, &state, args).await
 }
 
 #[tauri::command]

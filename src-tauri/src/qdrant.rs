@@ -928,6 +928,113 @@ pub async fn count_points(app: &AppHandle, state: &QdrantState, args: CountPoint
     Ok(CountPointsResult { count: res.result.unwrap_or_default().count })
 }
 
+/// Max points returned for graph visualization (protects memory / IPC).
+const SCROLL_CONTENT_VECTORS_HARD_MAX: u32 = 5000;
+const SCROLL_CONTENT_VECTORS_BATCH: u32 = 256;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScrollContentVectorsArgs {
+    pub source_id: String,
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentEmbeddingPoint {
+    pub path: String,
+    pub content_hash: String,
+    pub embedding: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScrollContentVectorsResult {
+    pub points: Vec<ContentEmbeddingPoint>,
+}
+
+/// Scroll content-collection points with dense vectors for 2D embedding visualization.
+/// Uses reservoir sampling so the result approximates a uniform random subset when the index exceeds `limit`.
+pub async fn scroll_content_vectors(
+    app: &AppHandle,
+    state: &QdrantState,
+    args: ScrollContentVectorsArgs,
+) -> Result<ScrollContentVectorsResult, String> {
+    use qdrant_client::qdrant::vector_output::Vector;
+    use rand::rngs::StdRng;
+    use rand::Rng;
+    use rand::SeedableRng;
+
+    let requested = args.limit.unwrap_or(500).max(1);
+    let limit = (requested.min(SCROLL_CONTENT_VECTORS_HARD_MAX)) as usize;
+
+    let client = instance(app, state).await?;
+    let filter = Filter::must([Condition::matches(
+        "sourceId",
+        args.source_id.clone(),
+    )]);
+
+    let mut reservoir: Vec<ContentEmbeddingPoint> = Vec::with_capacity(limit.min(256));
+    let mut rng = StdRng::from_entropy();
+    let mut offset: Option<PointId> = None;
+    let mut i: usize = 0;
+
+    loop {
+        let mut builder = ScrollPointsBuilder::new(CONTENT_COLLECTION_NAME)
+            .filter(filter.clone())
+            .limit(SCROLL_CONTENT_VECTORS_BATCH)
+            .with_payload(true)
+            .with_vectors(true);
+        if let Some(ref o) = offset {
+            builder = builder.offset(o.clone());
+        }
+
+        let res = client
+            .scroll(builder)
+            .await
+            .map_err(|e| format!("qdrant scroll (content vectors) failed: {e}"))?;
+
+        for p in res.result {
+            let path = payload_string_field(&p.payload, "path");
+            let content_hash = payload_string_field(&p.payload, "contentHash");
+            let (Some(path), Some(content_hash)) = (path, content_hash) else {
+                continue;
+            };
+
+            let embedding: Vec<f32> = match p.vectors.as_ref().and_then(|vo| vo.get_vector()) {
+                Some(Vector::Dense(d)) => d.data.clone(),
+                _ => continue,
+            };
+            if embedding.len() != VECTOR_DIM {
+                continue;
+            }
+
+            let point = ContentEmbeddingPoint {
+                path,
+                content_hash,
+                embedding,
+            };
+
+            if i < limit {
+                reservoir.push(point);
+            } else {
+                let j = rng.gen_range(0..=i);
+                if j < limit {
+                    reservoir[j] = point;
+                }
+            }
+            i += 1;
+        }
+
+        offset = res.next_page_offset;
+        if offset.is_none() {
+            break;
+        }
+    }
+
+    Ok(ScrollContentVectorsResult { points: reservoir })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QdrantStatus {
