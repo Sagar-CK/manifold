@@ -6,6 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 
 import { loadConfig, type LocalConfig, type SupportedExt } from "./lib/localConfig";
 import { EnvIssuesBanner } from "./components/EnvIssuesBanner";
+import { FileResultPage } from "./pages/FileResultPage";
 import { SearchPage } from "./pages/SearchPage";
 import { SettingsPage } from "./pages/SettingsPage";
 
@@ -199,6 +200,7 @@ export default function RouterApp() {
               />
             }
           />
+          <Route path="/file" element={<FileResultPage cfg={cfg} />} />
           <Route
             path="/settings"
             element={

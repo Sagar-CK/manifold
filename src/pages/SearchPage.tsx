@@ -1,11 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
-import { openPath } from "@tauri-apps/plugin-opener";
 import { ListFilter, Settings } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { Spinner } from "../components/ui/spinner";
-import { Skeleton } from "../components/ui/skeleton";
 import { ScrollArea } from "../components/ui/scroll-area";
 import {
   InputGroup,
@@ -30,39 +28,10 @@ import {
   AlertDialogTitle,
 } from "../components/ui/alert-dialog";
 import type { LocalConfig } from "../lib/localConfig";
-import { pathHasDefaultExcludedSegment } from "../lib/defaultFolderExcludes";
+import { isPathSelected } from "../lib/pathSelection";
 import { EmbeddingStatusPanel } from "../components/EmbeddingStatusPanel";
 import { PageHeader } from "../components/PageHeader";
-
-function fileTypeLabel(ext: string, mimeType: string) {
-  const cleanExt = ext.replace(/^\./, "").trim().toUpperCase();
-  if (cleanExt) return cleanExt;
-  if (mimeType.includes("pdf")) return "PDF";
-  if (mimeType.includes("image/")) return "IMG";
-  if (mimeType.includes("text/")) return "TXT";
-  return "FILE";
-}
-
-function normalizePathForMatch(p: string) {
-  // Best-effort cross-platform normalization for prefix checks.
-  return p.replace(/\\/g, "/").replace(/\/+$/, "");
-}
-
-function isPathSelected(path: string, cfg: LocalConfig) {
-  const p = normalizePathForMatch(path);
-  const include = cfg.include.map(normalizePathForMatch).filter(Boolean);
-  const exclude = cfg.exclude.map(normalizePathForMatch).filter(Boolean);
-  const ext = (p.split(".").pop() ?? "").trim().toLowerCase();
-
-  const inInclude =
-    include.length === 0 ? true : include.some((root) => p === root || p.startsWith(`${root}/`));
-  const inUserExclude = exclude.some((root) => p === root || p.startsWith(`${root}/`));
-  const inDefaultFolderExclude =
-    cfg.useDefaultFolderExcludes && pathHasDefaultExcludedSegment(p);
-  const extSelected = cfg.extensions.length === 0 || cfg.extensions.includes(ext);
-
-  return inInclude && !inUserExclude && !inDefaultFolderExclude && extSelected;
-}
+import { FileSearchResultCard } from "../components/FileSearchResultCard";
 
 function formatSimilarityScore(score: number) {
   if (score >= 0 && score <= 1) return `${(score * 100).toFixed(1)}%`;
@@ -143,12 +112,12 @@ export function SearchPage({
   const [hasSearched, setHasSearched] = useState(false);
   const [embeddedCount, setEmbeddedCount] = useState<number | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
-  const [openError, setOpenError] = useState<string | null>(null);
   const [results, setResults] = useState<SearchResult[]>([]);
   const [selectedGroupForOpen, setSelectedGroupForOpen] = useState<SearchResultGroup | null>(null);
   const [pathChooserOpen, setPathChooserOpen] = useState(false);
   const [thumbByPath, setThumbByPath] = useState<Record<string, string>>({});
   const [thumbFailedByPath, setThumbFailedByPath] = useState<Record<string, true>>({});
+  const navigate = useNavigate();
   const searchRunSeqRef = useRef(0);
   const latestRunRef = useRef(0);
   const runStartMsRef = useRef(0);
@@ -241,7 +210,6 @@ export function SearchPage({
 
     setIsSearching(true);
     setSearchError(null);
-    setOpenError(null);
 
     const searchLimit = cfg.searchMode === "topK" ? cfg.topK : 256;
     let res: SearchResult[];
@@ -509,9 +477,6 @@ export function SearchPage({
       </div>
 
       <div className="mt-5 min-h-0 flex-1">
-        {openError ? (
-          <div className="mb-3 text-center text-sm font-medium text-rose-700">Open error: {openError}</div>
-        ) : null}
         <ScrollArea className="h-full pr-3">
           {groupedResults.length === 0 ? (
             !hasSearched ? (
@@ -536,100 +501,67 @@ export function SearchPage({
             )
           ) : (
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
-              {groupedResults.map((group) => (
-                (() => {
-                  const r = group.primaryResult;
-                  const ext = r.file.path.split(".").pop()?.toLowerCase() ?? "";
-                  const isPreviewImage = ext === "png" || ext === "jpg" || ext === "jpeg";
-                  const isPreviewFile = isPreviewImage || ext === "pdf";
-                  const isStacked = group.variants.length > 1;
-                  return (
-                <button
-                  key={group.key}
-                  type="button"
-                  onMouseEnter={() => {
-                    if (r.matchType !== "textMatch") return;
-                    const cached = fullTextCacheRef.current[r.file.path];
-                    if (cached) {
-                      console.log("[search][text-match:hover:full-text]", {
-                        path: r.file.path,
-                        fullText: cached,
-                      });
-                      return;
-                    }
-                    void (async () => {
-                      try {
-                        const fullText = (await invoke("text_index_full_text_for_path", {
-                          args: { sourceId: cfg.sourceId, path: r.file.path },
-                        })) as string | null;
-                        if (!fullText) return;
-                        fullTextCacheRef.current[r.file.path] = fullText;
+              {groupedResults.map((group) => {
+                const r = group.primaryResult;
+                const ext = r.file.path.split(".").pop()?.toLowerCase() ?? "";
+                const isPreviewImage = ext === "png" || ext === "jpg" || ext === "jpeg";
+                const isPreviewFile = isPreviewImage || ext === "pdf";
+                const isStacked = group.variants.length > 1;
+                return (
+                  <FileSearchResultCard
+                    key={group.key}
+                    path={r.file.path}
+                    onMouseEnter={() => {
+                      if (r.matchType !== "textMatch") return;
+                      const cached = fullTextCacheRef.current[r.file.path];
+                      if (cached) {
                         console.log("[search][text-match:hover:full-text]", {
                           path: r.file.path,
-                          fullText,
+                          fullText: cached,
                         });
-                      } catch (e) {
-                        console.warn("[search][text-match:hover:full-text] failed", {
-                          path: r.file.path,
-                          error: String(e),
-                        });
+                        return;
                       }
-                    })();
-                  }}
-                  onClick={async () => {
-                    if (isStacked) {
-                      setSelectedGroupForOpen(group);
-                      setPathChooserOpen(true);
-                      return;
+                      void (async () => {
+                        try {
+                          const fullText = (await invoke("text_index_full_text_for_path", {
+                            args: { sourceId: cfg.sourceId, path: r.file.path },
+                          })) as string | null;
+                          if (!fullText) return;
+                          fullTextCacheRef.current[r.file.path] = fullText;
+                          console.log("[search][text-match:hover:full-text]", {
+                            path: r.file.path,
+                            fullText,
+                          });
+                        } catch (e) {
+                          console.warn("[search][text-match:hover:full-text] failed", {
+                            path: r.file.path,
+                            error: String(e),
+                          });
+                        }
+                      })();
+                    }}
+                    onClick={() => {
+                      if (isStacked) {
+                        setSelectedGroupForOpen(group);
+                        setPathChooserOpen(true);
+                        return;
+                      }
+                      navigate(`/file?path=${encodeURIComponent(r.file.path)}`);
+                    }}
+                    thumbUrl={thumbByPath[r.file.path] ?? null}
+                    thumbFailed={!!thumbFailedByPath[r.file.path]}
+                    thumbExpectLoading={isPreviewFile && !thumbFailedByPath[r.file.path]}
+                    hoverChip={
+                      cfg.showSimilarityOnHover
+                        ? r.matchType === "textMatch"
+                          ? "Text match"
+                          : `Similarity ${formatSimilarityScore(r.score)}`
+                        : null
                     }
-                    try {
-                      setOpenError(null);
-                      await openPath(r.file.path);
-                    } catch (e) {
-                      setOpenError(String(e));
-                    }
-                  }}
-                  className="group relative flex min-w-0 flex-col items-center gap-2 rounded-lg p-1 transition-opacity hover:opacity-90"
-                  title={r.file.path}
-                >
-                  {cfg.showSimilarityOnHover ? (
-                    <div className="pointer-events-none absolute left-1/2 top-2 w-max -translate-x-1/2 rounded bg-black/75 px-2 py-1 text-[10px] font-medium leading-none tracking-wide text-white opacity-0 transition-opacity group-hover:opacity-100">
-                      {r.matchType === "textMatch"
-                        ? "Text match"
-                        : `Similarity ${formatSimilarityScore(r.score)}`}
-                    </div>
-                  ) : null}
-                  <div className="w-full px-1">
-                    {thumbByPath[r.file.path] ? (
-                      <div className="mx-auto flex h-16 w-28 items-center justify-center">
-                        <img
-                          src={thumbByPath[r.file.path]}
-                          className="block max-h-full max-w-full rounded-lg object-contain"
-                        />
-                      </div>
-                    ) : (
-                      <div className="mx-auto flex h-16 w-28 items-center justify-center">
-                        {isPreviewFile && !thumbFailedByPath[r.file.path] ? (
-                          <Skeleton className="h-16 w-28 rounded-md" />
-                        ) : (
-                          <div className="flex h-11 w-11 items-center justify-center rounded-md border border-black/10 bg-black/4">
-                            <span className="text-[10px] leading-none font-semibold text-black/60 uppercase tracking-wide">
-                              {fileTypeLabel(ext, "")}
-                            </span>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                  <div className="w-full min-w-0">
-                    <div className="truncate text-center text-xs font-normal leading-tight text-black/80">
-                      {r.file.path.split("/").pop() ?? r.file.path}
-                    </div>
-                  </div>
-                </button>
-                  );
-                })()
-              ))}
+                    title={r.file.path}
+                  />
+                );
+              })}
             </div>
           )}
         </ScrollArea>
@@ -644,9 +576,9 @@ export function SearchPage({
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Choose file to open</AlertDialogTitle>
+            <AlertDialogTitle>Choose file</AlertDialogTitle>
             <AlertDialogDescription>
-              These files have identical content. Select the path you want to view.
+              These files have identical content. Select the path to open its detail view.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <div className="max-h-64 space-y-2 overflow-y-auto">
@@ -656,15 +588,10 @@ export function SearchPage({
                 type="button"
                 variant="outline"
                 className="w-full justify-start truncate"
-                onClick={async () => {
-                  try {
-                    setOpenError(null);
-                    await openPath(variant.file.path);
-                    setPathChooserOpen(false);
-                    setSelectedGroupForOpen(null);
-                  } catch (e) {
-                    setOpenError(String(e));
-                  }
+                onClick={() => {
+                  navigate(`/file?path=${encodeURIComponent(variant.file.path)}`);
+                  setPathChooserOpen(false);
+                  setSelectedGroupForOpen(null);
                 }}
                 title={variant.file.path}
               >
