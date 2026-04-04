@@ -4,6 +4,8 @@ use crate::{
 use crate::qdrant;
 use crate::text_index;
 use base64::Engine;
+use image::codecs::jpeg::JpegEncoder;
+use image::ImageEncoder;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{
@@ -12,7 +14,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{watch, Mutex, Semaphore};
 use lru::LruCache;
 use std::num::NonZeroUsize;
 
@@ -20,8 +22,13 @@ const OUTPUT_DIM: usize = 3072;
 const GEMINI_MODEL: &str = "models/gemini-embedding-2-preview";
 const GEMINI_OCR_MODEL: &str = "models/gemini-3-flash-preview";
 const GEMINI_EMBED_TIMEOUT_SECS: u64 = 120;
-const GEMINI_OCR_TIMEOUT_SECS: u64 = 120;
-const GEMINI_OCR_MAX_ATTEMPTS: u32 = 3;
+/// Shorter than before: raster inputs are downscaled before OCR.
+const GEMINI_OCR_TIMEOUT_SECS: u64 = 90;
+const GEMINI_OCR_HTTP_MAX_ATTEMPTS: u32 = 5;
+const EMBED_VISION_MAX_EDGE: u32 = 1536;
+const EMBED_VISION_JPEG_QUALITY: u8 = 85;
+const PDF_LOCAL_TEXT_MIN_NONSPACE: usize = 48;
+const VISION_GEMINI_MAX_IN_FLIGHT: usize = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -325,6 +332,23 @@ fn format_error_chain(err: &(dyn std::error::Error + 'static)) -> String {
     parts.join(": ")
 }
 
+/// Downscale and JPEG-encode raster images to reduce upload size and OCR latency.
+fn prepare_raster_image_for_gemini(bytes: &[u8]) -> Result<(Vec<u8>, &'static str), String> {
+    let img = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
+    let thumb = img.thumbnail(EMBED_VISION_MAX_EDGE, EMBED_VISION_MAX_EDGE);
+    let rgb = thumb.to_rgb8();
+    let mut buf = Vec::new();
+    let enc = JpegEncoder::new_with_quality(&mut buf, EMBED_VISION_JPEG_QUALITY);
+    enc.write_image(
+        rgb.as_raw(),
+        rgb.width(),
+        rgb.height(),
+        image::ExtendedColorType::Rgb8,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok((buf, "image/jpeg"))
+}
+
 fn truncate_for_log(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         return s.to_string();
@@ -464,6 +488,29 @@ async fn embed_with_gemini(
     gemini_embed_post(client, body).await
 }
 
+fn parse_generate_content_plain_text(response_body: &str) -> Result<String, String> {
+    let v: serde_json::Value = serde_json::from_str(response_body).map_err(|e| e.to_string())?;
+    let parts = v
+        .get("candidates")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|c| c.get("content"))
+        .and_then(|c| c.get("parts"))
+        .and_then(|p| p.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut out = String::new();
+    for p in parts {
+        if let Some(t) = p.get("text").and_then(|x| x.as_str()) {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(t);
+        }
+    }
+    Ok(out)
+}
+
 async fn extract_text_with_gemini(
     client: &GeminiClient,
     file_path: &str,
@@ -475,7 +522,7 @@ async fn extract_text_with_gemini(
     }
 
     let input_size_bytes = bytes.len();
-    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     let body = serde_json::json!({
         "contents": [{
             "parts": [
@@ -497,10 +544,10 @@ async fn extract_text_with_gemini(
 
     let mut attempt = 0u32;
     let mut backoff_ms: u64 = 800;
-    let res = loop {
+    loop {
         attempt += 1;
         let attempt_started = Instant::now();
-        match client
+        let res = match client
             .http
             .post(&url)
             .header("Content-Type", "application/json")
@@ -510,11 +557,11 @@ async fn extract_text_with_gemini(
             .send()
             .await
         {
-            Ok(res) => break res,
+            Ok(res) => res,
             Err(e) => {
                 let attempt_elapsed_ms = attempt_started.elapsed().as_millis();
                 let chain = format_error_chain(&e);
-                let should_retry = attempt < GEMINI_OCR_MAX_ATTEMPTS;
+                let should_retry = attempt < GEMINI_OCR_HTTP_MAX_ATTEMPTS;
                 tracing::error!(
                     file_path = %file_path,
                     mime_type = %mime_type,
@@ -538,12 +585,24 @@ async fn extract_text_with_gemini(
                     file_path, mime_type, chain
                 ));
             }
+        };
+
+        let status = res.status();
+        let headers = format!("{:?}", res.headers());
+        let text = res.text().await.unwrap_or_default();
+        let elapsed_ms = attempt_started.elapsed().as_millis() as u64;
+
+        if status.is_success() {
+            tracing::debug!(
+                file_path = %file_path,
+                input_size_bytes,
+                attempt,
+                elapsed_ms,
+                "gemini text extraction succeeded"
+            );
+            return parse_generate_content_plain_text(&text);
         }
-    };
-    let status = res.status();
-    let headers = format!("{:?}", res.headers());
-    let text = res.text().await.unwrap_or_default();
-    if !status.is_success() {
+
         let api_message = serde_json::from_str::<serde_json::Value>(&text)
             .ok()
             .and_then(|v| {
@@ -552,6 +611,26 @@ async fn extract_text_with_gemini(
                     .and_then(|m| m.as_str())
                     .map(|s| s.to_string())
             });
+        let retryable = matches!(status.as_u16(), 429 | 500 | 503);
+        if retryable && attempt < GEMINI_OCR_HTTP_MAX_ATTEMPTS {
+            tracing::error!(
+                file_path = %file_path,
+                mime_type = %mime_type,
+                model = GEMINI_OCR_MODEL,
+                url = %url,
+                status = status.as_u16(),
+                headers = %headers,
+                api_message = ?api_message,
+                body = %truncate_for_log(&text, 4000),
+                attempt,
+                elapsed_ms,
+                "gemini text extraction retryable HTTP failure"
+            );
+            sleep_ms(backoff_ms).await;
+            backoff_ms = std::cmp::min(6000, ((backoff_ms as f64) * 1.8).round() as u64);
+            continue;
+        }
+
         tracing::error!(
             file_path = %file_path,
             mime_type = %mime_type,
@@ -571,26 +650,6 @@ async fn extract_text_with_gemini(
             details
         ));
     }
-    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    let parts = v
-        .get("candidates")
-        .and_then(|c| c.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|c| c.get("content"))
-        .and_then(|c| c.get("parts"))
-        .and_then(|p| p.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let mut out = String::new();
-    for p in parts {
-        if let Some(t) = p.get("text").and_then(|x| x.as_str()) {
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(t);
-        }
-    }
-    Ok(out)
 }
 
 /// Embed a search query using the same API key env as file embedding (Rust-side).
@@ -777,8 +836,11 @@ pub async fn start(
         tracing::info!(
             source_id = %source_id,
             max_parallelism,
+            vision_gemini_max_in_flight = VISION_GEMINI_MAX_IN_FLIGHT,
             "embedding parallel workers configured"
         );
+        let pdfium_candidates = Arc::new(crate::pdfium_library_candidates(&app2));
+        let vision_sem = Arc::new(Semaphore::new(VISION_GEMINI_MAX_IN_FLIGHT));
         let mut join_set = tokio::task::JoinSet::new();
         for pending in pending_files {
             if cancel_flag.load(Ordering::Relaxed) {
@@ -820,6 +882,8 @@ pub async fn start(
             let app_for_file = app2.clone();
             let source_id_for_file = source_id.clone();
             let gemini_for_file = gemini.clone();
+            let pdfium_for_job = pdfium_candidates.clone();
+            let vision_sem_for_job = vision_sem.clone();
             join_set.spawn(async move {
                 let path = pending.path.as_path();
                 let ext = pending.ext.clone();
@@ -840,19 +904,44 @@ pub async fn start(
                 } else {
                     None
                 };
+                let file_read_bytes = bytes.as_ref().map(|b| b.len()).unwrap_or(0);
+                let (gemini_vision_bytes, gemini_vision_mime): (Option<Vec<u8>>, Option<String>) =
+                    match (&bytes, ext.as_str()) {
+                        (Some(raw), "png" | "jpg" | "jpeg") => {
+                            match prepare_raster_image_for_gemini(raw) {
+                                Ok((b, m)) => (Some(b), Some(m.to_string())),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        path = %file_path,
+                                        error = %e,
+                                        "gemini vision image preprocess failed; sending original bytes"
+                                    );
+                                    (Some(raw.clone()), mime.map(|m| m.to_string()))
+                                }
+                            }
+                        }
+                        (Some(raw), _) => (Some(raw.clone()), mime.map(|m| m.to_string())),
+                        _ => (None, None),
+                    };
+                let gemini_vision_payload_bytes =
+                    gemini_vision_bytes.as_ref().map(|v| v.len()).unwrap_or(0);
                 let content_embed_elapsed_ms: u128;
                 let metadata_embed_elapsed_ms: u128;
                 let text_extract_elapsed_ms: u128;
-                let mime_owned = mime.map(|m| m.to_string());
                 let metadata_text = metadata_text_for_path(path);
                 let metadata_text_for_embedding = metadata_text.clone();
                 let content_handle = {
                     let gemini = gemini_for_file.clone();
-                    let mime = mime_owned.clone();
-                    let bytes = bytes.clone();
+                    let mime = gemini_vision_mime.clone();
+                    let raw = gemini_vision_bytes.clone();
+                    let vision_sem = vision_sem_for_job.clone();
                     tokio::spawn(async move {
                         if pending.should_embed_content {
-                            if let (Some(mime), Some(raw)) = (mime, bytes) {
+                            if let (Some(mime), Some(raw)) = (mime, raw) {
+                                let _permit = vision_sem
+                                    .acquire()
+                                    .await
+                                    .map_err(|e| e.to_string())?;
                                 let started = Instant::now();
                                 let embedding = embed_with_gemini(&gemini, &mime, raw).await?;
                                 Ok::<(Option<Vec<f32>>, u128), String>((
@@ -886,29 +975,75 @@ pub async fn start(
                 };
                 let text_handle = {
                     let gemini = gemini_for_file.clone();
-                    let mime = mime_owned;
+                    let mime = gemini_vision_mime.clone();
+                    let raw = gemini_vision_bytes.clone();
                     let file_path_for_text = file_path.clone();
+                    let ext_for_text = ext.clone();
+                    let path_for_pdf = pending.path.clone();
+                    let pdfium_c = pdfium_for_job.clone();
+                    let vision_sem = vision_sem_for_job.clone();
                     tokio::spawn(async move {
-                        if pending.should_embed_content && supports_text_extraction(&ext) {
-                            if let (Some(mime), Some(raw)) = (mime, bytes) {
-                                let started = Instant::now();
-                                let extracted = extract_text_with_gemini(
-                                    &gemini,
-                                    &file_path_for_text,
-                                    &mime,
-                                    raw,
-                                )
-                                .await
-                                .ok();
-                                Ok::<(Option<String>, u128), String>((
-                                    extracted,
-                                    started.elapsed().as_millis(),
-                                ))
-                            } else {
-                                Ok::<(Option<String>, u128), String>((None, 0))
+                        if !(pending.should_embed_content && supports_text_extraction(&ext_for_text))
+                        {
+                            return Ok::<(Option<String>, u128, bool), String>((None, 0, false));
+                        }
+                        let started = Instant::now();
+                        if ext_for_text == "pdf" {
+                            let path = path_for_pdf.clone();
+                            let cands = pdfium_c.as_ref().clone();
+                            let local_res = tokio::task::spawn_blocking(move || {
+                                crate::extract_pdf_text_pdfium(&path, &cands)
+                            })
+                            .await;
+                            match local_res {
+                                Ok(Ok(local)) => {
+                                    let nonspace =
+                                        local.chars().filter(|c| !c.is_whitespace()).count();
+                                    if nonspace >= PDF_LOCAL_TEXT_MIN_NONSPACE {
+                                        tracing::debug!(
+                                            path = %file_path_for_text,
+                                            nonspace,
+                                            "pdf text extraction used local PDFium text"
+                                        );
+                                        return Ok((
+                                            Some(local),
+                                            started.elapsed().as_millis(),
+                                            true,
+                                        ));
+                                    }
+                                }
+                                Ok(Err(e)) => {
+                                    tracing::debug!(
+                                        path = %file_path_for_text,
+                                        error = %e,
+                                        "pdf local text extraction failed; falling back to Gemini OCR"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::debug!(
+                                        path = %file_path_for_text,
+                                        error = %e,
+                                        "pdf local text extraction task failed; falling back to Gemini OCR"
+                                    );
+                                }
                             }
+                        }
+                        if let (Some(mime), Some(raw)) = (mime, raw) {
+                            let _permit = vision_sem
+                                .acquire()
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            let extracted = extract_text_with_gemini(
+                                &gemini,
+                                &file_path_for_text,
+                                &mime,
+                                raw,
+                            )
+                            .await
+                            .ok();
+                            Ok((extracted, started.elapsed().as_millis(), false))
                         } else {
-                            Ok::<(Option<String>, u128), String>((None, 0))
+                            Ok((None, started.elapsed().as_millis(), false))
                         }
                     })
                 };
@@ -944,9 +1079,9 @@ pub async fn start(
                 };
                 metadata_embed_elapsed_ms = metadata_elapsed;
 
-                let (extracted_text, text_elapsed) = match text_res {
+                let (extracted_text, text_elapsed, pdf_used_local_text) = match text_res {
                     Ok(v) => v,
-                    Err(_) => (None, 0),
+                    Err(_) => (None, 0, false),
                 };
                 text_extract_elapsed_ms = text_elapsed;
 
@@ -1022,6 +1157,9 @@ pub async fn start(
                     content_embed_elapsed_ms,
                     metadata_embed_elapsed_ms,
                     text_extract_elapsed_ms,
+                    file_read_bytes,
+                    gemini_vision_payload_bytes,
+                    pdf_used_local_text,
                     file_total_elapsed_ms = file_started.elapsed().as_millis(),
                     "embedding file completed"
                 );

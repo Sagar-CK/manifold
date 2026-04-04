@@ -86,6 +86,44 @@ fn thumbnail_file_kind(path: &Path) -> String {
         .unwrap_or_default()
 }
 
+/// Search paths for the PDFium dynamic library (shared with thumbnails and embedding).
+pub(crate) fn pdfium_library_candidates(app: &tauri::AppHandle) -> Vec<PathBuf> {
+    let mut pdfium_candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(override_dir) = std::env::var("MANIFOLD_PDFIUM_LIB_DIR") {
+        let trimmed = override_dir.trim();
+        if !trimmed.is_empty() {
+            let base = PathBuf::from(trimmed);
+            pdfium_candidates.push(base.clone());
+            pdfium_candidates.push(base.join("resources").join("pdfium"));
+        }
+    }
+    pdfium_candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("pdfium"),
+    );
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        pdfium_candidates.push(resource_dir.join("pdfium"));
+        pdfium_candidates.push(resource_dir.join("resources").join("pdfium"));
+    }
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            if exe_path
+                .components()
+                .any(|c| c.as_os_str() == std::ffi::OsStr::new("target"))
+            {
+                pdfium_candidates.push(exe_dir.join("../../resources/pdfium"));
+            }
+            pdfium_candidates.push(exe_dir.to_path_buf());
+            pdfium_candidates.push(exe_dir.join("pdfium"));
+            if let Some(src_tauri_dir) = exe_dir.parent().and_then(|p| p.parent()) {
+                pdfium_candidates.push(src_tauri_dir.join("resources").join("pdfium"));
+            }
+        }
+    }
+    pdfium_candidates
+}
+
 fn render_image_thumbnail_base64(path: &Path, max_edge: u32) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|e| e.to_string())?;
     let img = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
@@ -101,22 +139,59 @@ fn load_pdfium(candidates: &[PathBuf]) -> Result<Pdfium, String> {
     let mut attempted: Vec<String> = Vec::new();
     for dir in candidates {
         let lib_path = Pdfium::pdfium_platform_library_name_at_path(dir);
-        attempted.push(lib_path.display().to_string());
-        if let Ok(bindings) = Pdfium::bind_to_library(&lib_path) {
-            return Ok(Pdfium::new(bindings));
+        match Pdfium::bind_to_library(&lib_path) {
+            Ok(bindings) => return Ok(Pdfium::new(bindings)),
+            Err(err) => {
+                let exists = lib_path.exists();
+                attempted.push(format!(
+                    "{} (file exists: {exists}, error: {err})",
+                    lib_path.display()
+                ));
+            }
         }
     }
     let bindings = Pdfium::bind_to_system_library().map_err(|e| {
         let attempted_list = if attempted.is_empty() {
             "none".to_string()
         } else {
-            attempted.join(", ")
+            attempted.join("; ")
         };
         format!(
-            "pdf thumbnail renderer unavailable: could not load PDFium from candidates [{attempted_list}] or system library ({e}). Install PDFium or bundle it for this platform."
+            "pdf thumbnail renderer unavailable: could not load PDFium. Tried: [{attempted_list}]. Then system library failed ({e}). Install PDFium under src-tauri/resources/pdfium/ (see pnpm setup:dev) or set MANIFOLD_PDFIUM_LIB_DIR."
         )
     })?;
     Ok(Pdfium::new(bindings))
+}
+
+const PDFIUM_EXTRACT_MAX_CHARS: usize = 512 * 1024;
+
+/// Extract text from a PDF using PDFium (digitally born text only; scanned pages stay empty).
+pub(crate) fn extract_pdf_text_pdfium(path: &Path, candidates: &[PathBuf]) -> Result<String, String> {
+    let pdfium = load_pdfium(candidates)?;
+    let document = pdfium.load_pdf_from_file(path, None).map_err(|e| e.to_string())?;
+    let mut out = String::new();
+    for page in document.pages().iter() {
+        if out.len() >= PDFIUM_EXTRACT_MAX_CHARS {
+            break;
+        }
+        let page_text = page.text().map_err(|e| e.to_string())?;
+        let page_str = page_text.to_string();
+        if page_str.trim().is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        let remaining = PDFIUM_EXTRACT_MAX_CHARS.saturating_sub(out.len());
+        if page_str.len() <= remaining {
+            out.push_str(&page_str);
+        } else {
+            let tail: String = page_str.chars().take(remaining).collect();
+            out.push_str(&tail);
+            break;
+        }
+    }
+    Ok(out)
 }
 
 fn render_pdf_thumbnail_base64(
@@ -204,6 +279,7 @@ pub fn run() {
             qdrant_upsert_metadata,
             qdrant_upsert_embedding,
             qdrant_semantic_search,
+            qdrant_similar_by_path,
             hybrid_search,
             qdrant_count_points,
             qdrant_delete_all_points,
@@ -872,31 +948,7 @@ async fn thumbnail_image_base64_png(
     let page = args.page;
     let cache_key = thumbnail_cache_key(&args.path, max_edge, page);
     let fingerprint = thumbnail_fingerprint(mtime_ms, size_bytes);
-    let mut pdfium_candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(override_dir) = std::env::var("MANIFOLD_PDFIUM_LIB_DIR") {
-        let trimmed = override_dir.trim();
-        if !trimmed.is_empty() {
-            pdfium_candidates.push(PathBuf::from(trimmed));
-        }
-    }
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        pdfium_candidates.push(resource_dir.join("pdfium"));
-        pdfium_candidates.push(resource_dir);
-    }
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            pdfium_candidates.push(exe_dir.to_path_buf());
-            pdfium_candidates.push(exe_dir.join("pdfium"));
-            if let Some(src_tauri_dir) = exe_dir.parent().and_then(|p| p.parent()) {
-                // Dev mode convenience: allow loading from `src-tauri/resources/pdfium`.
-                pdfium_candidates.push(src_tauri_dir.join("resources").join("pdfium"));
-                pdfium_candidates.push(src_tauri_dir.join("resources"));
-            }
-        }
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        pdfium_candidates.push(cwd);
-    }
+    let pdfium_candidates = pdfium_library_candidates(&app);
 
     {
         let guard = cache
@@ -1012,6 +1064,15 @@ async fn qdrant_semantic_search(
     args: qdrant::SemanticSearchArgs,
 ) -> Result<Vec<qdrant::SemanticSearchHit>, String> {
     qdrant::semantic_search(&app, &state, args).await
+}
+
+#[tauri::command]
+async fn qdrant_similar_by_path(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, qdrant::QdrantState>,
+    args: qdrant::SimilarByPathArgs,
+) -> Result<Vec<qdrant::SemanticSearchHit>, String> {
+    qdrant::similar_by_path(&app, &state, args).await
 }
 
 #[tauri::command]

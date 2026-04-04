@@ -170,6 +170,14 @@ pub struct SemanticSearchFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SimilarByPathArgs {
+    pub source_id: String,
+    pub path: String,
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CountPointsArgs {
     pub source_id: String,
 }
@@ -807,6 +815,97 @@ pub async fn semantic_search(app: &AppHandle, state: &QdrantState, args: Semanti
             });
         }
     }
+    Ok(out)
+}
+
+/// Nearest neighbors in the content collection using the stored embedding for `path`.
+pub async fn similar_by_path(
+    app: &AppHandle,
+    state: &QdrantState,
+    args: SimilarByPathArgs,
+) -> Result<Vec<SemanticSearchHit>, String> {
+    let client = instance(app, state).await?;
+    let id = point_id(&args.source_id, &args.path);
+
+    use qdrant_client::qdrant::GetPointsBuilder;
+    use qdrant_client::qdrant::vector_output::Vector;
+
+    let get_res = client
+        .get_points(
+            GetPointsBuilder::new(CONTENT_COLLECTION_NAME, vec![id])
+                .with_vectors(true)
+                .with_payload(false),
+        )
+        .await
+        .map_err(|e| format!("qdrant get_points failed: {e}"))?;
+
+    let point = get_res
+        .result
+        .into_iter()
+        .next()
+        .ok_or_else(|| "No content embedding for this file.".to_string())?;
+
+    let query_vector: Vec<f32> = point
+        .vectors
+        .as_ref()
+        .and_then(|vo| vo.get_vector())
+        .and_then(|v| match v {
+            Vector::Dense(d) => Some(d.data),
+            _ => None,
+        })
+        .ok_or_else(|| "No content embedding for this file.".to_string())?;
+
+    if query_vector.len() != VECTOR_DIM {
+        return Err(format!(
+            "Stored vector length {} does not match expected dimensions {}.",
+            query_vector.len(),
+            VECTOR_DIM
+        ));
+    }
+
+    let limit = args.limit.unwrap_or(16).clamp(1, 64) as usize;
+    let search_limit = (limit + 8).min(256) as u64;
+
+    let filter = Filter::must([
+        Condition::matches("sourceId", args.source_id.clone()),
+    ]);
+
+    let search_points = SearchPointsBuilder::new(CONTENT_COLLECTION_NAME, query_vector, search_limit)
+        .with_payload(true)
+        .filter(filter)
+        .build();
+
+    let res = client
+        .search_points(search_points)
+        .await
+        .map_err(|e| format!("qdrant query request failed: {e}"))?;
+
+    let mut out = Vec::new();
+    for p in res.result {
+        let path = p.payload.get("path").and_then(|v| match &v.kind {
+            Some(qdrant_client::qdrant::value::Kind::StringValue(s)) => Some(s.clone()),
+            _ => None,
+        });
+        let content_hash = p.payload.get("contentHash").and_then(|v| match &v.kind {
+            Some(qdrant_client::qdrant::value::Kind::StringValue(s)) => Some(s.clone()),
+            _ => None,
+        });
+
+        let Some(path) = path else { continue };
+        if path == args.path {
+            continue;
+        }
+        let Some(content_hash) = content_hash else { continue };
+
+        out.push(SemanticSearchHit {
+            score: p.score,
+            file: SemanticSearchFile { path, content_hash },
+        });
+        if out.len() >= limit {
+            break;
+        }
+    }
+
     Ok(out)
 }
 
