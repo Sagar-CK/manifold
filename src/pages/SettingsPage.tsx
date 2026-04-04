@@ -38,31 +38,18 @@ const SEARCH_MODE_OPTIONS = [
 ] as const;
 type SearchModeOption = (typeof SEARCH_MODE_OPTIONS)[number];
 
-const TEXT_EMBED_PRICE_PER_1M_TOKENS_USD = 0.2;
-const IMAGE_EMBED_COST_PER_IMAGE_USD = 0.00012;
-const AUDIO_EMBED_COST_PER_SECOND_USD = 0.00016;
-const VIDEO_EMBED_COST_PER_FRAME_USD = 0.00079;
-
-// Conservative estimates intentionally bias toward higher usage/cost.
-const TEXT_BYTES_PER_TOKEN_CONSERVATIVE = 3;
-const AUDIO_BYTES_PER_SECOND_CONSERVATIVE = 8_000;
-const VIDEO_BYTES_PER_FRAME_CONSERVATIVE = 50_000;
-
-type IncludeFolderEstimate = {
+type IncludeFolderBreakdown = {
   total: number;
-  imageFiles: number;
-  audioFiles: number;
-  videoFiles: number;
-  textLikeFiles: number;
-  estimatedTextTokens: number;
-  estimatedAudioSeconds: number;
-  estimatedVideoFrames: number;
-  textCostUsd: number;
-  imageCostUsd: number;
-  audioCostUsd: number;
-  videoCostUsd: number;
-  totalCostUsd: number;
+  textLike: number;
+  image: number;
+  audio: number;
+  video: number;
 };
+
+function parseScanCount(value: number | string): number {
+  const n = typeof value === "string" ? Number.parseInt(value, 10) : value;
+  return Number.isFinite(n) ? n : 0;
+}
 
 export function SettingsPage({
   cfg,
@@ -111,7 +98,9 @@ export function SettingsPage({
   const [addIncludeLoading, setAddIncludeLoading] = useState(false);
   const [addIncludeError, setAddIncludeError] = useState<string | null>(null);
   const [includeToAdd, setIncludeToAdd] = useState<string | null>(null);
-  const [includeAddEstimate, setIncludeAddEstimate] = useState<IncludeFolderEstimate | null>(null);
+  const [includeAddBreakdown, setIncludeAddBreakdown] = useState<IncludeFolderBreakdown | null>(
+    null,
+  );
   const [confirmDisableDefaultExcludesOpen, setConfirmDisableDefaultExcludesOpen] =
     useState(false);
   const liveIndexedCount =
@@ -137,25 +126,6 @@ export function SettingsPage({
       setEmbeddedCount(null);
     }
   }
-
-  function formatUsd(amount: number) {
-    return new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: "USD",
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    }).format(amount);
-  }
-
-  const normalizedSelectedExts = new Set(cfg.extensions.map((ext) => ext.toLowerCase()));
-  const includeTextPdfEstimate = Array.from(normalizedSelectedExts).some(
-    (ext) => !["png", "jpg", "jpeg", "mp3", "wav", "mp4", "mov"].includes(ext),
-  );
-  const includeImageEstimate = ["png", "jpg", "jpeg"].some((ext) =>
-    normalizedSelectedExts.has(ext),
-  );
-  const includeAudioEstimate = ["mp3", "wav"].some((ext) => normalizedSelectedExts.has(ext));
-  const includeVideoEstimate = ["mp4", "mov"].some((ext) => normalizedSelectedExts.has(ext));
 
   async function deleteAllVectors() {
     setClearIndexError(null);
@@ -227,7 +197,7 @@ export function SettingsPage({
   async function prepareAddIncludeFolder(path: string) {
     setIncludeToAdd(path);
     setAddIncludeError(null);
-    setIncludeAddEstimate(null);
+    setIncludeAddBreakdown(null);
     setConfirmAddIncludeOpen(true);
     setAddIncludeLoading(true);
     try {
@@ -244,58 +214,13 @@ export function SettingsPage({
         audioFiles: number | string;
         videoFiles: number | string;
         textLikeFiles: number | string;
-        totalTextBytes: number | string;
-        totalAudioBytes: number | string;
-        totalVideoBytes: number | string;
       };
-      const total = typeof res.total === "string" ? Number.parseInt(res.total, 10) : res.total;
-      const imageFiles =
-        typeof res.imageFiles === "string" ? Number.parseInt(res.imageFiles, 10) : res.imageFiles;
-      const audioFiles =
-        typeof res.audioFiles === "string" ? Number.parseInt(res.audioFiles, 10) : res.audioFiles;
-      const videoFiles =
-        typeof res.videoFiles === "string" ? Number.parseInt(res.videoFiles, 10) : res.videoFiles;
-      const textLikeFiles =
-        typeof res.textLikeFiles === "string"
-          ? Number.parseInt(res.textLikeFiles, 10)
-          : res.textLikeFiles;
-      const totalTextBytes =
-        typeof res.totalTextBytes === "string"
-          ? Number.parseInt(res.totalTextBytes, 10)
-          : res.totalTextBytes;
-      const totalAudioBytes =
-        typeof res.totalAudioBytes === "string"
-          ? Number.parseInt(res.totalAudioBytes, 10)
-          : res.totalAudioBytes;
-      const totalVideoBytes =
-        typeof res.totalVideoBytes === "string"
-          ? Number.parseInt(res.totalVideoBytes, 10)
-          : res.totalVideoBytes;
-      const safeImageFiles = Number.isFinite(imageFiles) ? imageFiles : 0;
-      const safeTextBytes = Number.isFinite(totalTextBytes) ? totalTextBytes : 0;
-      const safeAudioBytes = Number.isFinite(totalAudioBytes) ? totalAudioBytes : 0;
-      const safeVideoBytes = Number.isFinite(totalVideoBytes) ? totalVideoBytes : 0;
-      const estimatedTextTokens = Math.ceil(safeTextBytes / TEXT_BYTES_PER_TOKEN_CONSERVATIVE);
-      const estimatedAudioSeconds = Math.ceil(safeAudioBytes / AUDIO_BYTES_PER_SECOND_CONSERVATIVE);
-      const estimatedVideoFrames = Math.ceil(safeVideoBytes / VIDEO_BYTES_PER_FRAME_CONSERVATIVE);
-      const textCostUsd = (estimatedTextTokens / 1_000_000) * TEXT_EMBED_PRICE_PER_1M_TOKENS_USD;
-      const imageCostUsd = safeImageFiles * IMAGE_EMBED_COST_PER_IMAGE_USD;
-      const audioCostUsd = estimatedAudioSeconds * AUDIO_EMBED_COST_PER_SECOND_USD;
-      const videoCostUsd = estimatedVideoFrames * VIDEO_EMBED_COST_PER_FRAME_USD;
-      setIncludeAddEstimate({
-        total: Number.isFinite(total) ? total : 0,
-        imageFiles: safeImageFiles,
-        audioFiles: Number.isFinite(audioFiles) ? audioFiles : 0,
-        videoFiles: Number.isFinite(videoFiles) ? videoFiles : 0,
-        textLikeFiles: Number.isFinite(textLikeFiles) ? textLikeFiles : 0,
-        estimatedTextTokens,
-        estimatedAudioSeconds,
-        estimatedVideoFrames,
-        textCostUsd,
-        imageCostUsd,
-        audioCostUsd,
-        videoCostUsd,
-        totalCostUsd: textCostUsd + imageCostUsd + audioCostUsd + videoCostUsd,
+      setIncludeAddBreakdown({
+        total: parseScanCount(res.total),
+        textLike: parseScanCount(res.textLikeFiles),
+        image: parseScanCount(res.imageFiles),
+        audio: parseScanCount(res.audioFiles),
+        video: parseScanCount(res.videoFiles),
       });
     } catch (e) {
       setAddIncludeError(String(e));
@@ -310,7 +235,7 @@ export function SettingsPage({
     setConfirmAddIncludeOpen(false);
     setAddIncludeError(null);
     setIncludeToAdd(null);
-    setIncludeAddEstimate(null);
+    setIncludeAddBreakdown(null);
   }
 
   async function pickFolder(label: string): Promise<string | null> {
@@ -689,88 +614,57 @@ export function SettingsPage({
           setConfirmAddIncludeOpen(open);
           if (!open && !addIncludeLoading) {
             setIncludeToAdd(null);
-            setIncludeAddEstimate(null);
+            setIncludeAddBreakdown(null);
             setAddIncludeError(null);
           }
         }}
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle className="text-black">Add folder and continue with indexing estimate?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This folder has {includeAddEstimate?.total ?? "..."} selected file(s).
+            <AlertDialogTitle className="text-black">Add folder</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-3 text-black/70">
+                <p className="tabular-nums">
+                  {addIncludeLoading
+                    ? "Counting files…"
+                    : includeAddBreakdown !== null
+                      ? `${includeAddBreakdown.total.toLocaleString()} file${includeAddBreakdown.total === 1 ? "" : "s"}`
+                      : "—"}
+                </p>
+                {!addIncludeLoading && includeAddBreakdown !== null && includeAddBreakdown.total > 0 ? (
+                  <div className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-0.5 text-sm tabular-nums">
+                    {includeAddBreakdown.textLike > 0 ? (
+                      <>
+                        <span>Text / PDF</span>
+                        <span className="text-right">{includeAddBreakdown.textLike.toLocaleString()}</span>
+                      </>
+                    ) : null}
+                    {includeAddBreakdown.image > 0 ? (
+                      <>
+                        <span>Images</span>
+                        <span className="text-right">{includeAddBreakdown.image.toLocaleString()}</span>
+                      </>
+                    ) : null}
+                    {includeAddBreakdown.audio > 0 ? (
+                      <>
+                        <span>Audio</span>
+                        <span className="text-right">{includeAddBreakdown.audio.toLocaleString()}</span>
+                      </>
+                    ) : null}
+                    {includeAddBreakdown.video > 0 ? (
+                      <>
+                        <span>Video</span>
+                        <span className="text-right">{includeAddBreakdown.video.toLocaleString()}</span>
+                      </>
+                    ) : null}
+                  </div>
+                ) : null}
+                <p className="text-sm text-amber-900/80">
+                  Bigger folders take longer and tend to use more provider quota.
+                </p>
+              </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
-          <div className="rounded-md border border-black/10 bg-black/2 px-3 py-2 text-sm text-black/80">
-            <div className="grid grid-cols-[1.4fr_0.8fr_1fr] gap-x-3 border-b border-black/10 pb-1 font-semibold text-black">
-              <div>Type</div>
-              <div className="text-right">Amount</div>
-              <div className="text-right">Cost</div>
-            </div>
-            <div className="mt-1 grid grid-cols-[1.4fr_0.8fr_1fr] gap-x-3">
-              {includeTextPdfEstimate ? (
-                <>
-                  <div>Text/PDF</div>
-                  <div className="text-right tabular-nums">
-                    {includeAddEstimate
-                      ? `~${includeAddEstimate.estimatedTextTokens.toLocaleString()} tokens`
-                      : "..."}
-                  </div>
-                  <div className="text-right">
-                    {includeAddEstimate ? formatUsd(includeAddEstimate.textCostUsd) : "..."}
-                  </div>
-                </>
-              ) : null}
-
-              {includeImageEstimate ? (
-                <>
-                  <div>Images</div>
-                  <div className="text-right tabular-nums">{includeAddEstimate?.imageFiles ?? "..."}</div>
-                  <div className="text-right">
-                    {includeAddEstimate ? formatUsd(includeAddEstimate.imageCostUsd) : "..."}
-                  </div>
-                </>
-              ) : null}
-
-              {includeAudioEstimate ? (
-                <>
-                  <div>Audio</div>
-                  <div className="text-right tabular-nums">
-                    {includeAddEstimate
-                      ? `~${includeAddEstimate.estimatedAudioSeconds.toLocaleString()} s`
-                      : "..."}
-                  </div>
-                  <div className="text-right">
-                    {includeAddEstimate ? formatUsd(includeAddEstimate.audioCostUsd) : "..."}
-                  </div>
-                </>
-              ) : null}
-
-              {includeVideoEstimate ? (
-                <>
-                  <div>Video</div>
-                  <div className="text-right tabular-nums">
-                    {includeAddEstimate
-                      ? `~${includeAddEstimate.estimatedVideoFrames.toLocaleString()} frames`
-                      : "..."}
-                  </div>
-                  <div className="text-right">
-                    {includeAddEstimate ? formatUsd(includeAddEstimate.videoCostUsd) : "..."}
-                  </div>
-                </>
-              ) : null}
-            </div>
-            <div className="mt-2 grid grid-cols-[1.4fr_0.8fr_1fr] gap-x-3 border-t border-black/10 pt-1 font-semibold text-black">
-              <div>Total</div>
-              <div className="text-right tabular-nums">{includeAddEstimate?.total ?? "..."}</div>
-              <div className="text-right">
-                {includeAddEstimate ? formatUsd(includeAddEstimate.totalCostUsd) : "..."}
-              </div>
-            </div>
-            <div className="mt-2 text-xs text-black/60">
-              Conservative estimate: actual provider metering can differ.
-            </div>
-          </div>
           {addIncludeError ? (
             <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
               Error: {addIncludeError}
