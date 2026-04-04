@@ -1,14 +1,34 @@
-import { ArrowLeft, FolderPlus, Trash2 } from "lucide-react";
-import { Link } from "react-router-dom";
+import { ArrowLeft, FolderPlus, Plus, Trash2 } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { homeDir } from "@tauri-apps/api/path";
 import { useEffect, useState } from "react";
+import { navigateBackOrFallback } from "../lib/navigateBack";
+import { formatPathForDisplay } from "../lib/pathDisplay";
 import { collapseIncludeFolders, type LocalConfig, type SupportedExt } from "../lib/localConfig";
 import { saveConfig } from "../lib/localConfig";
+import {
+  createTagDef,
+  loadTagsState,
+  removeTagEverywhere,
+  saveTagsState,
+  type TagsState,
+} from "../lib/tags";
 import { PageHeader } from "../components/PageHeader";
 import { EmbeddingStatusPanel } from "../components/EmbeddingStatusPanel";
+import { TagDefBadge } from "../components/TagDefBadge";
 import { Button } from "../components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "../components/ui/card";
+import { Input } from "../components/ui/input";
+import { Label } from "../components/ui/label";
+import { Separator } from "../components/ui/separator";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -31,6 +51,7 @@ import { Slider } from "../components/ui/slider";
 import { Switch } from "../components/ui/switch";
 import { Spinner } from "../components/ui/spinner";
 import { Toggle } from "../components/ui/toggle";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip";
 
 const SEARCH_MODE_OPTIONS = [
   { value: "topK", label: "Top-K" },
@@ -85,6 +106,7 @@ export function SettingsPage({
   embedFailures: Array<{ path: string; reason: string }>;
   onCancelEmbedding: () => Promise<void>;
 }) {
+  const navigate = useNavigate();
   const [homePath, setHomePath] = useState("");
   const [clearingIndex, setClearingIndex] = useState(false);
   const [clearIndexError, setClearIndexError] = useState<string | null>(null);
@@ -103,6 +125,10 @@ export function SettingsPage({
   );
   const [confirmDisableDefaultExcludesOpen, setConfirmDisableDefaultExcludesOpen] =
     useState(false);
+  const [tagsState, setTagsState] = useState<TagsState>(() => loadTagsState());
+  const [tagNameDraft, setTagNameDraft] = useState("");
+  const [tagColorDraft, setTagColorDraft] = useState("#6366f1");
+  const [topKDraft, setTopKDraft] = useState(() => String(cfg.topK));
   const liveIndexedCount =
     embedding || hasPendingEmbeds
       ? Math.max(embeddedCount ?? 0, embedProgress.processed)
@@ -113,6 +139,11 @@ export function SettingsPage({
   function updateConfig(next: LocalConfig) {
     setCfg(next);
     saveConfig(next);
+  }
+
+  function updateTags(next: TagsState) {
+    saveTagsState(next);
+    setTagsState(next);
   }
 
   async function refreshEmbeddedCount(sourceId: string) {
@@ -253,22 +284,6 @@ export function SettingsPage({
     }
   }
 
-  function formatPathForDisplay(path: string) {
-    const normalize = (value: string) => value.replace(/\\/g, "/").replace(/\/+$/, "");
-    const normalizedPath = normalize(path.trim());
-    const normalizedHome = normalize(homePath.trim());
-    if (!normalizedHome) return normalizedPath;
-
-    if (normalizedPath.toLowerCase() === normalizedHome.toLowerCase()) {
-      return "~";
-    }
-    const homePrefix = `${normalizedHome}/`;
-    if (normalizedPath.toLowerCase().startsWith(homePrefix.toLowerCase())) {
-      return `~/${normalizedPath.slice(homePrefix.length)}`;
-    }
-    return normalizedPath;
-  }
-
   useEffect(() => {
     let cancelled = false;
 
@@ -295,318 +310,465 @@ export function SettingsPage({
     void loadEmbeddedCount();
   }, [cfg.sourceId, clearingIndex]);
 
+  useEffect(() => {
+    setTopKDraft(String(cfg.topK));
+  }, [cfg.topK]);
+
   return (
-    <section className="flex min-h-[calc(100dvh-4rem)] flex-col">
-      <div className="relative mb-8">
-        <Link
-          to="/"
-          className="absolute left-0 top-0 inline-flex h-9 w-9 items-center justify-center rounded-md text-black/70 hover:bg-black/5 hover:text-black"
-          aria-label="Back to search"
-          title="Back"
-        >
-          <ArrowLeft className="h-4 w-4" aria-hidden="true" />
-        </Link>
+    <section className="flex min-h-[calc(100dvh-4rem)] flex-col gap-6">
+      <div className="relative shrink-0">
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              className="absolute left-0 top-0 inline-flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+              aria-label="Back"
+              onClick={() => navigateBackOrFallback(navigate)}
+            >
+              <ArrowLeft className="h-4 w-4" aria-hidden="true" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">Back</TooltipContent>
+        </Tooltip>
         <PageHeader heading="Settings" />
       </div>
 
-      <div className="grid grid-cols-1 gap-8 md:grid-cols-2">
-        <div className="p-2">
-          <div className="app-section-title">Paths</div>
-
-          <div className="mt-4">
-            <div className="flex items-center justify-between gap-2">
-              <div className="app-label">Include folders</div>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                aria-label="Add include folder"
-                title="Add include folder"
-                onClick={async () => {
-                  const dir = await pickFolder("Add include folder");
-                  if (!dir) return;
-                  const nextIncludes = collapseIncludeFolders([...cfg.include, dir]);
-                  if (nextIncludes.length === cfg.include.length) return;
-                  await prepareAddIncludeFolder(dir);
-                }}
-              >
-                <FolderPlus className="h-4 w-4" aria-hidden="true" />
-              </Button>
-            </div>
-            <div className="mt-2 flex flex-col gap-2">
-              {cfg.include.length === 0 ? (
-                <div className="app-muted">No include folders yet.</div>
-              ) : (
-                cfg.include.map((p) => (
-                  <div key={p} className="flex items-center justify-between gap-2 text-sm">
-                    <div className="min-w-0 flex-1 truncate rounded-md bg-black/5 px-2 py-1 font-mono text-[12px] text-black/70">
-                      {formatPathForDisplay(p)}
-                    </div>
+      <div className="grid flex-1 gap-6 lg:grid-cols-2 lg:items-start">
+        <Card size="sm" className="shadow-xs">
+          <CardHeader>
+            <CardTitle>Paths</CardTitle>
+            <CardDescription>Indexed folders and noise filters</CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-4">
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between gap-2">
+                <Label className="text-muted-foreground">Include</Label>
+                <Tooltip>
+                  <TooltipTrigger asChild>
                     <Button
                       variant="ghost"
                       size="icon-sm"
-                      className="text-destructive hover:bg-destructive/10 hover:text-destructive"
-                      aria-label={`Remove include folder ${formatPathForDisplay(p)}`}
-                      title="Remove include folder"
-                      onClick={() => {
-                        prepareRemoveIncludeFolder(p);
+                      aria-label="Add include folder"
+                      onClick={async () => {
+                        const dir = await pickFolder("Add include folder");
+                        if (!dir) return;
+                        const nextIncludes = collapseIncludeFolders([...cfg.include, dir]);
+                        if (nextIncludes.length === cfg.include.length) return;
+                        await prepareAddIncludeFolder(dir);
                       }}
                     >
-                      <Trash2 className="h-4 w-4" aria-hidden="true" />
+                      <FolderPlus className="h-4 w-4" aria-hidden="true" />
                     </Button>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-
-          <div className="mt-5">
-            <div className="flex items-center justify-between gap-2">
-              <div className="app-label">Exclude folders</div>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                aria-label="Add exclude folder"
-                title="Add exclude folder"
-                onClick={async () => {
-                  const dir = await pickFolder("Add exclude folder");
-                  if (!dir) return;
-                  if (cfg.exclude.includes(dir)) return;
-                  updateConfig({ ...cfg, exclude: [...cfg.exclude, dir] });
-                }}
-              >
-                <FolderPlus className="h-4 w-4" aria-hidden="true" />
-              </Button>
-            </div>
-            <div className="mt-2 flex flex-col gap-2">
-              {cfg.exclude.length === 0 ? (
-                <div className="app-muted">No exclude folders.</div>
-              ) : (
-                cfg.exclude.map((p) => (
-                  <div key={p} className="flex items-center justify-between gap-2 text-sm">
-                    <div className="min-w-0 flex-1 truncate rounded-md bg-black/5 px-2 py-1 font-mono text-[12px] text-black/70">
-                      {formatPathForDisplay(p)}
+                  </TooltipTrigger>
+                  <TooltipContent side="left">Add folder</TooltipContent>
+                </Tooltip>
+              </div>
+              <div className="flex flex-col gap-2">
+                {cfg.include.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">None</p>
+                ) : (
+                  cfg.include.map((p) => (
+                    <div key={p} className="flex items-center justify-between gap-2 text-sm">
+                      <div className="min-w-0 flex-1 truncate rounded-md bg-muted px-2 py-1.5 font-mono text-xs text-foreground">
+                        {formatPathForDisplay(p, homePath)}
+                      </div>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            className="shrink-0 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                            aria-label={`Remove include folder ${formatPathForDisplay(p, homePath)}`}
+                            onClick={() => {
+                              prepareRemoveIncludeFolder(p);
+                            }}
+                          >
+                            <Trash2 className="h-4 w-4" aria-hidden="true" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent side="left">Remove</TooltipContent>
+                      </Tooltip>
                     </div>
+                  ))
+                )}
+              </div>
+            </div>
+
+            <Separator />
+
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between gap-2">
+                <Label className="text-muted-foreground">Exclude</Label>
+                <Tooltip>
+                  <TooltipTrigger asChild>
                     <Button
                       variant="ghost"
                       size="icon-sm"
-                      className="text-destructive hover:bg-destructive/10 hover:text-destructive"
-                      aria-label={`Remove exclude folder ${formatPathForDisplay(p)}`}
-                      title="Remove exclude folder"
-                      onClick={() =>
-                        updateConfig({ ...cfg, exclude: cfg.exclude.filter((x) => x !== p) })
-                      }
+                      aria-label="Add exclude folder"
+                      onClick={async () => {
+                        const dir = await pickFolder("Add exclude folder");
+                        if (!dir) return;
+                        if (cfg.exclude.includes(dir)) return;
+                        updateConfig({ ...cfg, exclude: [...cfg.exclude, dir] });
+                      }}
                     >
-                      <Trash2 className="h-4 w-4" aria-hidden="true" />
+                      <FolderPlus className="h-4 w-4" aria-hidden="true" />
                     </Button>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-
-          <div className="mt-5 flex items-start justify-between gap-3">
-            <div>
-              <div className="app-label">Skip common dependency and build folders</div>
-              <div className="app-muted mt-1 max-w-xl">
-                Skips folders such as <span className="font-mono">node_modules</span>,{" "}
-                <span className="font-mono">.git</span>, and <span className="font-mono">dist</span>{" "}
-                so indexing stays focused on your own files. Turning this off can add a very large
-                number of files and increase API cost.
+                  </TooltipTrigger>
+                  <TooltipContent side="left">Add folder</TooltipContent>
+                </Tooltip>
+              </div>
+              <div className="flex flex-col gap-2">
+                {cfg.exclude.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">None</p>
+                ) : (
+                  cfg.exclude.map((p) => (
+                    <div key={p} className="flex items-center justify-between gap-2 text-sm">
+                      <div className="min-w-0 flex-1 truncate rounded-md bg-muted px-2 py-1.5 font-mono text-xs text-foreground">
+                        {formatPathForDisplay(p, homePath)}
+                      </div>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            className="shrink-0 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                            aria-label={`Remove exclude folder ${formatPathForDisplay(p, homePath)}`}
+                            onClick={() =>
+                              updateConfig({ ...cfg, exclude: cfg.exclude.filter((x) => x !== p) })
+                            }
+                          >
+                            <Trash2 className="h-4 w-4" aria-hidden="true" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent side="left">Remove</TooltipContent>
+                      </Tooltip>
+                    </div>
+                  ))
+                )}
               </div>
             </div>
-            <Switch
-              checked={cfg.useDefaultFolderExcludes}
-              onCheckedChange={(checked) => {
-                if (checked) {
-                  updateConfig({ ...cfg, useDefaultFolderExcludes: true });
-                } else {
-                  setConfirmDisableDefaultExcludesOpen(true);
-                }
-              }}
-              aria-label="Skip common dependency and build folders"
-              className="shrink-0"
-            />
-          </div>
-        </div>
 
-        <div className="p-2">
-          <div className="app-section-title">Indexing & Search</div>
+            <Separator />
 
-          <div className="mt-4">
-            <div className="app-label">File types</div>
-            <div className="mt-2 flex flex-wrap gap-2">
-              {extOptions.map((ext) => (
-                <Toggle
-                  key={ext}
-                  pressed={cfg.extensions.includes(ext)}
-                  onPressedChange={(pressed) => {
-                    if (pressed === undefined) return;
-                    const next = pressed
-                      ? Array.from(new Set([...cfg.extensions, ext]))
-                      : cfg.extensions.filter((x) => x !== ext);
-                    updateConfig({ ...cfg, extensions: next });
-                  }}
-                  variant="outline"
-                  className="h-auto min-w-0 px-3 py-1.5 text-center font-medium tracking-tight transition-all duration-200 ease-out data-[state=on]:scale-[1.02] data-[state=on]:border-emerald-200 data-[state=on]:bg-emerald-100 data-[state=on]:text-emerald-900 data-[state=on]:shadow-sm data-[state=off]:scale-100 data-[state=off]:border-zinc-200 data-[state=off]:bg-zinc-100 data-[state=off]:text-zinc-500"
-                >
-                  {ext}
-                </Toggle>
-              ))}
-            </div>
-          </div>
-
-          <div className="mt-5">
-            <div className="flex items-center justify-between gap-3">
-              <div className="app-label">Similarity threshold</div>
-              <Combobox<SearchModeOption>
-                value={selectedSearchModeOption}
-                onValueChange={(value) => {
-                  if (!value) return;
-                  updateConfig({
-                    ...cfg,
-                    searchMode: value.value,
-                  });
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex min-w-0 flex-col gap-1">
+                <Label htmlFor="default-excludes">Skip dependency / build folders</Label>
+                <p className="text-xs text-muted-foreground">
+                  e.g. <span className="font-mono">node_modules</span>,{" "}
+                  <span className="font-mono">.git</span>, <span className="font-mono">dist</span>
+                </p>
+              </div>
+              <Switch
+                id="default-excludes"
+                checked={cfg.useDefaultFolderExcludes}
+                onCheckedChange={(checked) => {
+                  if (checked) {
+                    updateConfig({ ...cfg, useDefaultFolderExcludes: true });
+                  } else {
+                    setConfirmDisableDefaultExcludesOpen(true);
+                  }
                 }}
-              >
-                <ComboboxInput
-                  readOnly
-                  showClear={false}
-                  aria-label="Similarity mode"
-                  className="w-44"
-                />
-                <ComboboxContent>
-                  <ComboboxList>
-                    {SEARCH_MODE_OPTIONS.map((option) => (
-                      <ComboboxItem key={option.value} value={option}>
-                        {option.label}
-                      </ComboboxItem>
-                    ))}
-                  </ComboboxList>
-                </ComboboxContent>
-              </Combobox>
+                aria-label="Skip common dependency and build folders"
+                className="shrink-0"
+              />
             </div>
+          </CardContent>
+        </Card>
 
-            {cfg.searchMode === "topK" ? (
-              <div className="mt-3 flex items-center gap-3">
-                <div className="app-muted">Results to return</div>
-                <input
-                  type="number"
-                  min={1}
-                  max={256}
-                  step={1}
-                  value={cfg.topK}
-                  onChange={(e) => {
-                    const next = Number.parseInt(e.target.value, 10);
-                    if (Number.isNaN(next)) return;
-                    updateConfig({ ...cfg, topK: Math.max(1, Math.min(256, next)) });
-                  }}
-                  className="w-24 rounded-md border border-black/15 bg-white px-2 py-1 text-sm"
-                />
-              </div>
-            ) : (
-              <div className="mt-3">
-                <div className="app-muted mb-2 flex items-center justify-between">
-                  <span>Minimum semantic score</span>
-                  <span>{Math.round(cfg.scoreThreshold * 100)}%</span>
+        <div className="flex flex-col gap-6">
+          <Card size="sm" className="shadow-xs">
+            <CardHeader>
+              <CardTitle>Search</CardTitle>
+              <CardDescription>Types, ranking, UI</CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-4">
+              <div className="flex flex-col gap-2">
+                <Label className="text-muted-foreground">File types</Label>
+                <div className="flex flex-wrap gap-2">
+                  {extOptions.map((ext) => (
+                    <Toggle
+                      key={ext}
+                      pressed={cfg.extensions.includes(ext)}
+                      onPressedChange={(pressed) => {
+                        if (pressed === undefined) return;
+                        const next = pressed
+                          ? Array.from(new Set([...cfg.extensions, ext]))
+                          : cfg.extensions.filter((x) => x !== ext);
+                        updateConfig({ ...cfg, extensions: next });
+                      }}
+                      variant="outline"
+                      size="sm"
+                      className="h-auto min-w-0 px-3 py-1.5 font-medium data-[state=on]:border-emerald-200 data-[state=on]:bg-emerald-100 data-[state=on]:text-emerald-950 data-[state=off]:text-muted-foreground"
+                    >
+                      {ext}
+                    </Toggle>
+                  ))}
                 </div>
-                <Slider
-                  min={0}
-                  max={100}
-                  step={1}
-                  value={[Math.round(cfg.scoreThreshold * 100)]}
-                  onValueChange={(value) => {
-                    const next = value?.[0];
-                    if (typeof next !== "number" || Number.isNaN(next)) return;
-                    updateConfig({ ...cfg, scoreThreshold: Math.max(0, Math.min(1, next / 100)) });
+              </div>
+
+              <Separator />
+
+              <div className="flex flex-col gap-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <Label className="text-muted-foreground">Ranking</Label>
+                  <Combobox<SearchModeOption>
+                    value={selectedSearchModeOption}
+                    onValueChange={(value) => {
+                      if (!value) return;
+                      updateConfig({
+                        ...cfg,
+                        searchMode: value.value,
+                      });
+                    }}
+                  >
+                    <ComboboxInput
+                      readOnly
+                      showClear={false}
+                      aria-label="Similarity mode"
+                      className="w-44"
+                    />
+                    <ComboboxContent>
+                      <ComboboxList>
+                        {SEARCH_MODE_OPTIONS.map((option) => (
+                          <ComboboxItem key={option.value} value={option}>
+                            {option.label}
+                          </ComboboxItem>
+                        ))}
+                      </ComboboxList>
+                    </ComboboxContent>
+                  </Combobox>
+                </div>
+
+                {cfg.searchMode === "topK" ? (
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <Label htmlFor="topk" className="shrink-0 text-muted-foreground">
+                      Result limit
+                    </Label>
+                    <Input
+                      id="topk"
+                      type="text"
+                      inputMode="numeric"
+                      autoComplete="off"
+                      value={topKDraft}
+                      className="h-9 w-20 text-right tabular-nums"
+                      onChange={(e) => setTopKDraft(e.target.value)}
+                      onBlur={() => {
+                        const n = Number.parseInt(topKDraft.trim(), 10);
+                        const next = Number.isNaN(n)
+                          ? cfg.topK
+                          : Math.max(1, Math.min(256, n));
+                        updateConfig({ ...cfg, topK: next });
+                        setTopKDraft(String(next));
+                      }}
+                    />
+                  </div>
+                ) : (
+                  <div className="flex flex-col gap-2">
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-muted-foreground">Min score</span>
+                      <span className="tabular-nums font-medium">
+                        {Math.round(cfg.scoreThreshold * 100)}%
+                      </span>
+                    </div>
+                    <Slider
+                      min={0}
+                      max={100}
+                      step={1}
+                      value={[Math.round(cfg.scoreThreshold * 100)]}
+                      onValueChange={(value) => {
+                        const next = value?.[0];
+                        if (typeof next !== "number" || Number.isNaN(next)) return;
+                        updateConfig({
+                          ...cfg,
+                          scoreThreshold: Math.max(0, Math.min(1, next / 100)),
+                        });
+                      }}
+                      className="w-full"
+                    />
+                  </div>
+                )}
+              </div>
+
+              <Separator />
+
+              <div className="flex items-center justify-between gap-4">
+                <Label htmlFor="sim-hover" className="text-muted-foreground">
+                  Similarity on hover
+                </Label>
+                <Switch
+                  id="sim-hover"
+                  checked={cfg.showSimilarityOnHover}
+                  onCheckedChange={(checked) => {
+                    updateConfig({ ...cfg, showSimilarityOnHover: checked });
                   }}
-                  className="w-full"
+                  aria-label="Toggle similarity badge on hover"
                 />
               </div>
-            )}
-          </div>
+            </CardContent>
+          </Card>
 
-          <div className="mt-5 flex items-center justify-between gap-3">
-            <div>
-              <div className="app-label">Show similarity on hover</div>
-              <div className="app-muted mt-1">
-                Shows the match badge when hovering a search result card.
+          <Card size="sm" className="shadow-xs">
+            <CardHeader>
+              <CardTitle>Tags</CardTitle>
+              <CardDescription>Use in search cards and file view</CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-4">
+              <div className="flex flex-wrap items-end gap-2">
+                <div className="flex min-w-[8rem] flex-1 flex-col gap-1.5">
+                  <Label htmlFor="tag-name">Name</Label>
+                  <Input
+                    id="tag-name"
+                    type="text"
+                    value={tagNameDraft}
+                    onChange={(e) => setTagNameDraft(e.target.value)}
+                    placeholder="Review"
+                    autoComplete="off"
+                  />
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="tag-color">Color</Label>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <input
+                        id="tag-color"
+                        type="color"
+                        value={tagColorDraft}
+                        onChange={(e) => setTagColorDraft(e.target.value)}
+                        className="size-9 cursor-pointer rounded-md border border-input bg-background p-0.5 shadow-xs"
+                        aria-label="Tag color"
+                      />
+                    </TooltipTrigger>
+                    <TooltipContent side="top">Pick color</TooltipContent>
+                  </Tooltip>
+                </div>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="inline-flex shrink-0 self-end">
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="icon"
+                        disabled={!tagNameDraft.trim()}
+                        aria-label="Add tag"
+                        onClick={() => {
+                          if (!tagNameDraft.trim()) return;
+                          const t = createTagDef(tagNameDraft, tagColorDraft);
+                          updateTags({ ...tagsState, tags: [...tagsState.tags, t] });
+                          setTagNameDraft("");
+                        }}
+                      >
+                        <Plus className="h-4 w-4" aria-hidden="true" />
+                      </Button>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent side="top">Add tag</TooltipContent>
+                </Tooltip>
               </div>
-            </div>
-            <Switch
-              checked={cfg.showSimilarityOnHover}
-              onCheckedChange={(checked) => {
-                updateConfig({ ...cfg, showSimilarityOnHover: checked });
-              }}
-              aria-label="Toggle similarity badge on hover"
-            />
-          </div>
-
+              <div className="flex flex-col gap-2">
+                {tagsState.tags.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No tags</p>
+                ) : (
+                  tagsState.tags.map((t) => (
+                    <TagDefBadge
+                      key={t.id}
+                      tag={t}
+                      onRemove={() =>
+                        setTagsState((prev) => {
+                          const next = removeTagEverywhere(prev, t.id);
+                          saveTagsState(next);
+                          return next;
+                        })
+                      }
+                    />
+                  ))
+                )}
+              </div>
+            </CardContent>
+          </Card>
         </div>
       </div>
 
-      <div className="mt-8">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="min-w-0">
-            <div className="app-section-title text-black">Delete all vectors</div>
-            <div className="app-muted mt-0.5 max-w-lg">
-              Clears the local Qdrant index (vectors only). Your files will not be deleted from disk. Currently, {liveIndexedCount} file(s) are indexed.
-            </div>
+      <Card
+        size="sm"
+        className="overflow-visible border-destructive/30 bg-destructive/5 shadow-xs ring-1 ring-destructive/20"
+      >
+        <CardContent className="flex min-w-0 flex-col gap-4 text-left sm:flex-row sm:items-start sm:justify-between sm:gap-8">
+          <div className="min-w-0 flex-1 flex flex-col gap-1.5 text-pretty">
+            <CardTitle className="text-left text-base leading-snug">Clear index</CardTitle>
+            <CardDescription className="text-left">
+              Drops embeddings in the local index ({liveIndexedCount ?? "—"} files). Files on disk are unchanged.
+            </CardDescription>
             {clearIndexError ? (
-              <div className="mt-2 text-sm font-medium text-rose-700">Error: {clearIndexError}</div>
+              <p className="text-left text-sm font-medium text-destructive">{clearIndexError}</p>
             ) : null}
           </div>
-
-          <AlertDialog open={confirmClearOpen} onOpenChange={setConfirmClearOpen}>
-            <AlertDialogTrigger asChild>
-              <Button
-                variant="destructive"
-                disabled={clearingIndex || liveIndexedCount === 0}
-              >
-                <Trash2 className="h-4 w-4" aria-hidden="true" />
-                {clearingIndex && <Spinner className="h-4 w-4" aria-hidden="true" /> }
-              </Button>
-            </AlertDialogTrigger>
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle className="text-black">Delete all {liveIndexedCount} vectors?</AlertDialogTitle>
-                <AlertDialogDescription>
-                  Clears all indexed vectors for this profile. Files are not deleted.
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel
-                  disabled={clearingIndex}
-                  className="h-auto min-h-9 px-3 py-2"
-                  aria-label="Cancel deletion"
-                  title="Cancel"
-                >
-                  Cancel
-                </AlertDialogCancel>
-                <AlertDialogAction
-                  variant="destructive"
-                  disabled={clearingIndex}
-                  className="h-auto min-h-9 px-3 py-2"
-                  aria-label="Delete vectors"
-                  title="Delete vectors"
-                  onClick={async (e) => {
-                    e.preventDefault();
-                    await deleteAllVectors();
-                  }}
-                >
-                  {clearingIndex ? (
-                    <>
-                      <Spinner className="h-4 w-4" aria-hidden="true" />
-                      Deleting...
-                    </>
-                  ) : (
-                    "Delete"
-                  )}
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
-        </div>
-      </div>
+          <div className="flex shrink-0 items-start sm:pt-0.5">
+            <AlertDialog open={confirmClearOpen} onOpenChange={setConfirmClearOpen}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="inline-flex shrink-0">
+                    <AlertDialogTrigger asChild>
+                      <Button
+                        variant="destructive"
+                        size="default"
+                        className="h-9 min-w-9 px-3"
+                        disabled={clearingIndex || liveIndexedCount === 0}
+                        aria-label="Delete all vectors"
+                      >
+                        {clearingIndex ? (
+                          <Spinner className="h-4 w-4 shrink-0" aria-hidden="true" />
+                        ) : (
+                          <Trash2 className="h-4 w-4 shrink-0" aria-hidden="true" />
+                        )}
+                      </Button>
+                    </AlertDialogTrigger>
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent side="top">Delete all vectors</TooltipContent>
+              </Tooltip>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle className="text-black">
+                    Delete all {liveIndexedCount} vectors?
+                  </AlertDialogTitle>
+                  <AlertDialogDescription>
+                    Clears all indexed vectors for this profile. Files are not deleted.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel
+                    disabled={clearingIndex}
+                    className="h-auto min-h-9 px-3 py-2"
+                    aria-label="Cancel deletion"
+                  >
+                    Cancel
+                  </AlertDialogCancel>
+                  <AlertDialogAction
+                    variant="destructive"
+                    disabled={clearingIndex}
+                    className="h-auto min-h-9 px-3 py-2"
+                    aria-label="Delete vectors"
+                    onClick={async (e) => {
+                      e.preventDefault();
+                      await deleteAllVectors();
+                    }}
+                  >
+                    {clearingIndex ? (
+                      <>
+                        <Spinner className="h-4 w-4" aria-hidden="true" />
+                        Deleting...
+                      </>
+                    ) : (
+                      "Delete"
+                    )}
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          </div>
+        </CardContent>
+      </Card>
 
       <AlertDialog
         open={confirmAddIncludeOpen}
@@ -675,7 +837,6 @@ export function SettingsPage({
               disabled={addIncludeLoading}
               className="h-auto min-h-9 px-3 py-2"
               aria-label="Cancel adding include folder"
-              title="Cancel"
             >
               Cancel
             </AlertDialogCancel>
@@ -683,7 +844,6 @@ export function SettingsPage({
               disabled={addIncludeLoading || includeToAdd === null}
               className="h-auto min-h-9 px-3 py-2"
               aria-label="Confirm add include folder"
-              title="Confirm add include folder"
               onClick={(e) => {
                 e.preventDefault();
                 confirmAddIncludeFolder();
@@ -731,7 +891,6 @@ export function SettingsPage({
               disabled={removeIncludeLoading}
               className="h-auto min-h-9 px-3 py-2"
               aria-label="Cancel removal"
-              title="Cancel"
             >
               Cancel
             </AlertDialogCancel>
@@ -740,7 +899,6 @@ export function SettingsPage({
               disabled={removeIncludeLoading || includeToRemove === null}
               className="h-auto min-h-9 px-3 py-2"
               aria-label="Remove folder and vectors"
-              title="Remove folder and vectors"
               onClick={async (e) => {
                 e.preventDefault();
                 await removeIncludeFolderAndVectors();

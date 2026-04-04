@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
+import { homeDir } from "@tauri-apps/api/path";
 import { openPath } from "@tauri-apps/plugin-opener";
-import { ArrowLeft, ChevronRight } from "lucide-react";
+import { ArrowLeft, ExternalLink } from "lucide-react";
 import { FileSearchResultCard } from "../components/FileSearchResultCard";
+import { TagsPathDropdown } from "../components/TagsPathDropdown";
+import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Skeleton } from "../components/ui/skeleton";
 import { ScrollArea } from "../components/ui/scroll-area";
@@ -17,8 +20,19 @@ import {
   AlertDialogTitle,
 } from "../components/ui/alert-dialog";
 import type { LocalConfig } from "../lib/localConfig";
+import { navigateBackOrFallback } from "../lib/navigateBack";
+import { formatIndexedPathForDisplay } from "../lib/pathDisplay";
 import { isPathSelected } from "../lib/pathSelection";
 import { useThumbnailsForPaths } from "../lib/useThumbnailsForPaths";
+import {
+  loadTagsState,
+  saveTagsState,
+  tagIdsForPath,
+  tagsForPath,
+  togglePathTag,
+  type TagsState,
+} from "../lib/tags";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip";
 
 type SimilarHit = {
   score: number;
@@ -59,7 +73,10 @@ function groupSimilarByContentHash(hits: SimilarHit[]): SimilarGroup[] {
 }
 
 export type FileResultLocationState = {
-  similarTrail?: string[];
+  /** Exploration stack: each similar-file drill appends the path (Back pops one level). */
+  resultStack?: string[];
+  /** Indexed paths with identical content (e.g. from search duplicate picker). */
+  sameContentPaths?: string[];
 };
 
 export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
@@ -79,6 +96,8 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
   const [similarError, setSimilarError] = useState<string | null>(null);
   const [pathChooserOpen, setPathChooserOpen] = useState(false);
   const [selectedSimilarGroup, setSelectedSimilarGroup] = useState<SimilarGroup | null>(null);
+  const [homePath, setHomePath] = useState("");
+  const [tagsState, setTagsState] = useState<TagsState>(() => loadTagsState());
 
   const ext = filePath?.split(".").pop()?.toLowerCase() ?? "";
   const canThumb = ext === "png" || ext === "jpg" || ext === "jpeg" || ext === "pdf";
@@ -89,13 +108,46 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
       return;
     }
     const st = location.state as FileResultLocationState | undefined;
-    const fromState = st?.similarTrail;
+    const fromState = st?.resultStack;
     if (fromState?.length && fromState[fromState.length - 1] === filePath) {
       setTrail(fromState);
       return;
     }
     setTrail([filePath]);
   }, [filePath, location.key]);
+
+  useEffect(() => {
+    setTagsState(loadTagsState());
+  }, [filePath]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const home = await homeDir();
+        if (!cancelled) setHomePath(home);
+      } catch {
+        if (!cancelled) setHomePath("");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const displayPaths = useMemo(() => {
+    if (!filePath) return [];
+    const st = location.state as FileResultLocationState | undefined;
+    const aliases = st?.sameContentPaths;
+    if (aliases?.length) {
+      const merged = new Set<string>(aliases);
+      merged.add(filePath);
+      return Array.from(merged).sort((a, b) => a.localeCompare(b));
+    }
+    return [filePath];
+  }, [filePath, location.key]);
+
+  const headerPathExcludeSet = useMemo(() => new Set(displayPaths), [displayPaths]);
 
   useEffect(() => {
     setThumbDataUrl(null);
@@ -145,7 +197,7 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
         })) as SimilarHit[];
         if (cancelled) return;
         const scoped = hits.filter((h) => isPathSelected(h.file.path, cfg));
-        const filtered = scoped.filter((h) => h.file.path !== filePath);
+        const filtered = scoped.filter((h) => !headerPathExcludeSet.has(h.file.path));
         setSimilar(filtered);
       } catch (e) {
         if (!cancelled) setSimilarError(String(e));
@@ -157,7 +209,15 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
     return () => {
       cancelled = true;
     };
-  }, [filePath, cfg.sourceId, cfg.include, cfg.exclude, cfg.extensions, cfg.useDefaultFolderExcludes]);
+  }, [
+    filePath,
+    cfg.sourceId,
+    cfg.include,
+    cfg.exclude,
+    cfg.extensions,
+    cfg.useDefaultFolderExcludes,
+    headerPathExcludeSet,
+  ]);
 
   const similarGroups = useMemo(() => groupSimilarByContentHash(similar), [similar]);
   const thumbPathList = useMemo(
@@ -167,109 +227,173 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
   const thumbPathsKey = thumbPathList.join("\0");
   const { thumbByPath, thumbFailedByPath } = useThumbnailsForPaths(thumbPathsKey, thumbPathList);
 
+  function goBackFromFileResult() {
+    if (trail.length > 1) {
+      const parent = trail[trail.length - 2]!;
+      navigate(`/file?path=${encodeURIComponent(parent)}`, {
+        replace: true,
+        state: { resultStack: trail.slice(0, -1) },
+      });
+    } else {
+      navigateBackOrFallback(navigate);
+    }
+  }
+
   if (!filePath) {
     return (
       <section className="flex min-h-0 flex-1 flex-col gap-6">
-        <Link
-          to="/"
-          className="app-muted inline-flex w-fit items-center gap-1 text-sm hover:text-black/80"
-        >
-          <ArrowLeft className="size-4" aria-hidden />
-          Back
-        </Link>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="w-fit gap-1 px-2 text-black/60"
+              aria-label="Back"
+              onClick={() => navigateBackOrFallback(navigate)}
+            >
+              <ArrowLeft className="size-4" aria-hidden />
+              Back
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">Back</TooltipContent>
+        </Tooltip>
         <p className="app-muted text-sm">No file selected.</p>
       </section>
     );
   }
 
   return (
-    <section className="flex h-full min-h-0 flex-1 flex-col gap-6">
-      <div className="flex flex-wrap items-baseline gap-x-4 gap-y-2">
-        <Link
-          to="/"
-          className="app-muted inline-flex items-center gap-1 text-sm hover:text-black/80"
-        >
-          <ArrowLeft className="size-4" aria-hidden />
-          Back
-        </Link>
-        <Button
-          type="button"
-          variant="link"
-          size="sm"
-          className="h-auto p-0 text-sm font-normal"
-          onClick={async () => {
-            setOpenError(null);
-            try {
-              await openPath(filePath);
-            } catch (e) {
-              setOpenError(String(e));
-            }
-          }}
-        >
-          Open file
-        </Button>
-      </div>
+    <section className="flex h-full min-h-0 flex-1 flex-col gap-5">
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="w-fit gap-1 px-2 text-black/60"
+              aria-label={trail.length > 1 ? "Back to previous file" : "Back"}
+              onClick={goBackFromFileResult}
+            >
+              <ArrowLeft className="size-4" aria-hidden />
+              Back
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">
+            {trail.length > 1 ? "Back to previous file" : "Back"}
+          </TooltipContent>
+        </Tooltip>
 
-      {openError ? <p className="app-muted text-sm">{openError}</p> : null}
-
-      {trail.length > 1 ? (
-        <nav
-          className="flex flex-wrap items-center gap-x-1 gap-y-1 text-xs text-black/55"
-          aria-label="Similar trail"
-        >
-          {trail.map((p, i) => (
-            <span key={`${p}\u0000${i}`} className="flex min-w-0 max-w-full items-center gap-1">
-              {i > 0 ? <ChevronRight className="size-3 shrink-0 opacity-40" aria-hidden /> : null}
-              <button
-                type="button"
-                className={
-                  p === filePath
-                    ? "min-w-0 max-w-[min(100%,14rem)] truncate text-left font-medium text-black/70"
-                    : "min-w-0 max-w-[min(100%,14rem)] truncate text-left hover:text-black/80 hover:underline"
-                }
-                title={p}
-                onClick={() => {
-                  if (p === filePath) return;
-                  const nextTrail = trail.slice(0, i + 1);
-                  navigate(`/file?path=${encodeURIComponent(p)}`, {
-                    state: { similarTrail: nextTrail },
-                  });
-                }}
-              >
-                {p.split("/").pop() ?? p}
-              </button>
-            </span>
-          ))}
-        </nav>
-      ) : null}
-
-      <p
-        className="break-all font-mono text-sm leading-relaxed text-black/80"
-        title={filePath}
-      >
-        {filePath}
-      </p>
-
-      <div className="flex min-h-[5rem] w-full max-w-[7rem] items-center justify-center">
-        {canThumb ? (
-          thumbDataUrl ? (
-            <img
-              src={thumbDataUrl}
-              alt=""
-              className="max-h-20 max-w-full rounded-md object-contain"
-            />
-          ) : thumbLoading ? (
-            <Skeleton className="h-16 w-28 rounded-md" />
+      <div className="flex flex-row gap-4 sm:gap-5">
+        <div className="flex h-24 w-28 shrink-0 items-center justify-center rounded-lg border border-black/10 bg-white/60 shadow-xs">
+          {canThumb ? (
+            thumbDataUrl ? (
+              <img
+                src={thumbDataUrl}
+                alt=""
+                className="max-h-[5.25rem] max-w-full rounded-md object-contain"
+              />
+            ) : thumbLoading ? (
+              <Skeleton className="h-16 w-24 rounded-md" />
+            ) : (
+              <span className="text-[10px] font-semibold uppercase tracking-wide text-black/45">
+                {fileTypeLabel(filePath)}
+              </span>
+            )
           ) : (
-            <span className="text-[10px] font-semibold uppercase tracking-wide text-black/50">
+            <span className="text-[10px] font-semibold uppercase tracking-wide text-black/45">
               {fileTypeLabel(filePath)}
             </span>
-          )
-        ) : (
-          <span className="text-[10px] font-semibold uppercase tracking-wide text-black/50">
-            {fileTypeLabel(filePath)}
-          </span>
-        )}
+          )}
+        </div>
+
+        <div className="flex min-w-0 flex-1 flex-col items-start gap-2 pt-0.5">
+          {displayPaths.map((p) => (
+            <div key={p} className="flex max-w-full items-center gap-2 text-sm">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <div className="min-w-0 w-fit max-w-full cursor-default truncate rounded-md bg-black/5 px-2 py-1 font-mono text-[12px] text-black/70 sm:max-w-lg">
+                    {formatIndexedPathForDisplay(p, homePath, cfg.include)}
+                  </div>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" className="max-w-md break-all font-mono text-xs">
+                  {p}
+                </TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    className="shrink-0 text-black/60 hover:text-black"
+                    aria-label={`Open ${p}`}
+                    onClick={async () => {
+                      setOpenError(null);
+                      try {
+                        await openPath(p);
+                      } catch (e) {
+                        setOpenError(String(e));
+                      }
+                    }}
+                  >
+                    <ExternalLink className="h-4 w-4" aria-hidden />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">Open in default app</TooltipContent>
+              </Tooltip>
+            </div>
+          ))}
+          {openError ? <p className="text-xs text-rose-700">{openError}</p> : null}
+
+          <div className="mt-3 flex flex-col gap-2">
+            <div className="text-xs font-medium uppercase tracking-wide text-black/45">Tags</div>
+            {tagsState.tags.length === 0 ? (
+              <p className="text-xs text-black/45">Create tags in Settings, then toggle them here.</p>
+            ) : (
+              <div className="flex flex-wrap gap-1.5">
+                {tagsState.tags.map((t) => {
+                  const active = tagIdsForPath(tagsState, filePath).includes(t.id);
+                  return (
+                    <Tooltip key={t.id}>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setTagsState((prev) => {
+                              const next = togglePathTag(prev, filePath, t.id);
+                              saveTagsState(next);
+                              return next;
+                            });
+                          }}
+                        >
+                          <Badge
+                            variant={active ? "secondary" : "outline"}
+                            className="border font-normal"
+                            style={
+                              active
+                                ? {
+                                    backgroundColor: `${t.color}24`,
+                                    borderColor: t.color,
+                                    color: "inherit",
+                                  }
+                                : undefined
+                            }
+                          >
+                            {t.name}
+                          </Badge>
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom">
+                        {active ? `Remove “${t.name}”` : `Add “${t.name}”`}
+                      </TooltipContent>
+                    </Tooltip>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col">
@@ -309,9 +433,15 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
                         return;
                       }
                       navigate(`/file?path=${encodeURIComponent(p)}`, {
-                        state: { similarTrail: [...trail, p] },
+                        state: { resultStack: [...trail, p] },
                       });
                     }}
+                    tagDots={tagsForPath(tagsState, p)}
+                    tagMenuSlot={
+                      tagsState.tags.length > 0 ? (
+                        <TagsPathDropdown path={p} tagsState={tagsState} setTagsState={setTagsState} />
+                      ) : null
+                    }
                   />
                 );
               })}
@@ -336,23 +466,32 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
           </AlertDialogHeader>
           <div className="max-h-64 space-y-2 overflow-y-auto">
             {(selectedSimilarGroup?.variants ?? []).map((variant) => (
-              <Button
-                key={variant.file.path}
-                type="button"
-                variant="outline"
-                className="w-full justify-start truncate"
-                onClick={() => {
-                  const p = variant.file.path;
-                  navigate(`/file?path=${encodeURIComponent(p)}`, {
-                    state: { similarTrail: [...trail, p] },
-                  });
-                  setPathChooserOpen(false);
-                  setSelectedSimilarGroup(null);
-                }}
-                title={variant.file.path}
-              >
-                {variant.file.path}
-              </Button>
+              <Tooltip key={variant.file.path}>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="w-full justify-start truncate"
+                    onClick={() => {
+                      const p = variant.file.path;
+                      const variants = selectedSimilarGroup?.variants ?? [];
+                      navigate(`/file?path=${encodeURIComponent(p)}`, {
+                        state: {
+                          resultStack: [...trail, p],
+                          sameContentPaths: variants.map((v) => v.file.path),
+                        },
+                      });
+                      setPathChooserOpen(false);
+                      setSelectedSimilarGroup(null);
+                    }}
+                  >
+                    {formatIndexedPathForDisplay(variant.file.path, homePath, cfg.include)}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" className="max-w-md break-all font-mono text-xs">
+                  {variant.file.path}
+                </TooltipContent>
+              </Tooltip>
             ))}
           </div>
           <AlertDialogFooter>

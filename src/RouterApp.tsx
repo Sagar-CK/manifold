@@ -1,14 +1,16 @@
 import "./App.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Route, Routes } from "react-router-dom";
+import { Route, Routes, useLocation } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 import { loadConfig, type LocalConfig, type SupportedExt } from "./lib/localConfig";
 import { EnvIssuesBanner } from "./components/EnvIssuesBanner";
 import { FileResultPage } from "./pages/FileResultPage";
+import { GraphExplorerPage } from "./pages/GraphExplorerPage";
 import { SearchPage } from "./pages/SearchPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { cn } from "./lib/utils";
 
 type EmbeddingJobPhase =
   | "idle"
@@ -32,6 +34,8 @@ type EmbeddingFileFailure = {
 };
 
 export default function RouterApp() {
+  const { pathname } = useLocation();
+  const graphLayout = pathname === "/graph";
   const [cfg, setCfg] = useState<LocalConfig>(() => loadConfig());
   const [embeddingPhase, setEmbeddingPhase] = useState<EmbeddingJobPhase>("idle");
   const [envIssues, setEnvIssues] = useState<string[]>([]);
@@ -183,8 +187,14 @@ export default function RouterApp() {
 
   return (
     <main className="h-screen w-full overflow-hidden bg-[#f6f7fb] text-black">
-      <div className="mx-auto flex h-full max-w-5xl flex-col px-6 py-8">
+      <div
+        className={cn(
+          "mx-auto flex h-full min-h-0 flex-col px-6 py-8",
+          graphLayout ? "max-w-[min(100%,1400px)]" : "max-w-5xl",
+        )}
+      >
         <EnvIssuesBanner issues={envIssues} />
+        <div className="flex min-h-0 flex-1 flex-col">
         <Routes>
           <Route
             path="/"
@@ -201,6 +211,7 @@ export default function RouterApp() {
             }
           />
           <Route path="/file" element={<FileResultPage cfg={cfg} />} />
+          <Route path="/graph" element={<GraphExplorerPage cfg={cfg} />} />
           <Route
             path="/settings"
             element={
@@ -221,6 +232,7 @@ export default function RouterApp() {
             }
           />
         </Routes>
+        </div>
       </div>
     </main>
   );

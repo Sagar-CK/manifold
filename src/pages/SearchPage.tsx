@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
-import { ListFilter, Settings } from "lucide-react";
+import { ChartScatter, ListFilter, Settings } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { Spinner } from "../components/ui/spinner";
 import { ScrollArea } from "../components/ui/scroll-area";
@@ -29,9 +29,13 @@ import {
 } from "../components/ui/alert-dialog";
 import type { LocalConfig } from "../lib/localConfig";
 import { isPathSelected } from "../lib/pathSelection";
+import { loadTagsState, tagsForPath, type TagsState } from "../lib/tags";
 import { EmbeddingStatusPanel } from "../components/EmbeddingStatusPanel";
 import { PageHeader } from "../components/PageHeader";
 import { FileSearchResultCard } from "../components/FileSearchResultCard";
+import { TagsPathDropdown } from "../components/TagsPathDropdown";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip";
+import type { FileResultLocationState } from "./FileResultPage";
 
 function formatSimilarityScore(score: number) {
   if (score >= 0 && score <= 1) return `${(score * 100).toFixed(1)}%`;
@@ -124,6 +128,8 @@ export function SearchPage({
   const thumbCacheRef = useRef<Record<string, string>>({});
   const thumbFailedRef = useRef<Record<string, true>>({});
   const fullTextCacheRef = useRef<Record<string, string>>({});
+  const [tagsState, setTagsState] = useState<TagsState>(() => loadTagsState());
+
   const liveIndexedCount =
     embedding || hasPendingEmbeds
       ? Math.max(embeddedCount ?? 0, embedProgress.processed)
@@ -404,14 +410,32 @@ export function SearchPage({
   return (
     <section className="flex h-full min-h-0 flex-col">
       <div className="relative flex flex-col items-center justify-center text-center gap-2 mb-6">
-        <Link
-          to="/settings"
-          className="absolute right-0 top-0 inline-flex h-9 w-9 items-center justify-center rounded-md text-black/70 hover:bg-black/5 hover:text-black"
-          aria-label="Open settings"
-          title="Settings"
-        >
-          <Settings className="h-5 w-5" aria-hidden="true" />
-        </Link>
+        <div className="absolute right-0 top-0 flex items-center gap-0.5">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Link
+                to="/graph"
+                className="inline-flex h-9 w-9 items-center justify-center rounded-md text-black/70 hover:bg-black/5 hover:text-black"
+                aria-label="Open graph explorer"
+              >
+                <ChartScatter className="h-5 w-5" aria-hidden="true" />
+              </Link>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">Graph explorer</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Link
+                to="/settings"
+                className="inline-flex h-9 w-9 items-center justify-center rounded-md text-black/70 hover:bg-black/5 hover:text-black"
+                aria-label="Open settings"
+              >
+                <Settings className="h-5 w-5" aria-hidden="true" />
+              </Link>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">Settings</TooltipContent>
+          </Tooltip>
+        </div>
 
         <PageHeader heading="manifold" subtitle="native indexed file search" />
       </div>
@@ -427,15 +451,22 @@ export function SearchPage({
           />
           <InputGroupAddon align="inline-end">
             <DropdownMenu open={searchTypeMenuOpen} onOpenChange={setSearchTypeMenuOpen}>
-              <DropdownMenuTrigger asChild>
-                <InputGroupButton
-                  variant={hasMatchTypeEnabled ? "ghost" : "secondary"}
-                  size="icon-xs"
-                  aria-label="Filter search types"
-                >
-                  <ListFilter className="size-3.5" />
-                </InputGroupButton>
-              </DropdownMenuTrigger>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="inline-flex">
+                    <DropdownMenuTrigger asChild>
+                      <InputGroupButton
+                        variant={hasMatchTypeEnabled ? "ghost" : "secondary"}
+                        size="icon-xs"
+                        aria-label="Filter search types"
+                      >
+                        <ListFilter className="size-3.5" />
+                      </InputGroupButton>
+                    </DropdownMenuTrigger>
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">Filter search types</TooltipContent>
+              </Tooltip>
               <DropdownMenuContent align="end" onPointerLeave={() => setSearchTypeMenuOpen(false)}>
                 <DropdownMenuGroup>
                   <DropdownMenuCheckboxItem
@@ -558,7 +589,16 @@ export function SearchPage({
                           : `Similarity ${formatSimilarityScore(r.score)}`
                         : null
                     }
-                    title={r.file.path}
+                    tagDots={tagsForPath(tagsState, r.file.path)}
+                    tagMenuSlot={
+                      tagsState.tags.length > 0 ? (
+                        <TagsPathDropdown
+                          path={r.file.path}
+                          tagsState={tagsState}
+                          setTagsState={setTagsState}
+                        />
+                      ) : null
+                    }
                   />
                 );
               })}
@@ -583,20 +623,30 @@ export function SearchPage({
           </AlertDialogHeader>
           <div className="max-h-64 space-y-2 overflow-y-auto">
             {(selectedGroupForOpen?.variants ?? []).map((variant) => (
-              <Button
-                key={variant.file.path}
-                type="button"
-                variant="outline"
-                className="w-full justify-start truncate"
-                onClick={() => {
-                  navigate(`/file?path=${encodeURIComponent(variant.file.path)}`);
-                  setPathChooserOpen(false);
-                  setSelectedGroupForOpen(null);
-                }}
-                title={variant.file.path}
-              >
-                {variant.file.path}
-              </Button>
+              <Tooltip key={variant.file.path}>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="w-full justify-start truncate"
+                    onClick={() => {
+                      const variants = selectedGroupForOpen?.variants ?? [];
+                      navigate(`/file?path=${encodeURIComponent(variant.file.path)}`, {
+                        state: {
+                          sameContentPaths: variants.map((v) => v.file.path),
+                        } satisfies FileResultLocationState,
+                      });
+                      setPathChooserOpen(false);
+                      setSelectedGroupForOpen(null);
+                    }}
+                  >
+                    {variant.file.path}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" className="max-w-md break-all font-mono text-xs">
+                  {variant.file.path}
+                </TooltipContent>
+              </Tooltip>
             ))}
           </div>
           <AlertDialogFooter>

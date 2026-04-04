@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, Pause, Play, X } from "lucide-react";
 import { Button } from "./ui/button";
 import { Progress } from "./ui/progress";
+import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
 type EmbeddingPhase =
   | "idle"
@@ -122,38 +123,50 @@ export function EmbeddingProgressBar({
         {showControls && embedding ? (
           <div className="flex items-center gap-1">
             {embeddingPhase === "paused" ? (
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                disabled={controlsDisabled || !onResume}
-                aria-label="Resume indexing"
-                title="Resume"
-                onClick={() => void onResume?.()}
-              >
-                <Play className="h-4 w-4" aria-hidden="true" />
-              </Button>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    disabled={controlsDisabled || !onResume}
+                    aria-label="Resume indexing"
+                    onClick={() => void onResume?.()}
+                  >
+                    <Play className="h-4 w-4" aria-hidden="true" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="top">Resume</TooltipContent>
+              </Tooltip>
             ) : (
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                disabled={controlsDisabled || !onPause || embeddingPhase === "cancelling"}
-                aria-label="Pause indexing"
-                title="Pause"
-                onClick={() => void onPause?.()}
-              >
-                <Pause className="h-4 w-4" aria-hidden="true" />
-              </Button>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    disabled={controlsDisabled || !onPause || embeddingPhase === "cancelling"}
+                    aria-label="Pause indexing"
+                    onClick={() => void onPause?.()}
+                  >
+                    <Pause className="h-4 w-4" aria-hidden="true" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="top">Pause</TooltipContent>
+              </Tooltip>
             )}
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              disabled={controlsDisabled || !onCancel || embeddingPhase === "cancelling"}
-              aria-label="Cancel indexing"
-              title="Cancel"
-              onClick={() => void onCancel?.()}
-            >
-              <X className="h-4 w-4" aria-hidden="true" />
-            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  disabled={controlsDisabled || !onCancel || embeddingPhase === "cancelling"}
+                  aria-label="Cancel indexing"
+                  onClick={() => void onCancel?.()}
+                >
+                  <X className="h-4 w-4" aria-hidden="true" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="top">Cancel</TooltipContent>
+            </Tooltip>
           </div>
         ) : null}
       </div>

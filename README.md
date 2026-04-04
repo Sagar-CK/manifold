@@ -26,7 +26,7 @@ Collections: `manifold_files_content_v2`, `manifold_files_metadata_v2` (see `src
 - `MANIFOLD_QDRANT_GRPC_URL` — override gRPC if needed  
 - `MANIFOLD_QDRANT_API_KEY` — secured/remote Qdrant  
 - `MANIFOLD_LOG` — e.g. `info`  
-- `MANIFOLD_QDRANT_URL` — external Qdrant; if unset in packaged builds, bundled Qdrant starts  
+- `MANIFOLD_QDRANT_URL` — external Qdrant; if unset in packaged builds, bundled Qdrant starts
 
 ## Release build
 
@@ -40,20 +40,23 @@ Output: `src-tauri/target/release/bundle/`. CI runs the same binary setup before
 
 ## Layout
 
-| Path | Role |
-|------|------|
-| `src/` | React UI |
-| `src-tauri/src/lib.rs` | Tauri commands |
-| `src-tauri/src/embedding.rs` | Indexing + Gemini |
-| `src-tauri/src/qdrant.rs` | Qdrant client |
-| `src-tauri/src/text_index.rs` | Local text index |
-| `scripts/setup-dev.mjs` | Dev bootstrap |
-| `scripts/setup-binaries.mjs` | Pinned PDFium/Qdrant download |
-| `scripts/binaries-manifest.json` | Versions / URLs |
-| `docker-compose.yml` | Dev Qdrant |
+
+| Path                             | Role                          |
+| -------------------------------- | ----------------------------- |
+| `src/`                           | React UI                      |
+| `src-tauri/src/lib.rs`           | Tauri commands                |
+| `src-tauri/src/embedding.rs`     | Indexing + Gemini             |
+| `src-tauri/src/qdrant.rs`        | Qdrant client                 |
+| `src-tauri/src/text_index.rs`    | Local text index              |
+| `scripts/setup-dev.mjs`          | Dev bootstrap                 |
+| `scripts/setup-binaries.mjs`     | Pinned PDFium/Qdrant download |
+| `scripts/binaries-manifest.json` | Versions / URLs               |
+| `docker-compose.yml`             | Dev Qdrant                    |
+
 
 ## Notes
 
 - Do not commit `.env.local`.
 - Clearing the index removes vectors only, not files on disk.
 - Binary sources and licensing: `docs/runtime-binaries.md`.
+

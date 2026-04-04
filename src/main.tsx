@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { HashRouter } from "react-router-dom";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import RouterApp from "./RouterApp";
 
 function installGlobalErrorHandlers() {
@@ -61,7 +62,9 @@ installGlobalErrorHandlers();
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <HashRouter>
-      <RouterApp />
+      <TooltipProvider delayDuration={300}>
+        <RouterApp />
+      </TooltipProvider>
     </HashRouter>
   </React.StrictMode>,
 );
