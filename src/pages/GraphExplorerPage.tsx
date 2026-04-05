@@ -15,7 +15,6 @@ import { Label } from "@/components/ui/label";
 import { TagFilterPill } from "@/components/TagFilterPill";
 import { ErrorMessage } from "@/components/ErrorMessage";
 import { PageHeader } from "@/components/PageHeader";
-import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { invokeErrorText } from "@/lib/errors";
@@ -40,6 +39,8 @@ type LayoutPoint = ContentPoint & {
 
 const THUMB = 44;
 const MARGIN = 28;
+/** Matches `maxEdge` for graph thumbnails — enough for on-canvas size. */
+const GRAPH_THUMB_MAX_EDGE = 48;
 const DEFAULT_LIMIT = 500;
 /** Debounce limit input so typing does not refetch on every keystroke. */
 const LIMIT_DEBOUNCE_MS = 350;
@@ -52,6 +53,8 @@ const RING_MAX_SEGMENTS = 4;
 const RING_OVERFLOW_COLOR = "#78716c";
 /** Radians of gap between ring segments (readability at small thumbnails). */
 const RING_GAP_RAD = 0.1;
+/** Muted fill while a previewable thumb URL is loading or decoding (no DOM skeletons). */
+const LOADING_FILL = "#e4e4e7";
 
 const ALGORITHM_OPTIONS = [
   { value: "pca" as const, label: "PCA" },
@@ -173,9 +176,11 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
 
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [scale, setScale] = useState(1);
-  /** Re-render skeleton overlay when a canvas Image finishes decoding. */
-  const [, setThumbLoadEpoch] = useState(0);
-  const [viewSize, setViewSize] = useState({ cw: 0, ch: 0 });
+  const panRef = useRef(pan);
+  const scaleRef = useRef(scale);
+  const dragActiveRef = useRef(false);
+  const drawRafRef = useRef<number | null>(null);
+  const wheelScaleRafRef = useRef<number | null>(null);
   const dragRef = useRef<{ active: boolean; sx: number; sy: number; px: number; py: number } | null>(
     null,
   );
@@ -194,9 +199,30 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
     }
     return false;
   }, [points, tagsState]);
-  const { thumbByPath, thumbFailedByPath } = useThumbnailsForPaths(pathsKey, paths);
+  const { thumbByPath, thumbFailedByPath } = useThumbnailsForPaths(pathsKey, paths, {
+    maxEdge: GRAPH_THUMB_MAX_EDGE,
+    batchUpdates: true,
+  });
 
   const imgCacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
+  const drawRef = useRef<() => void>(() => {});
+
+  useEffect(() => {
+    if (!dragActiveRef.current) {
+      panRef.current = pan;
+    }
+  }, [pan]);
+
+  useEffect(() => {
+    scaleRef.current = scale;
+  }, [scale]);
+
+  useEffect(() => {
+    const set = new Set(paths);
+    for (const k of [...imgCacheRef.current.keys()]) {
+      if (!set.has(k)) imgCacheRef.current.delete(k);
+    }
+  }, [pathsKey, paths]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -214,23 +240,34 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
     const innerH = ch - 2 * MARGIN;
     const cx = cw / 2;
     const cy = ch / 2;
+    const panX = panRef.current.x;
+    const panY = panRef.current.y;
+    const sc = scaleRef.current;
+
+    const cullPad = THUMB / 2 + 10;
 
     ctx.save();
-    ctx.translate(cx + pan.x, cy + pan.y);
-    ctx.scale(scale, scale);
+    ctx.translate(cx + panX, cy + panY);
+    ctx.scale(sc, sc);
     ctx.translate(-cx, -cy);
 
-    const radius = THUMB / 2 / scale;
-    const size = THUMB / scale;
-    const labelPx = 10 / scale;
-    const tagRingExtra = 3 / scale;
+    const radius = THUMB / 2 / sc;
+    const size = THUMB / sc;
+    const labelPx = 10 / sc;
+    const tagRingExtra = 3 / sc;
     for (const pt of points) {
       const px = MARGIN + pt.nx * innerW;
       const py = MARGIN + pt.ny * innerH;
+      const tsx = (px - cx) * sc + cx + panX;
+      const tsy = (py - cy) * sc + cy + panY;
+      if (tsx < -cullPad || tsx > cw + cullPad || tsy < -cullPad || tsy > ch + cullPad) {
+        continue;
+      }
+
       const isSel = pt.path === selectedPath;
       const img = imgCacheRef.current.get(pt.path);
       const ringColors = tagRingColorsOrdered(pt.tagIds, tagsState);
-      strokeSegmentedTagRing(ctx, px, py, radius + tagRingExtra, scale, ringColors);
+      strokeSegmentedTagRing(ctx, px, py, radius + tagRingExtra, sc, ringColors);
 
       ctx.save();
       ctx.beginPath();
@@ -248,24 +285,54 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.fillText(ext || "·", px, py);
+      } else {
+        ctx.fillStyle = LOADING_FILL;
+        ctx.fillRect(px - radius, py - radius, size, size);
+        ctx.fillStyle = "#a1a1aa";
+        ctx.font = `${labelPx}px system-ui, sans-serif`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("…", px, py);
       }
-      /* else: previewable, thumbnail still loading — leave clip transparent; Skeleton shows below canvas */
       ctx.restore();
       if (isSel) {
         ctx.strokeStyle = "rgba(239, 68, 68, 0.85)";
-        ctx.lineWidth = 3 / scale;
+        ctx.lineWidth = 3 / sc;
         ctx.beginPath();
-        ctx.arc(px, py, radius + tagRingExtra + 2 / scale, 0, Math.PI * 2);
+        ctx.arc(px, py, radius + tagRingExtra + 2 / sc, 0, Math.PI * 2);
         ctx.stroke();
       }
     }
 
     ctx.restore();
-  }, [points, pan, scale, selectedPath, thumbByPath, thumbFailedByPath, tagsState]);
+  }, [points, selectedPath, thumbFailedByPath, tagsState]);
+
+  drawRef.current = draw;
+
+  const scheduleDraw = useCallback(() => {
+    if (drawRafRef.current != null) return;
+    drawRafRef.current = requestAnimationFrame(() => {
+      drawRafRef.current = null;
+      drawRef.current();
+    });
+  }, []);
 
   useEffect(() => {
     draw();
   }, [draw]);
+
+  useEffect(() => {
+    return () => {
+      if (drawRafRef.current != null) {
+        cancelAnimationFrame(drawRafRef.current);
+        drawRafRef.current = null;
+      }
+      if (wheelScaleRafRef.current != null) {
+        cancelAnimationFrame(wheelScaleRafRef.current);
+        wheelScaleRafRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const cache = imgCacheRef.current;
@@ -278,34 +345,32 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
       img.onload = () => {
         if (cancelled) return;
         cache.set(p, img);
-        setThumbLoadEpoch((n) => n + 1);
-        draw();
+        drawRef.current();
       };
     }
     return () => {
       cancelled = true;
     };
-  }, [pathsKey, thumbByPath, draw, paths]);
+  }, [pathsKey, thumbByPath, paths]);
 
   useEffect(() => {
     const ro = new ResizeObserver(() => {
       const canvas = canvasRef.current;
       const wrap = wrapRef.current;
       if (!canvas || !wrap) return;
-      const r = wrap.getBoundingClientRect();
-      setViewSize({ cw: r.width, ch: r.height });
+      const rr = wrap.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
-      canvas.width = Math.floor(r.width * dpr);
-      canvas.height = Math.floor(r.height * dpr);
-      canvas.style.width = `${r.width}px`;
-      canvas.style.height = `${r.height}px`;
+      canvas.width = Math.floor(rr.width * dpr);
+      canvas.height = Math.floor(rr.height * dpr);
+      canvas.style.width = `${rr.width}px`;
+      canvas.style.height = `${rr.height}px`;
       const ctx = canvas.getContext("2d");
       if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      draw();
+      drawRef.current();
     });
     if (wrapRef.current) ro.observe(wrapRef.current);
     return () => ro.disconnect();
-  }, [draw]);
+  }, []);
 
   const selectedAlgorithmOption: AlgorithmOption | null =
     ALGORITHM_OPTIONS.find((o) => o.value === algorithm) ?? ALGORITHM_OPTIONS[0];
@@ -351,8 +416,11 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
           ny: ny[i] ?? 0,
         }));
         setPoints(next);
+        dragActiveRef.current = false;
         setPan({ x: 0, y: 0 });
         setScale(1);
+        panRef.current = { x: 0, y: 0 };
+        scaleRef.current = 1;
       } catch (e) {
         setError(invokeErrorText(e));
       } finally {
@@ -384,13 +452,16 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
     const innerH = ch - 2 * MARGIN;
     const cx = cw / 2;
     const cy = ch / 2;
+    const panX = panRef.current.x;
+    const panY = panRef.current.y;
+    const sc = scaleRef.current;
 
     for (let i = points.length - 1; i >= 0; i--) {
       const pt = points[i];
       const px = MARGIN + pt.nx * innerW;
       const py = MARGIN + pt.ny * innerH;
-      const tsx = (px - cx) * scale + cx + pan.x;
-      const tsy = (py - cy) * scale + cy + pan.y;
+      const tsx = (px - cx) * sc + cx + panX;
+      const tsy = (py - cy) * sc + cy + panY;
       const dx = sx - tsx;
       const dy = sy - tsy;
       if (dx * dx + dy * dy <= (THUMB / 2 + 4) * (THUMB / 2 + 4)) {
@@ -398,6 +469,12 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
       }
     }
     return null;
+  }
+
+  function endPanDrag() {
+    dragActiveRef.current = false;
+    dragRef.current = null;
+    setPan({ ...panRef.current });
   }
 
   const limitParsed = parseLimitInput(limitInput);
@@ -553,35 +630,6 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
             </p>
           </div>
         ) : null}
-        {viewSize.cw > 0 && viewSize.ch > 0 && !loading && !layoutBusy && !noResults ? (
-          <div className="pointer-events-none absolute inset-0 z-[1]" aria-hidden="true">
-            {points.map((pt) => {
-              if (!isPreviewablePath(pt.path) || thumbFailedByPath[pt.path]) return null;
-              const img = imgCacheRef.current.get(pt.path);
-              if (img?.complete && img.naturalWidth > 0) return null;
-              const innerW = viewSize.cw - 2 * MARGIN;
-              const innerH = viewSize.ch - 2 * MARGIN;
-              const cx = viewSize.cw / 2;
-              const cy = viewSize.ch / 2;
-              const px = MARGIN + pt.nx * innerW;
-              const py = MARGIN + pt.ny * innerH;
-              const tsx = (px - cx) * scale + cx + pan.x;
-              const tsy = (py - cy) * scale + cy + pan.y;
-              return (
-                <Skeleton
-                  key={pt.path}
-                  className="absolute rounded-full"
-                  style={{
-                    left: tsx - THUMB / 2,
-                    top: tsy - THUMB / 2,
-                    width: THUMB,
-                    height: THUMB,
-                  }}
-                />
-              );
-            })}
-          </div>
-        ) : null}
         <canvas
           ref={canvasRef}
           className="relative z-[2] h-full w-full cursor-grab active:cursor-grabbing"
@@ -589,32 +637,50 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
           aria-label="Embedding graph"
           onPointerDown={(e) => {
             (e.target as HTMLCanvasElement).setPointerCapture(e.pointerId);
-            dragRef.current = { active: true, sx: e.clientX, sy: e.clientY, px: pan.x, py: pan.y };
+            dragActiveRef.current = true;
+            dragRef.current = {
+              active: true,
+              sx: e.clientX,
+              sy: e.clientY,
+              px: panRef.current.x,
+              py: panRef.current.y,
+            };
           }}
           onPointerMove={(e) => {
             const d = dragRef.current;
             if (!d?.active) return;
-            setPan({
+            panRef.current = {
               x: d.px + (e.clientX - d.sx),
               y: d.py + (e.clientY - d.sy),
-            });
+            };
+            scheduleDraw();
           }}
           onPointerUp={(e) => {
-            dragRef.current = null;
             (e.target as HTMLCanvasElement).releasePointerCapture(e.pointerId);
+            endPanDrag();
           }}
           onPointerLeave={(e) => {
-            dragRef.current = null;
             try {
               (e.target as HTMLCanvasElement).releasePointerCapture(e.pointerId);
             } catch {
               /* noop */
             }
+            if (dragRef.current?.active) {
+              endPanDrag();
+            }
           }}
           onWheel={(e) => {
             e.preventDefault();
             const delta = e.deltaY > 0 ? 0.92 : 1.08;
-            setScale((s) => Math.min(4, Math.max(0.25, s * delta)));
+            const ns = Math.min(4, Math.max(0.25, scaleRef.current * delta));
+            scaleRef.current = ns;
+            scheduleDraw();
+            if (wheelScaleRafRef.current == null) {
+              wheelScaleRafRef.current = requestAnimationFrame(() => {
+                wheelScaleRafRef.current = null;
+                setScale(scaleRef.current);
+              });
+            }
           }}
           onClick={(e) => {
             const path = hitTest(e.clientX, e.clientY);
