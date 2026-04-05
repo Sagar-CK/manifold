@@ -14,7 +14,7 @@ use qdrant_client::Qdrant;
 use qdrant_client::qdrant::{
     Condition, CreateCollectionBuilder, Distance, Filter, PointStruct, ScrollPointsBuilder,
     SearchPointsBuilder, UpsertPointsBuilder, VectorParamsBuilder, DeletePointsBuilder,
-    CountPointsBuilder, PointId
+    CountPointsBuilder, PointId, PointsIdsList, SetPayloadPointsBuilder,
 };
 use qdrant_client::Payload;
 use qdrant_client::qdrant::Value;
@@ -462,12 +462,27 @@ async fn instance(app: &AppHandle, state: &QdrantState) -> Result<Qdrant, String
     Ok(inst.client.clone())
 }
 
+fn tag_ids_payload_value(tag_ids: &[String]) -> Value {
+    use qdrant_client::qdrant::value::Kind;
+    use qdrant_client::qdrant::ListValue;
+    let values: Vec<Value> = tag_ids
+        .iter()
+        .map(|s| Value {
+            kind: Some(Kind::StringValue(s.clone())),
+        })
+        .collect();
+    Value {
+        kind: Some(Kind::ListValue(ListValue { values })),
+    }
+}
+
 fn file_payload(
     source_id: &str,
     path: &str,
     content_hash: &str,
     size_bytes: u64,
     mtime_ms: i64,
+    tag_ids: &[String],
 ) -> Payload {
     use qdrant_client::qdrant::value::Kind;
     use qdrant_client::qdrant::Value;
@@ -501,7 +516,49 @@ fn file_payload(
             kind: Some(Kind::IntegerValue(mtime_ms)),
         },
     );
+    payload.insert("tagIds", tag_ids_payload_value(tag_ids));
     payload
+}
+
+fn payload_tag_ids_field(payload: &std::collections::HashMap<String, Value>) -> Vec<String> {
+    use qdrant_client::qdrant::value::Kind;
+    let Some(v) = payload.get("tagIds") else {
+        return Vec::new();
+    };
+    match &v.kind {
+        Some(Kind::ListValue(l)) => l
+            .values
+            .iter()
+            .filter_map(|x| match &x.kind {
+                Some(Kind::StringValue(s)) => Some(s.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+async fn existing_tag_ids_from_collection(
+    client: &Qdrant,
+    collection: &str,
+    id: &PointId,
+) -> Vec<String> {
+    use qdrant_client::qdrant::GetPointsBuilder;
+    let Ok(res) = client
+        .get_points(
+            GetPointsBuilder::new(collection, vec![id.clone()])
+                .with_payload(true)
+                .with_vectors(false),
+        )
+        .await
+    else {
+        return Vec::new();
+    };
+    res.result
+        .into_iter()
+        .next()
+        .map(|p| payload_tag_ids_field(&p.payload))
+        .unwrap_or_default()
 }
 
 /// Indexed state for one path from the content collection (scroll, no vectors).
@@ -714,12 +771,17 @@ pub async fn upsert_embedding(app: &AppHandle, state: &QdrantState, args: Upsert
 
     let client = instance(app, state).await?;
     let id = point_id(&args.source_id, &args.path);
+    let mut tag_ids = existing_tag_ids_from_collection(&client, CONTENT_COLLECTION_NAME, &id).await;
+    if tag_ids.is_empty() {
+        tag_ids = existing_tag_ids_from_collection(&client, METADATA_COLLECTION_NAME, &id).await;
+    }
     let payload = file_payload(
         &args.source_id,
         &args.path,
         &args.content_hash,
         args.size_bytes,
         args.mtime_ms,
+        &tag_ids,
     );
 
     let point = PointStruct::new(id, args.embedding, payload);
@@ -747,12 +809,17 @@ pub async fn upsert_metadata_embedding(
     
     let client = instance(app, state).await?;
     let id = point_id(&args.source_id, &args.path);
+    let mut tag_ids = existing_tag_ids_from_collection(&client, METADATA_COLLECTION_NAME, &id).await;
+    if tag_ids.is_empty() {
+        tag_ids = existing_tag_ids_from_collection(&client, CONTENT_COLLECTION_NAME, &id).await;
+    }
     let payload = file_payload(
         &args.source_id,
         &args.path,
         &args.content_hash,
         args.size_bytes,
         args.mtime_ms,
+        &tag_ids,
     );
 
     let point = PointStruct::new(id, args.metadata_embedding, payload);
@@ -928,6 +995,87 @@ pub async fn count_points(app: &AppHandle, state: &QdrantState, args: CountPoint
     Ok(CountPointsResult { count: res.result.unwrap_or_default().count })
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetPathTagIdsArgs {
+    pub source_id: String,
+    pub path: String,
+    pub tag_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagPathTagIdsEntry {
+    pub path: String,
+    pub tag_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncTagsBackfillArgs {
+    pub source_id: String,
+    pub entries: Vec<TagPathTagIdsEntry>,
+}
+
+fn tag_ids_only_payload(tag_ids: &[String]) -> Payload {
+    let mut p = Payload::new();
+    p.insert("tagIds", tag_ids_payload_value(tag_ids));
+    p
+}
+
+pub async fn set_path_tag_ids(app: &AppHandle, state: &QdrantState, args: SetPathTagIdsArgs) -> Result<(), String> {
+    use qdrant_client::qdrant::GetPointsBuilder;
+
+    let client = instance(app, state).await?;
+    let id = point_id(&args.source_id, &args.path);
+    let payload = tag_ids_only_payload(&args.tag_ids);
+
+    for collection in [CONTENT_COLLECTION_NAME, METADATA_COLLECTION_NAME] {
+        let exists = client
+            .get_points(
+                GetPointsBuilder::new(collection, vec![id.clone()])
+                    .with_payload(false)
+                    .with_vectors(false),
+            )
+            .await
+            .map(|r| !r.result.is_empty())
+            .unwrap_or(false);
+        if !exists {
+            continue;
+        }
+        client
+            .set_payload(
+                SetPayloadPointsBuilder::new(collection, payload.clone())
+                    .points_selector(PointsIdsList {
+                        ids: vec![id.clone()],
+                    })
+                    .wait(true),
+            )
+            .await
+            .map_err(|e| format!("qdrant set_payload ({collection}) failed: {e}"))?;
+    }
+
+    Ok(())
+}
+
+pub async fn sync_tags_backfill(app: &AppHandle, state: &QdrantState, args: SyncTagsBackfillArgs) -> Result<u32, String> {
+    let mut n = 0u32;
+    for e in args.entries {
+        set_path_tag_ids(
+            app,
+            state,
+            SetPathTagIdsArgs {
+                source_id: args.source_id.clone(),
+                path: e.path,
+                tag_ids: e.tag_ids,
+            },
+        )
+        .await?;
+        n += 1;
+    }
+    Ok(n)
+}
+
 /// Max points returned for graph visualization (protects memory / IPC).
 const SCROLL_CONTENT_VECTORS_HARD_MAX: u32 = 5000;
 const SCROLL_CONTENT_VECTORS_BATCH: u32 = 256;
@@ -937,6 +1085,12 @@ const SCROLL_CONTENT_VECTORS_BATCH: u32 = 256;
 pub struct ScrollContentVectorsArgs {
     pub source_id: String,
     pub limit: Option<u32>,
+    /// Optional Qdrant filter object (must/should/must_not); merged with `sourceId` and tag filter.
+    #[serde(default)]
+    pub filter: Option<serde_json::Value>,
+    /// If non-empty, only points whose payload `tagIds` contains any of these ids (OR).
+    #[serde(default)]
+    pub tag_filter_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -945,12 +1099,108 @@ pub struct ContentEmbeddingPoint {
     pub path: String,
     pub content_hash: String,
     pub embedding: Vec<f32>,
+    pub tag_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScrollContentVectorsResult {
     pub points: Vec<ContentEmbeddingPoint>,
+}
+
+fn build_graph_scroll_filter(source_id: &str, tag_filter_ids: &[String]) -> Filter {
+    let source = Condition::matches("sourceId", source_id.to_string());
+    if tag_filter_ids.is_empty() {
+        Filter::must([source])
+    } else {
+        let should: Vec<Condition> = tag_filter_ids
+            .iter()
+            .cloned()
+            .map(|id| Condition::matches("tagIds", id))
+            .collect();
+        Filter::must([source, Condition::from(Filter::should(should))])
+    }
+}
+
+fn scroll_user_filter_is_nonempty(f: &serde_json::Value) -> bool {
+    match f {
+        serde_json::Value::Object(o) => !o.is_empty(),
+        serde_json::Value::Array(a) => !a.is_empty(),
+        serde_json::Value::Bool(_) | serde_json::Value::Number(_) | serde_json::Value::String(_) => true,
+        serde_json::Value::Null => false,
+    }
+}
+
+fn merge_scroll_filter_json(
+    source_id: &str,
+    tag_filter_ids: &[String],
+    user_filter: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let mut must = vec![serde_json::json!({
+        "key": "sourceId",
+        "match": { "value": source_id }
+    })];
+    if !tag_filter_ids.is_empty() {
+        let should: Vec<serde_json::Value> = tag_filter_ids
+            .iter()
+            .map(|id| {
+                serde_json::json!({
+                    "key": "tagIds",
+                    "match": { "keyword": id }
+                })
+            })
+            .collect();
+        must.push(serde_json::json!({ "filter": { "should": should } }));
+    }
+    if let Some(u) = user_filter {
+        if scroll_user_filter_is_nonempty(u) {
+            must.push(serde_json::json!({ "filter": u }));
+        }
+    }
+    serde_json::json!({ "must": must })
+}
+
+async fn qdrant_http_base_url(app: &AppHandle, state: &QdrantState) -> Result<String, String> {
+    let rt = state.runtime.lock().await;
+    if let Some(port) = rt.http_dashboard_port {
+        return Ok(format!("http://127.0.0.1:{port}"));
+    }
+    drop(rt);
+    let grpc = if let Some(url) = configured_qdrant_url() {
+        url
+    } else {
+        ensure_runtime_base_url(app, state).await?
+    };
+    if let Ok(mut u) = url::Url::parse(&grpc) {
+        if u.port() == Some(6334) {
+            let _ = u.set_port(Some(6333));
+            return Ok(u.to_string());
+        }
+    }
+    Ok(grpc.replace(":6334", ":6333"))
+}
+
+fn parse_scroll_json_vector(v: &serde_json::Value) -> Option<Vec<f32>> {
+    if let Some(arr) = v.as_array() {
+        return arr
+            .iter()
+            .map(|x| x.as_f64().map(|f| f as f32))
+            .collect();
+    }
+    if let Some(obj) = v.as_object() {
+        for (_k, val) in obj {
+            if let Some(arr) = val.as_array() {
+                let vec: Option<Vec<f32>> = arr
+                    .iter()
+                    .map(|x| x.as_f64().map(|f| f as f32))
+                    .collect();
+                if vec.as_ref().map(|a| a.len() == VECTOR_DIM).unwrap_or(false) {
+                    return vec;
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Scroll content-collection points with dense vectors for 2D embedding visualization.
@@ -968,11 +1218,20 @@ pub async fn scroll_content_vectors(
     let requested = args.limit.unwrap_or(500).max(1);
     let limit = (requested.min(SCROLL_CONTENT_VECTORS_HARD_MAX)) as usize;
 
+    let tag_filter = args.tag_filter_ids.as_deref().unwrap_or(&[]);
+    let use_http = args
+        .filter
+        .as_ref()
+        .is_some_and(|f| scroll_user_filter_is_nonempty(f));
+
+    if use_http {
+        let base = qdrant_http_base_url(app, state).await?;
+        let merged = merge_scroll_filter_json(&args.source_id, tag_filter, args.filter.as_ref());
+        return scroll_content_vectors_http(&base, &merged, limit).await;
+    }
+
     let client = instance(app, state).await?;
-    let filter = Filter::must([Condition::matches(
-        "sourceId",
-        args.source_id.clone(),
-    )]);
+    let filter = build_graph_scroll_filter(&args.source_id, tag_filter);
 
     let mut reservoir: Vec<ContentEmbeddingPoint> = Vec::with_capacity(limit.min(256));
     let mut rng = StdRng::from_entropy();
@@ -1009,10 +1268,13 @@ pub async fn scroll_content_vectors(
                 continue;
             }
 
+            let tag_ids = payload_tag_ids_field(&p.payload);
+
             let point = ContentEmbeddingPoint {
                 path,
                 content_hash,
                 embedding,
+                tag_ids,
             };
 
             if i < limit {
@@ -1030,6 +1292,139 @@ pub async fn scroll_content_vectors(
         if offset.is_none() {
             break;
         }
+    }
+
+    Ok(ScrollContentVectorsResult { points: reservoir })
+}
+
+async fn scroll_content_vectors_http(
+    base_url: &str,
+    filter: &serde_json::Value,
+    limit: usize,
+) -> Result<ScrollContentVectorsResult, String> {
+    use rand::rngs::StdRng;
+    use rand::Rng;
+    use rand::SeedableRng;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+
+    let url = format!(
+        "{}/collections/{}/points/scroll",
+        base_url.trim_end_matches('/'),
+        CONTENT_COLLECTION_NAME
+    );
+
+    let mut reservoir: Vec<ContentEmbeddingPoint> = Vec::with_capacity(limit.min(256));
+    let mut rng = StdRng::from_entropy();
+    let mut i: usize = 0;
+    let mut offset_val: Option<serde_json::Value> = None;
+
+    loop {
+        let mut body = serde_json::json!({
+            "filter": filter,
+            "limit": SCROLL_CONTENT_VECTORS_BATCH,
+            "with_payload": true,
+            "with_vector": true,
+        });
+        if let Some(off) = offset_val.take() {
+            body.as_object_mut()
+                .expect("body object")
+                .insert("offset".to_string(), off);
+        }
+
+        let mut req = client.post(&url).json(&body);
+        if let Ok(k) = std::env::var("MANIFOLD_QDRANT_API_KEY") {
+            let t = k.trim();
+            if !t.is_empty() {
+                req = req.header("api-key", t);
+            }
+        }
+
+        let res = req
+            .send()
+            .await
+            .map_err(|e| format!("qdrant http scroll request failed: {e}"))?;
+        let status = res.status();
+        let text = res.text().await.map_err(|e| e.to_string())?;
+        if !status.is_success() {
+            return Err(format!(
+                "qdrant http scroll failed ({status}): {text}"
+            ));
+        }
+        let v: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| format!("scroll response json: {e}"))?;
+
+        let points = v
+            .get("result")
+            .and_then(|r| r.get("points"))
+            .and_then(|p| p.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let next_off = v
+            .get("result")
+            .and_then(|r| r.get("next_page_offset"))
+            .cloned();
+
+        for p in points {
+            let path = p
+                .get("payload")
+                .and_then(|pl| pl.get("path"))
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string());
+            let content_hash = p
+                .get("payload")
+                .and_then(|pl| pl.get("contentHash"))
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string());
+            let (Some(path), Some(content_hash)) = (path, content_hash) else {
+                continue;
+            };
+
+            let tag_ids: Vec<String> = p
+                .get("payload")
+                .and_then(|pl| pl.get("tagIds"))
+                .and_then(|t| t.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let vec_json = p.get("vector").cloned().unwrap_or(serde_json::Value::Null);
+            let Some(embedding) = parse_scroll_json_vector(&vec_json) else {
+                continue;
+            };
+            if embedding.len() != VECTOR_DIM {
+                continue;
+            }
+
+            let point = ContentEmbeddingPoint {
+                path,
+                content_hash,
+                embedding,
+                tag_ids,
+            };
+
+            if i < limit {
+                reservoir.push(point);
+            } else {
+                let j = rng.gen_range(0..=i);
+                if j < limit {
+                    reservoir[j] = point;
+                }
+            }
+            i += 1;
+        }
+
+        if next_off.is_none() || next_off.as_ref().is_some_and(|x| x.is_null()) {
+            break;
+        }
+        offset_val = next_off;
     }
 
     Ok(ScrollContentVectorsResult { points: reservoir })
