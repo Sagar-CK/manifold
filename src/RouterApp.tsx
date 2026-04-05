@@ -15,6 +15,7 @@ import { SearchPage } from "./pages/SearchPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { ReviewTagsPage } from "./pages/ReviewTagsPage";
 import { setNavigateToReviewTagsCallback } from "./lib/autoTagging";
+import { invokeErrorText } from "./lib/errors";
 import { cn } from "./lib/utils";
 
 type EmbeddingJobPhase =
@@ -38,6 +39,11 @@ type EmbeddingFileFailure = {
   reason: string;
 };
 
+/** Second start while a job is active — not a failure for the user; job is already in progress. */
+function isBenignConcurrentEmbedStartError(msg: string): boolean {
+  return /embedding job already running/i.test(msg);
+}
+
 export default function RouterApp() {
   const navigate = useNavigate();
   const { pathname } = useLocation();
@@ -53,6 +59,8 @@ export default function RouterApp() {
   const [lastEmbedError, setLastEmbedError] = useState<string | null>(null);
   const [embedFailures, setEmbedFailures] = useState<EmbeddingFileFailure[]>([]);
   const lastAutoEmbedKeyRef = useRef<string>("");
+  const embedStartInFlightRef = useRef(false);
+  const lastReportedEmbedErrorRef = useRef<string | null>(null);
 
   const geminiApiKey =
     (import.meta.env.VITE_GOOGLE_GENERATIVE_AI_API_KEY as string | undefined) ?? "";
@@ -87,7 +95,7 @@ export default function RouterApp() {
       try {
         await invoke("qdrant_status");
       } catch (e) {
-        issues.push(`Qdrant is not configured or reachable: ${String(e)}`);
+        issues.push(`Qdrant is not configured or reachable: ${invokeErrorText(e)}`);
       }
       if (!cancelled) setEnvIssues(issues);
     }
@@ -134,30 +142,49 @@ export default function RouterApp() {
     if (cfg.include.length === 0) {
       return;
     }
-
-    // Preflight Qdrant once to avoid a laggy first upsert when Qdrant is down.
-    try {
-      await invoke("qdrant_status");
-    } catch (e) {
-      const msg = `Qdrant is not configured or reachable: ${String(e)}`;
-      setLastEmbedError(msg);
-      setEnvIssues((prev) => (prev.includes(msg) ? prev : [...prev, msg]));
+    if (embedStartInFlightRef.current) {
       return;
     }
+    embedStartInFlightRef.current = true;
+    try {
+      // Preflight Qdrant once to avoid a laggy first upsert when Qdrant is down.
+      try {
+        await invoke("qdrant_status");
+      } catch (e) {
+        const msg = `Qdrant is not configured or reachable: ${invokeErrorText(e)}`;
+        lastReportedEmbedErrorRef.current = msg;
+        setLastEmbedError(msg);
+        setEnvIssues((prev) => (prev.includes(msg) ? prev : [...prev, msg]));
+        return;
+      }
 
-    setLastEmbedError(null);
-    setEmbedFailures([]);
-    await invoke("start_embedding_job", {
-      args: {
-        scan: {
-          include: cfg.include,
-          exclude: cfg.exclude,
-          extensions: cfg.extensions,
-          useDefaultFolderExcludes: cfg.useDefaultFolderExcludes,
+      setLastEmbedError(null);
+      lastReportedEmbedErrorRef.current = null;
+      setEmbedFailures([]);
+      await invoke("start_embedding_job", {
+        args: {
+          scan: {
+            include: cfg.include,
+            exclude: cfg.exclude,
+            extensions: cfg.extensions,
+            useDefaultFolderExcludes: cfg.useDefaultFolderExcludes,
+          },
+          sourceId: cfg.sourceId,
         },
-        sourceId: cfg.sourceId,
-      },
-    });
+      });
+    } catch (e) {
+      const msg = invokeErrorText(e);
+      if (isBenignConcurrentEmbedStartError(msg)) {
+        return;
+      }
+      if (lastReportedEmbedErrorRef.current === msg) {
+        return;
+      }
+      lastReportedEmbedErrorRef.current = msg;
+      setLastEmbedError(msg);
+    } finally {
+      embedStartInFlightRef.current = false;
+    }
   }, [cfg.exclude, cfg.extensions, cfg.include, cfg.sourceId, cfg.useDefaultFolderExcludes, geminiApiKey]);
 
   useEffect(() => {
@@ -169,9 +196,7 @@ export default function RouterApp() {
     if (embedding) return;
     if (lastAutoEmbedKeyRef.current === autoEmbedKey) return;
     lastAutoEmbedKeyRef.current = autoEmbedKey;
-    void runEmbed().catch((e) => {
-      setLastEmbedError(String(e));
-    });
+    void runEmbed();
   }, [autoEmbedKey, cfg.include.length, embedding, runEmbed]);
 
   useEffect(() => {
@@ -191,7 +216,15 @@ export default function RouterApp() {
         setEmbeddingPhase("done");
       });
       unlistenError = await listen<{ message: string }>("embedding://error", (event) => {
-        setLastEmbedError(event.payload.message);
+        const msg = event.payload.message;
+        if (isBenignConcurrentEmbedStartError(msg)) {
+          return;
+        }
+        if (lastReportedEmbedErrorRef.current === msg) {
+          return;
+        }
+        lastReportedEmbedErrorRef.current = msg;
+        setLastEmbedError(msg);
       });
       unlistenFileFailed = await listen<EmbeddingFileFailure>("embedding://file-failed", (event) => {
         setEmbedFailures((prev) => {

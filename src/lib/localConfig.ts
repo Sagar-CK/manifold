@@ -64,9 +64,9 @@ function defaultConfig(): LocalConfig {
     exclude: [],
     useDefaultFolderExcludes: true,
     extensions: ["png", "jpg", "jpeg", "pdf", "mp3", "wav", "mp4", "mov"],
-    scoreThreshold: 0,
+    scoreThreshold: 0.3,
     searchMode: "topK",
-    topK: 24,
+    topK: 10,
     showSimilarityOnHover: true,
     autoTaggingEnabled: true,
   };

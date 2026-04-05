@@ -4,6 +4,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { homeDir } from "@tauri-apps/api/path";
 import { useEffect, useState } from "react";
+import { invokeErrorText } from "../lib/errors";
 import { navigateBackOrFallback } from "../lib/navigateBack";
 import { formatPathForDisplay } from "../lib/pathDisplay";
 import { collapseIncludeFolders, type LocalConfig, type SupportedExt } from "../lib/localConfig";
@@ -17,6 +18,7 @@ import {
   tagIdsForPath,
   type TagsState,
 } from "../lib/tags";
+import { ErrorMessage } from "../components/ErrorMessage";
 import { PageHeader } from "../components/PageHeader";
 import { EmbeddingStatusPanel } from "../components/EmbeddingStatusPanel";
 import { TagDefBadge } from "../components/TagDefBadge";
@@ -185,7 +187,7 @@ export function SettingsPage({
       await refreshEmbeddedCount(nextSourceId);
       setConfirmClearOpen(false);
     } catch (e) {
-      setClearIndexError(String(e));
+      setClearIndexError(invokeErrorText(e));
     } finally {
       setClearingIndex(false);
     }
@@ -228,7 +230,7 @@ export function SettingsPage({
       setConfirmRemoveIncludeOpen(false);
       setIncludeToRemove(null);
     } catch (e) {
-      setRemoveIncludeError(String(e));
+      setRemoveIncludeError(invokeErrorText(e));
     } finally {
       setRemoveIncludeLoading(false);
     }
@@ -263,7 +265,7 @@ export function SettingsPage({
         video: parseScanCount(res.videoFiles),
       });
     } catch (e) {
-      setAddIncludeError(String(e));
+      setAddIncludeError(invokeErrorText(e));
     } finally {
       setAddIncludeLoading(false);
     }
@@ -346,7 +348,6 @@ export function SettingsPage({
         <Card size="sm" className="shadow-xs">
           <CardHeader>
             <CardTitle>Paths</CardTitle>
-            <CardDescription>Indexed folders and noise filters</CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
             <div className="flex flex-col gap-2">
@@ -489,7 +490,6 @@ export function SettingsPage({
           <Card size="sm" className="shadow-xs">
             <CardHeader>
               <CardTitle>Search</CardTitle>
-              <CardDescription>Types, ranking, UI</CardDescription>
             </CardHeader>
             <CardContent className="flex flex-col gap-4">
               <div className="flex flex-col gap-2">
@@ -734,9 +734,7 @@ export function SettingsPage({
             <CardDescription className="text-left">
               Drops embeddings in the local index ({liveIndexedCount ?? "—"} files). Files on disk are unchanged.
             </CardDescription>
-            {clearIndexError ? (
-              <p className="text-left text-sm font-medium text-destructive">{clearIndexError}</p>
-            ) : null}
+            <ErrorMessage variant="inline" message={clearIndexError} />
           </div>
           <div className="flex shrink-0 items-start sm:pt-0.5">
             <AlertDialog open={confirmClearOpen} onOpenChange={setConfirmClearOpen}>
@@ -862,11 +860,7 @@ export function SettingsPage({
               </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
-          {addIncludeError ? (
-            <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
-              Error: {addIncludeError}
-            </div>
-          ) : null}
+          <ErrorMessage variant="callout" title="Error" message={addIncludeError} />
           <AlertDialogFooter>
             <AlertDialogCancel
               disabled={addIncludeLoading}
@@ -916,11 +910,7 @@ export function SettingsPage({
               that folder. Your files on disk are not deleted.
             </AlertDialogDescription>
           </AlertDialogHeader>
-          {removeIncludeError ? (
-            <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
-              Error: {removeIncludeError}
-            </div>
-          ) : null}
+          <ErrorMessage variant="callout" title="Error" message={removeIncludeError} />
           <AlertDialogFooter>
             <AlertDialogCancel
               disabled={removeIncludeLoading}

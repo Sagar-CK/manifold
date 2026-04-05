@@ -1,3 +1,4 @@
+import type { Dispatch, SetStateAction } from "react";
 import { runAutoTagOrchestration } from "@/lib/autoTagging";
 import { Tags } from "lucide-react";
 import {
@@ -22,7 +23,7 @@ export function TagsPathDropdown({
   path: string;
   sourceId: string;
   tagsState: TagsState;
-  setTagsState: React.Dispatch<React.SetStateAction<TagsState>>;
+  setTagsState: Dispatch<SetStateAction<TagsState>>;
   cfg?: LocalConfig;
 }) {
   if (tagsState.tags.length === 0) return null;
@@ -54,12 +55,8 @@ export function TagsPathDropdown({
                 void syncPathTagsToQdrant(sourceId, path, tagIdsForPath(next, path)).catch(() => {
                   /* ignore offline qdrant errors */
                 });
-                
                 if (cfg?.autoTaggingEnabled && tagIdsForPath(next, path).includes(t.id)) {
-                  console.log(`[TagsPathDropdown] Auto-tagging triggered for path=${path}, tag=${t.name}`);
                   void runAutoTagOrchestration(cfg, path, t.id, next, setTagsState);
-                } else {
-                  console.log(`[TagsPathDropdown] Auto-tagging not triggered. cfg?.autoTaggingEnabled=${cfg?.autoTaggingEnabled}, hasTag=${tagIdsForPath(next, path).includes(t.id)}`);
                 }
               }}
             >

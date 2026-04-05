@@ -1,3 +1,4 @@
+import type { MouseEvent } from "react";
 import { Check, X } from "lucide-react";
 import { Button } from "./ui/button";
 import { Skeleton } from "./ui/skeleton";
@@ -14,9 +15,6 @@ function fileNameFromPath(path: string) {
   return normalized.split("/").pop() ?? path;
 }
 
-/**
- * Single pending suggestion: matches {@link FileSearchResultCard} (transparent tile: thumb + filename) + accept/reject.
- */
 export function ReviewPendingTagRow({
   path,
   tag,
@@ -26,22 +24,24 @@ export function ReviewPendingTagRow({
   showTagBadge = false,
   onAccept,
   onReject,
+  onInspectFile,
 }: {
   path: string;
   tag: TagDef;
   thumbUrl?: string | null;
   thumbFailed: boolean;
   thumbExpectLoading: boolean;
-  /** When true, show tag chip on the thumb (omit when suggestions are grouped by tag). */
   showTagBadge?: boolean;
   onAccept: () => void;
   onReject: () => void;
+  /** Preview click: plain → in-app file view; ⌘/Ctrl → open in default app (parent implements). */
+  onInspectFile?: (e: MouseEvent<HTMLButtonElement>) => void;
 }) {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
   const fileName = fileNameFromPath(path);
 
-  return (
-    <div className="group relative flex min-w-0 flex-col items-center gap-2 rounded-lg p-1">
+  const previewBlock = (
+    <>
       <div className="relative w-full px-1">
         {showTagBadge ? (
           <div className="absolute top-0.5 right-0.5 z-10 max-w-[min(100%-3rem,11rem)]">
@@ -73,6 +73,24 @@ export function ReviewPendingTagRow({
       <div className="w-full min-w-0 truncate text-center text-xs font-normal leading-tight text-black/80" title={path}>
         {fileName}
       </div>
+    </>
+  );
+
+  return (
+    <div className="group relative flex min-w-0 flex-col items-center gap-2 rounded-lg p-1">
+      {onInspectFile ? (
+        <button
+          type="button"
+          className="flex w-full cursor-pointer flex-col items-center gap-2 rounded-md p-0 text-left outline-none hover:bg-black/5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          onClick={(e) => onInspectFile(e)}
+          title="Click to view · ⌘ or Ctrl-click to open in default app"
+          aria-label={`View file ${fileName}. Command or control click opens in default app.`}
+        >
+          {previewBlock}
+        </button>
+      ) : (
+        previewBlock
+      )}
       <div className="flex items-center justify-center gap-0.5">
         <Button
           type="button"

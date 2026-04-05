@@ -32,22 +32,28 @@ import {
 import type { LocalConfig } from "../lib/localConfig";
 import { formatIndexedPathForDisplay } from "../lib/pathDisplay";
 import { isPathSelected } from "../lib/pathSelection";
-import { loadTagsState, tagIdsForPath, tagsForPath, type TagsState } from "../lib/tags";
+import {
+  loadTagsState,
+  normalizePathKey,
+  tagIdsForPath,
+  tagsForPath,
+  type TagsState,
+} from "../lib/tags";
+import { ErrorMessage } from "../components/ErrorMessage";
 import { EmbeddingStatusPanel } from "../components/EmbeddingStatusPanel";
 import { PageHeader } from "../components/PageHeader";
 import { FileSearchResultCard } from "../components/FileSearchResultCard";
 import { TagsPathDropdown } from "../components/TagsPathDropdown";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip";
 import type { FileResultLocationState } from "./FileResultPage";
+import { invokeErrorText } from "@/lib/errors";
+import { isSearchDebugEnabled, logSearchRun, searchLog } from "@/lib/log";
 
 function formatSimilarityScore(score: number) {
   if (score >= 0 && score <= 1) return `${(score * 100).toFixed(1)}%`;
   return score.toFixed(4);
 }
 
-const SEARCH_DEBUG =
-  import.meta.env.DEV ||
-  (typeof window !== "undefined" && window.localStorage.getItem("manifold:debug:search") === "1");
 const THUMBNAIL_CONCURRENCY = 4;
 
 type SearchResult = {
@@ -126,7 +132,7 @@ async function openPathInDefaultApp(path: string) {
   try {
     await openPath(path);
   } catch (e) {
-    console.error("[search] openPath failed", { path, error: String(e) });
+    searchLog.error("openPath failed", { path, error: String(e) });
   }
 }
 
@@ -183,6 +189,7 @@ export function SearchPage({
   const navigate = useNavigate();
   const searchRunSeqRef = useRef(0);
   const latestRunRef = useRef(0);
+  const tagBrowseThumbRunSeqRef = useRef(0);
   const runStartMsRef = useRef(0);
   const thumbCacheRef = useRef<Record<string, string>>({});
   const thumbFailedRef = useRef<Record<string, true>>({});
@@ -210,7 +217,7 @@ export function SearchPage({
 
   const pendingReviewCount = useMemo(() => {
     let n = 0;
-    for (const ids of Object.values(tagsState.pendingAutoTags ?? {})) {
+    for (const ids of Object.values(tagsState.pendingAutoTags)) {
       if (ids?.length) n += ids.length;
     }
     return n;
@@ -220,25 +227,6 @@ export function SearchPage({
     embedding || hasPendingEmbeds
       ? Math.max(embeddedCount ?? 0, embedProgress.processed)
       : embeddedCount;
-
-  const logSearch = (
-    runId: number,
-    message: string,
-    data?: Record<string, unknown>,
-    level: "debug" | "warn" | "error" = "debug",
-  ) => {
-    if (!SEARCH_DEBUG && level !== "error") return;
-    const prefix = `[search][run:${runId}] ${message}`;
-    if (level === "warn") {
-      console.warn(prefix, data ?? "");
-      return;
-    }
-    if (level === "error") {
-      console.error(prefix, data ?? "");
-      return;
-    }
-    console.debug(prefix, data ?? "");
-  };
 
   useEffect(() => {
     let cancelled = false;
@@ -304,7 +292,7 @@ export function SearchPage({
     latestRunRef.current = runId;
     runStartMsRef.current = performance.now();
     let stageStartMs = performance.now();
-    logSearch(runId, "started", {
+    logSearchRun(runId, "started", {
       queryLength: queryText.length,
       sourceId: cfg.sourceId,
       searchMode: cfg.searchMode,
@@ -332,18 +320,18 @@ export function SearchPage({
           ],
         },
       })) as SearchResult[];
-      logSearch(runId, "semantic search resolved", {
+      logSearchRun(runId, "semantic search resolved", {
         elapsedMs: Math.round(performance.now() - stageStartMs),
         rawResultCount: res.length,
         limit: searchLimit,
       });
       stageStartMs = performance.now();
     } catch (e) {
-      logSearch(runId, "semantic search failed", { elapsedMs: Math.round(performance.now() - stageStartMs), error: String(e) }, "error");
+      logSearchRun(runId, "semantic search failed", { elapsedMs: Math.round(performance.now() - stageStartMs), error: invokeErrorText(e) }, "error");
       if (latestRunRef.current === runId) setIsSearching(false);
       if (latestRunRef.current === runId) {
         setHasSearched(true);
-        setSearchError(String(e));
+        setSearchError(invokeErrorText(e));
         setResults([]);
       }
       return;
@@ -364,7 +352,7 @@ export function SearchPage({
 
     // Automatically ignore hits that are outside current selected folders/extensions.
     const selectedOnly = filtered.filter((r) => isPathSelected(r.file.path, cfg));
-    logSearch(runId, "post-filter completed", {
+    logSearchRun(runId, "post-filter completed", {
       elapsedMs: Math.round(performance.now() - stageStartMs),
       afterModeFilterCount: filtered.length,
       selectedOnlyCount: selectedOnly.length,
@@ -426,7 +414,7 @@ export function SearchPage({
             }
           } catch (e) {
             thumbFailedRef.current[p] = true;
-            logSearch(
+            logSearchRun(
               runId,
               "thumbnail generation failed",
               {
@@ -443,14 +431,14 @@ export function SearchPage({
       });
 
       await Promise.all(workers);
-      logSearch(runId, "thumbnails completed", {
+      logSearchRun(runId, "thumbnails completed", {
         elapsedMs: Math.round(performance.now() - thumbStartMs),
         attempts: thumbAttempts,
         successes: thumbSuccesses,
         cachedBeforeRun: Object.keys(cachedThumbsForSelection).length,
       });
     })();
-    logSearch(runId, "search completed", {
+    logSearchRun(runId, "search completed", {
       totalElapsedMs: Math.round(performance.now() - runStartMsRef.current),
       totalResults: selectedOnly.length,
       cachedThumbsUsed: Object.keys(cachedThumbsForSelection).length,
@@ -464,24 +452,26 @@ export function SearchPage({
       setHasSearched(false);
       setIsSearching(false);
       setResults([]);
-      setThumbByPath({});
+      if (tagFilterIds.length === 0) {
+        setThumbByPath({});
+        setThumbFailedByPath({});
+      }
       return;
     }
 
     setIsSearching(true);
     const timer = window.setTimeout(() => {
-      if (SEARCH_DEBUG) {
-        console.debug("[search] debounce fired", {
-          queryLength: trimmed.length,
-          debounceMs: 250,
-          queuedRuns: searchRunSeqRef.current,
-        });
-      }
+      searchLog.debug("debounce fired", {
+        queryLength: trimmed.length,
+        debounceMs: 250,
+        queuedRuns: searchRunSeqRef.current,
+      });
       void runSearch(trimmed);
     }, 250);
     return () => window.clearTimeout(timer);
   }, [
     query,
+    tagFilterIds.length,
     cfg.sourceId,
     cfg.searchMode,
     cfg.scoreThreshold,
@@ -494,25 +484,113 @@ export function SearchPage({
     matchTypeFilter.semantic,
   ]);
 
+  const tagBrowseResults = useMemo((): SearchResult[] => {
+    const trimmed = query.trim();
+    if (trimmed !== "" || tagFilterIds.length === 0) return [];
+    const filterSet = new Set(tagFilterIds);
+    const seen = new Set<string>();
+    const out: SearchResult[] = [];
+    for (const [p, ids] of Object.entries(tagsState.pathToTagIds)) {
+      if (!ids.some((id) => filterSet.has(id))) continue;
+      if (!isPathSelected(p, cfg)) continue;
+      const nk = normalizePathKey(p);
+      if (seen.has(nk)) continue;
+      seen.add(nk);
+      out.push({
+        score: 1,
+        matchType: "semantic",
+        file: { path: p, contentHash: "" },
+      });
+    }
+    out.sort((a, b) => a.file.path.localeCompare(b.file.path));
+    return out;
+  }, [query, tagFilterIds, tagsState.pathToTagIds, cfg]);
+
   useEffect(() => {
-    if (!SEARCH_DEBUG || latestRunRef.current === 0) return;
+    if (tagBrowseResults.length === 0) return;
+    const runId = ++tagBrowseThumbRunSeqRef.current;
+    const paths = tagBrowseResults.map((r) => r.file.path);
+
+    const cachedThumbsForSelection: Record<string, string> = {};
+    const failedThumbsForSelection: Record<string, true> = {};
+    for (const p of paths) {
+      const cached = thumbCacheRef.current[p];
+      if (cached) cachedThumbsForSelection[p] = cached;
+      if (thumbFailedRef.current[p]) failedThumbsForSelection[p] = true;
+    }
+    setThumbByPath(cachedThumbsForSelection);
+    setThumbFailedByPath(failedThumbsForSelection);
+
+    const previewPaths = paths.filter((p) => {
+      if (thumbCacheRef.current[p]) return false;
+      if (thumbFailedRef.current[p]) return false;
+      const ext = p.split(".").pop()?.toLowerCase() ?? "";
+      return ext === "png" || ext === "jpg" || ext === "jpeg" || ext === "pdf";
+    });
+
+    void (async () => {
+      let nextIndex = 0;
+      const workerCount = Math.min(THUMBNAIL_CONCURRENCY, previewPaths.length);
+      const workers = Array.from({ length: workerCount }, async () => {
+        while (nextIndex < previewPaths.length) {
+          if (tagBrowseThumbRunSeqRef.current !== runId) return;
+          const current = nextIndex;
+          nextIndex += 1;
+          const p = previewPaths[current];
+          try {
+            const thumb = (await invoke("thumbnail_image_base64_png", {
+              args: { path: p, max_edge: 96, page: 0 },
+            })) as { png_base64: string };
+            const dataUrl = `data:image/png;base64,${thumb.png_base64}`;
+            thumbCacheRef.current[p] = dataUrl;
+            delete thumbFailedRef.current[p];
+            if (tagBrowseThumbRunSeqRef.current === runId) {
+              setThumbByPath((m) => ({ ...m, [p]: dataUrl }));
+              setThumbFailedByPath((m) => {
+                if (!m[p]) return m;
+                const next = { ...m };
+                delete next[p];
+                return next;
+              });
+            }
+          } catch (e) {
+            thumbFailedRef.current[p] = true;
+            searchLog.warn("tag-browse thumbnail failed", { path: p, error: String(e) });
+            if (tagBrowseThumbRunSeqRef.current === runId) {
+              setThumbFailedByPath((m) => ({ ...m, [p]: true }));
+            }
+          }
+        }
+      });
+      await Promise.all(workers);
+    })();
+  }, [tagBrowseResults]);
+
+  useEffect(() => {
+    if (!isSearchDebugEnabled() || latestRunRef.current === 0) return;
     const runId = latestRunRef.current;
-    logSearch(runId, "results state committed", {
+    logSearchRun(runId, "results state committed", {
       elapsedMs: Math.round(performance.now() - runStartMsRef.current),
       resultsCount: results.length,
       thumbnailCount: Object.keys(thumbByPath).length,
     });
   }, [results, thumbByPath]);
 
-  const typeFilteredResults = results.filter((result) => matchTypeFilter[result.matchType]);
   const tagFilterSet = new Set(tagFilterIds);
+  const showingTagBrowse = query.trim() === "" && tagFilterSet.size > 0;
+  const sourceResults = showingTagBrowse ? tagBrowseResults : results;
+  const typeFilteredResults = showingTagBrowse
+    ? sourceResults
+    : sourceResults.filter((result) => matchTypeFilter[result.matchType]);
   const tagFilteredResults =
-    tagFilterSet.size === 0
-      ? typeFilteredResults
-      : typeFilteredResults.filter((r) => {
-          const ids = tagIdsForPath(tagsState, r.file.path);
-          return ids.some((id) => tagFilterSet.has(id));
-        });
+    showingTagBrowse
+      ? sourceResults
+      : tagFilterSet.size === 0
+        ? typeFilteredResults
+        : typeFilteredResults.filter((r) => {
+            const ids = tagIdsForPath(tagsState, r.file.path);
+            return ids.some((id) => tagFilterSet.has(id));
+          });
   const groupedResults = groupResultsByContentHash(tagFilteredResults);
   const hasMatchTypeEnabled = matchTypeFilter.textMatch || matchTypeFilter.semantic;
   const hasTagFilterButNoMatches =
@@ -676,7 +754,11 @@ export function SearchPage({
       <div className="mt-5 min-h-0 flex-1">
         <ScrollArea className="h-full pr-3">
           {groupedResults.length === 0 ? (
-            !hasSearched ? (
+            showingTagBrowse ? (
+              <div className="app-muted text-center">
+                No files match the selected tags. Try turning some off.
+              </div>
+            ) : !hasSearched ? (
               liveIndexedCount === 0 ? (
                 <Link
                   to="/settings"
@@ -686,9 +768,7 @@ export function SearchPage({
                 </Link>
               ) : null
             ) : searchError ? (
-              <div className="text-center text-sm font-medium text-rose-700">
-                Search error: {searchError}
-              </div>
+              <ErrorMessage variant="centered" title="Search error" message={searchError} />
             ) : !hasMatchTypeEnabled ? (
               <div className="app-muted text-center">
                 Enable at least one search type (Text or Semantic).
@@ -716,7 +796,7 @@ export function SearchPage({
                       if (r.matchType !== "textMatch") return;
                       const cached = fullTextCacheRef.current[r.file.path];
                       if (cached) {
-                        console.log("[search][text-match:hover:full-text]", {
+                        searchLog.debug("text-match:hover:full-text", {
                           path: r.file.path,
                           fullText: cached,
                         });
@@ -729,12 +809,12 @@ export function SearchPage({
                           })) as string | null;
                           if (!fullText) return;
                           fullTextCacheRef.current[r.file.path] = fullText;
-                          console.log("[search][text-match:hover:full-text]", {
+                          searchLog.debug("text-match:hover:full-text", {
                             path: r.file.path,
                             fullText,
                           });
                         } catch (e) {
-                          console.warn("[search][text-match:hover:full-text] failed", {
+                          searchLog.warn("text-match:hover:full-text failed", {
                             path: r.file.path,
                             error: String(e),
                           });
@@ -754,11 +834,14 @@ export function SearchPage({
                         return;
                       }
                       navigate(`/file?path=${encodeURIComponent(r.file.path)}`, {
-                        state: isStacked
-                          ? ({
-                              sameContentPaths: group.variants.map((v) => v.file.path),
-                            } satisfies FileResultLocationState)
-                          : undefined,
+                        state: {
+                          returnTo: "/",
+                          ...(isStacked
+                            ? {
+                                sameContentPaths: group.variants.map((v) => v.file.path),
+                              }
+                            : {}),
+                        } satisfies FileResultLocationState,
                       });
                     }}
                     thumbUrl={thumbByPath[r.file.path] ?? null}

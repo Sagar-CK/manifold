@@ -1,7 +1,9 @@
 import { ArrowLeft, Check } from "lucide-react";
+import { openPath } from "@tauri-apps/plugin-opener";
 import { useNavigate } from "react-router-dom";
 import { useMemo, useState, useEffect } from "react";
 import { navigateBackOrFallback } from "../lib/navigateBack";
+import { createLogger } from "../lib/log";
 import { ReviewPendingTagRow } from "../components/ReviewPendingTagRow";
 import {
   acceptPendingAutoTag,
@@ -22,6 +24,16 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/toolti
 import { ScrollArea } from "../components/ui/scroll-area";
 import { isPreviewablePath, useThumbnailsForPaths } from "../lib/useThumbnailsForPaths";
 
+const reviewLog = createLogger("review-tags");
+
+async function openPathInDefaultApp(path: string) {
+  try {
+    await openPath(path);
+  } catch (e) {
+    reviewLog.error("openPath failed", { path, error: String(e) });
+  }
+}
+
 export function ReviewTagsPage({
   sourceId,
 }: {
@@ -36,7 +48,7 @@ export function ReviewTagsPage({
     return () => window.removeEventListener("manifold:tags-updated", onTagsUpdated);
   }, []);
 
-  const pendingPaths = Object.keys(tagsState.pendingAutoTags || {}).filter(
+  const pendingPaths = Object.keys(tagsState.pendingAutoTags).filter(
     (p) => tagsState.pendingAutoTags[p]?.length > 0,
   );
 
@@ -162,6 +174,16 @@ export function ReviewTagsPage({
                           thumbExpectLoading={preview && !thumbFailedByPath[path]}
                           onAccept={() => handleAccept(path, rowTagId)}
                           onReject={() => handleReject(path, rowTagId)}
+                          onInspectFile={(e) => {
+                            if (e.metaKey || e.ctrlKey) {
+                              e.preventDefault();
+                              void openPathInDefaultApp(path);
+                              return;
+                            }
+                            navigate(`/file?path=${encodeURIComponent(path)}`, {
+                              state: { returnTo: "/review-tags" },
+                            });
+                          }}
                         />
                       );
                     })}

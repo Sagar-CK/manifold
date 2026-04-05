@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { homeDir } from "@tauri-apps/api/path";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { ArrowLeft, ExternalLink } from "lucide-react";
+import { ErrorMessage } from "../components/ErrorMessage";
 import { FileSearchResultCard } from "../components/FileSearchResultCard";
 import { TagsPathDropdown } from "../components/TagsPathDropdown";
 import { Badge } from "../components/ui/badge";
@@ -19,6 +20,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "../components/ui/alert-dialog";
+import { invokeErrorText } from "../lib/errors";
 import type { LocalConfig } from "../lib/localConfig";
 import { navigateBackOrFallback } from "../lib/navigateBack";
 import { runAutoTagOrchestration } from "../lib/autoTagging";
@@ -79,6 +81,8 @@ export type FileResultLocationState = {
   resultStack?: string[];
   /** Indexed paths with identical content (e.g. from search duplicate picker). */
   sameContentPaths?: string[];
+  /** Route to open when leaving file view at stack root (set by search / graph / review). */
+  returnTo?: string;
 };
 
 export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
@@ -87,6 +91,7 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
   const navigate = useNavigate();
   const rawPath = searchParams.get("path");
   const filePath = rawPath ? decodeURIComponent(rawPath) : null;
+  const locState = location.state as FileResultLocationState | undefined;
 
   const [thumbDataUrl, setThumbDataUrl] = useState<string | null>(null);
   const [thumbLoading, setThumbLoading] = useState(false);
@@ -111,8 +116,7 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
       setTrail([]);
       return;
     }
-    const st = location.state as FileResultLocationState | undefined;
-    const fromState = st?.resultStack;
+    const fromState = locState?.resultStack;
     if (fromState?.length && fromState[fromState.length - 1] === filePath) {
       setTrail(fromState);
       return;
@@ -141,15 +145,14 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
 
   const displayPaths = useMemo(() => {
     if (!filePath) return [];
-    const st = location.state as FileResultLocationState | undefined;
-    const aliases = st?.sameContentPaths;
+    const aliases = locState?.sameContentPaths;
     if (aliases?.length) {
       const merged = new Set<string>(aliases);
       merged.add(filePath);
       return Array.from(merged).sort((a, b) => a.localeCompare(b));
     }
     return [filePath];
-  }, [filePath, location.key]);
+  }, [filePath, location.key, locState?.sameContentPaths]);
 
   const headerPathExcludeSet = useMemo(() => new Set(displayPaths), [displayPaths]);
 
@@ -197,14 +200,14 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
     void (async () => {
       try {
         const hits = (await invoke("qdrant_similar_by_path", {
-          args: { sourceId: cfg.sourceId, path: filePath, limit: 32 },
+          args: { sourceId: cfg.sourceId, path: filePath, limit: cfg.topK },
         })) as SimilarHit[];
         if (cancelled) return;
         const scoped = hits.filter((h) => isPathSelected(h.file.path, cfg));
         const filtered = scoped.filter((h) => !headerPathExcludeSet.has(h.file.path));
         setSimilar(filtered);
       } catch (e) {
-        if (!cancelled) setSimilarError(String(e));
+        if (!cancelled) setSimilarError(invokeErrorText(e));
       } finally {
         if (!cancelled) setSimilarLoading(false);
       }
@@ -216,6 +219,7 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
   }, [
     filePath,
     cfg.sourceId,
+    cfg.topK,
     cfg.include,
     cfg.exclude,
     cfg.extensions,
@@ -231,15 +235,27 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
   const thumbPathsKey = thumbPathList.join("\0");
   const { thumbByPath, thumbFailedByPath } = useThumbnailsForPaths(thumbPathsKey, thumbPathList);
 
+  function leaveFileView() {
+    const dest = locState?.returnTo;
+    if (dest) {
+      navigate(dest);
+      return;
+    }
+    navigateBackOrFallback(navigate, "/");
+  }
+
   function goBackFromFileResult() {
     if (trail.length > 1) {
       const parent = trail[trail.length - 2]!;
       navigate(`/file?path=${encodeURIComponent(parent)}`, {
         replace: true,
-        state: { resultStack: trail.slice(0, -1) },
+        state: {
+          resultStack: trail.slice(0, -1),
+          ...(locState?.returnTo != null ? { returnTo: locState.returnTo } : {}),
+        },
       });
     } else {
-      navigateBackOrFallback(navigate);
+      leaveFileView();
     }
   }
 
@@ -254,7 +270,7 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
               size="sm"
               className="w-fit gap-1 px-2 text-black/60"
               aria-label="Back"
-              onClick={() => navigateBackOrFallback(navigate)}
+              onClick={leaveFileView}
             >
               <ArrowLeft className="size-4" aria-hidden />
               Back
@@ -337,7 +353,7 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
                       try {
                         await openPath(p);
                       } catch (e) {
-                        setOpenError(String(e));
+                        setOpenError(invokeErrorText(e));
                       }
                     }}
                   >
@@ -348,7 +364,7 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
               </Tooltip>
             </div>
           ))}
-          {openError ? <p className="text-xs text-rose-700">{openError}</p> : null}
+          <ErrorMessage variant="inline" className="text-xs" message={openError} />
 
           <div className="mt-3 flex flex-col gap-2">
             <div className="text-xs font-medium uppercase tracking-wide text-black/45">Tags</div>
@@ -374,13 +390,8 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
                         ).catch(() => {
                           /* ignore */
                         });
-                        
-                        // If tag was added and auto-tagging is enabled, run orchestration
                         if (cfg.autoTaggingEnabled && tagIdsForPath(next, filePath).includes(t.id)) {
-                          console.log(`[FileResultPage] Auto-tagging triggered for path=${filePath}, tag=${t.name}`);
                           void runAutoTagOrchestration(cfg, filePath, t.id, next, setTagsState);
-                        } else {
-                          console.log(`[FileResultPage] Auto-tagging not triggered. autoTaggingEnabled=${cfg.autoTaggingEnabled}, hasTag=${tagIdsForPath(next, filePath).includes(t.id)}`);
                         }
                       }}
                     >
@@ -414,7 +425,7 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
           {similarLoading ? (
             <p className="app-muted text-sm">Loading…</p>
           ) : similarError ? (
-            <p className="app-muted text-sm">{similarError}</p>
+            <ErrorMessage variant="inline" className="text-sm" message={similarError} />
           ) : similarGroups.length === 0 ? (
             <p className="app-muted text-sm">No similar files in the current scope.</p>
           ) : (
@@ -450,7 +461,7 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
                         }
                         setOpenError(null);
                         void openPath(p).catch((err) => {
-                          setOpenError(String(err));
+                          setOpenError(invokeErrorText(err));
                         });
                         return;
                       }
@@ -461,7 +472,10 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
                         return;
                       }
                       navigate(`/file?path=${encodeURIComponent(p)}`, {
-                        state: { resultStack: [...trail, p] },
+                        state: {
+                          resultStack: [...trail, p],
+                          ...(locState?.returnTo != null ? { returnTo: locState.returnTo } : {}),
+                        },
                       });
                     }}
                     tagDots={tagsForPath(tagsState, p)}
@@ -519,13 +533,14 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
                       if (pathChooserOpenInAppMode) {
                         setOpenError(null);
                         void openPath(p).catch((err) => {
-                          setOpenError(String(err));
+                          setOpenError(invokeErrorText(err));
                         });
                       } else {
                         navigate(`/file?path=${encodeURIComponent(p)}`, {
                           state: {
                             resultStack: [...trail, p],
                             sameContentPaths: variants.map((v) => v.file.path),
+                            ...(locState?.returnTo != null ? { returnTo: locState.returnTo } : {}),
                           },
                         });
                       }

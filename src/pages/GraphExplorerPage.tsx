@@ -10,10 +10,12 @@ import {
   ComboboxList,
 } from "@/components/ui/combobox";
 import { Input } from "@/components/ui/input";
+import { ErrorMessage } from "@/components/ErrorMessage";
 import { PageHeader } from "@/components/PageHeader";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { invokeErrorText } from "@/lib/errors";
 import { navigateBackOrFallback } from "@/lib/navigateBack";
 import type { LocalConfig } from "@/lib/localConfig";
 import { runGraphLayout, type GraphLayoutAlgorithm } from "@/lib/graphLayout";
@@ -40,6 +42,12 @@ const LIMIT_DEBOUNCE_MS = 350;
 const HARD_WARN = 2000;
 /** Ring color when point has no tag ids or no matching TagDef */
 const UNTAGGED_RING = "#94a3b8";
+/** Max visible slices on the tag ring; beyond this, last slice is `RING_OVERFLOW_COLOR`. */
+const RING_MAX_SEGMENTS = 4;
+/** Muted slice when a point has more tagged colors than `RING_MAX_SEGMENTS - 1`. */
+const RING_OVERFLOW_COLOR = "#78716c";
+/** Radians of gap between ring segments (readability at small thumbnails). */
+const RING_GAP_RAD = 0.1;
 
 const ALGORITHM_OPTIONS = [
   { value: "pca" as const, label: "PCA" },
@@ -73,13 +81,61 @@ function normalizeCoords(x: number[], y: number[]): { nx: number[]; ny: number[]
   return { nx, ny };
 }
 
-function ringColorForTags(tagIds: string[], tagsState: TagsState): string {
+function tagRingColorsOrdered(tagIds: string[], tagsState: TagsState): string[] {
   const map = new Map(tagsState.tags.map((t) => [t.id, t.color]));
+  const out: string[] = [];
   for (const id of tagIds) {
     const c = map.get(id);
-    if (c) return c;
+    if (c) out.push(c);
   }
-  return UNTAGGED_RING;
+  return out;
+}
+
+function strokeSegmentedTagRing(
+  ctx: CanvasRenderingContext2D,
+  px: number,
+  py: number,
+  ringR: number,
+  scale: number,
+  colors: string[],
+): void {
+  ctx.lineWidth = 2.5 / scale;
+  ctx.lineCap = "butt";
+
+  if (colors.length === 0) {
+    ctx.strokeStyle = UNTAGGED_RING;
+    ctx.beginPath();
+    ctx.arc(px, py, ringR, 0, Math.PI * 2);
+    ctx.stroke();
+    return;
+  }
+
+  if (colors.length === 1) {
+    ctx.strokeStyle = colors[0]!;
+    ctx.beginPath();
+    ctx.arc(px, py, ringR, 0, Math.PI * 2);
+    ctx.stroke();
+    return;
+  }
+
+  const segments: string[] =
+    colors.length <= RING_MAX_SEGMENTS
+      ? colors
+      : [...colors.slice(0, RING_MAX_SEGMENTS - 1), RING_OVERFLOW_COLOR];
+
+  const n = segments.length;
+  const gap = RING_GAP_RAD;
+  const sweep = (2 * Math.PI - n * gap) / n;
+  const startBase = -Math.PI / 2;
+
+  for (let i = 0; i < n; i++) {
+    const a0 = startBase + i * (sweep + gap);
+    const a1 = a0 + sweep;
+    ctx.strokeStyle = segments[i]!;
+    ctx.beginPath();
+    ctx.arc(px, py, ringR, a0, a1);
+    ctx.stroke();
+  }
 }
 
 export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
@@ -125,6 +181,15 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
     [points],
   );
   const paths = useMemo(() => points.map((p) => p.path), [points]);
+
+  const legendShowsRingOverflow = useMemo(() => {
+    for (const pt of points) {
+      if (tagRingColorsOrdered(pt.tagIds, tagsState).length > RING_MAX_SEGMENTS) {
+        return true;
+      }
+    }
+    return false;
+  }, [points, tagsState]);
   const { thumbByPath, thumbFailedByPath } = useThumbnailsForPaths(pathsKey, paths);
 
   const imgCacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
@@ -160,13 +225,8 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
       const py = MARGIN + pt.ny * innerH;
       const isSel = pt.path === selectedPath;
       const img = imgCacheRef.current.get(pt.path);
-      const ringColor = ringColorForTags(pt.tagIds, tagsState);
-
-      ctx.strokeStyle = ringColor;
-      ctx.lineWidth = 2.5 / scale;
-      ctx.beginPath();
-      ctx.arc(px, py, radius + tagRingExtra, 0, Math.PI * 2);
-      ctx.stroke();
+      const ringColors = tagRingColorsOrdered(pt.tagIds, tagsState);
+      strokeSegmentedTagRing(ctx, px, py, radius + tagRingExtra, scale, ringColors);
 
       ctx.save();
       ctx.beginPath();
@@ -290,7 +350,7 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
         setPan({ x: 0, y: 0 });
         setScale(1);
       } catch (e) {
-        setError(String(e));
+        setError(invokeErrorText(e));
       } finally {
         setLoading(false);
         setLayoutBusy(false);
@@ -360,12 +420,12 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
         </Tooltip>
         <PageHeader
           heading="Graph explorer"
-          subtitle="Content embeddings · manifold_files_content_v2"
+          subtitle="Content embeddings · content_embeddings"
         />
       </div>
 
       <div className="mb-3 flex flex-col gap-3">
-        <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
+        <div className="flex flex-wrap items-start gap-x-4 gap-y-3">
           <label className="flex flex-col gap-1 text-left">
             <span className="app-label text-xs">Limit</span>
             <Input
@@ -403,7 +463,7 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
               </ComboboxContent>
             </Combobox>
           </label>
-          <div className="flex min-w-[12rem] max-w-full flex-1 flex-col gap-1.5">
+          <div className="flex min-w-[12rem] max-w-full flex-1 flex-col gap-1 text-left">
             <span className="app-label text-xs">Filter by tags (OR)</span>
             {tagsState.tags.length === 0 ? (
               <p className="text-xs leading-9 text-black/45">Define tags in Settings to filter this view.</p>
@@ -448,6 +508,12 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
               <span className="h-2 w-2 rounded-full" style={{ backgroundColor: UNTAGGED_RING }} />
               Untagged
             </span>
+            {legendShowsRingOverflow ? (
+              <span className="inline-flex items-center gap-1">
+                <span className="h-2 w-2 rounded-full" style={{ backgroundColor: RING_OVERFLOW_COLOR }} />
+                5+ tag colors
+              </span>
+            ) : null}
           </div>
         ) : null}
       </div>
@@ -468,9 +534,7 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
           </div>
         ) : error ? (
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-4">
-            <p className="max-w-md text-center text-sm text-muted-foreground" role="alert">
-              {error}
-            </p>
+            <ErrorMessage variant="centered" className="max-w-md" message={error} />
           </div>
         ) : noResults ? (
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-4">
@@ -550,7 +614,9 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
             }
             setSelectedPath(path);
             if (e.detail === 2) {
-              navigate(`/file?path=${encodeURIComponent(path)}`);
+              navigate(`/file?path=${encodeURIComponent(path)}`, {
+                state: { returnTo: "/graph" },
+              });
             }
           }}
         />

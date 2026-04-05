@@ -14,8 +14,8 @@ import {
   tagIdsForPath,
   type TagsState,
 } from "./tags";
+import { autoTagLog, formatError } from "@/lib/log";
 
-// Redefining a minimal version for our needs
 type AutoTagHit = {
   file: { path: string };
   score: number;
@@ -23,13 +23,9 @@ type AutoTagHit = {
 
 let _navigateToReviewTags: () => void = () => {};
 
-/** Registered from the app shell so auto-tag toasts can open the review page. */
 export function setNavigateToReviewTagsCallback(cb: () => void) {
   _navigateToReviewTags = cb;
 }
-
-/** Max neighbors to judge; must stay within `qdrant_similar_by_path` clamp (64) after path scoping. */
-const AUTO_TAG_JUDGE_LIMIT = 25;
 
 export async function runAutoTagOrchestration(
   cfg: LocalConfig,
@@ -51,26 +47,20 @@ export async function runAutoTagOrchestration(
   );
 
   try {
-    // Fetch the max Qdrant allows, then keep neighbors that match the same include/exclude rules as
-    // the file overview "Similar" list (`FileResultPage` uses `isPathSelected`). Otherwise auto-tag
-    // judges the global top N for the whole index — often a different set than the UI.
-    const rawHits = (await invoke("qdrant_similar_by_path", {
-      args: { sourceId: cfg.sourceId, path: sourcePath, limit: 64 },
-    })) as AutoTagHit[];
+    const rawHits = await invoke<AutoTagHit[]>("qdrant_similar_by_path", {
+      args: { sourceId: cfg.sourceId, path: sourcePath, limit: cfg.topK },
+    });
 
     const hits = rawHits
       .filter((h) => isPathSelected(h.file.path, cfg))
-      .slice(0, AUTO_TAG_JUDGE_LIMIT);
+      .slice(0, cfg.topK);
 
     const matchedPaths: string[] = [];
 
     const promises = hits.map(async (hit) => {
-      // Skip if it's the exact same file
       if (hit.file.path === sourcePath) {
         return;
       }
-
-      // Skip if already confirmed or already pending for this tag (other pending tags are OK).
       if (tagIdsForPath(tagsState, hit.file.path).includes(tagId)) {
         return;
       }
@@ -78,7 +68,6 @@ export async function runAutoTagOrchestration(
         return;
       }
 
-      console.log(`[AutoTag] labeled='${sourcePath}' candidate='${hit.file.path}'`);
       try {
         const isMatch = await invoke<boolean>("gemini_judge_tag", {
           args: {
@@ -94,10 +83,11 @@ export async function runAutoTagOrchestration(
           matchedPaths.push(hit.file.path);
         }
       } catch (err) {
-        console.error(
-          `[AutoTag] judge failed labeled='${sourcePath}' candidate='${hit.file.path}'`,
-          err,
-        );
+        autoTagLog.error("judge failed", {
+          labeled: sourcePath,
+          candidate: hit.file.path,
+          error: formatError(err),
+        });
       }
     });
 
@@ -151,7 +141,7 @@ export async function runAutoTagOrchestration(
       },
     );
   } catch (e) {
-    console.error("[AutoTag] Auto-tagging failed:", e);
+    autoTagLog.error("Auto-tagging failed", { error: formatError(e) });
     toast.error(`Auto-tagging failed: ${String(e)}`, { id: toastId });
   }
 }

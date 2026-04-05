@@ -15,7 +15,6 @@ export type TagsState = {
 
 const KEY = "manifold:tags:v1";
 
-/** Canonical path key so the same file always maps to one record (handles \\ vs /, trailing slashes). */
 export function normalizePathKey(path: string): string {
   return path.replace(/\\/g, "/").replace(/\/+$/, "");
 }
@@ -78,7 +77,6 @@ export function tagIdsForPath(state: TagsState, path: string): string[] {
   return [...set];
 }
 
-/** Pending auto-tag ids for a path (merged across any alias keys). */
 export function pendingTagIdsForPath(state: TagsState, path: string): string[] {
   const k = normalizePathKey(path);
   const set = new Set<string>();
@@ -109,13 +107,12 @@ export function setPathTags(state: TagsState, path: string, tagIds: string[]): T
 
 export function togglePathTag(state: TagsState, path: string, tagId: string): TagsState {
   const cur = new Set(tagIdsForPath(state, path));
-  
+
   if (cur.has(tagId)) cur.delete(tagId);
   else cur.add(tagId);
-  
+
   const nextState = setPathTags(state, path, [...cur]);
-  
-  // Also clear it from pending if the user manually toggled it
+
   const curPending = new Set(pendingTagIdsForPath(nextState, path));
   if (curPending.has(tagId)) {
     curPending.delete(tagId);
@@ -129,7 +126,7 @@ export function togglePathTag(state: TagsState, path: string, tagId: string): Ta
     }
     return { ...nextState, pendingAutoTags: nextPending };
   }
-  
+
   return nextState;
 }
 
@@ -148,7 +145,6 @@ export function removeTagEverywhere(state: TagsState, tagId: string): TagsState 
   return { tags, pathToTagIds, pendingAutoTags };
 }
 
-/** Merge only; use `addPendingAutoTag` or `mergePendingAutoTagBatch` to persist. */
 export function mergePendingAutoTag(state: TagsState, path: string, tagId: string): TagsState {
   const k = normalizePathKey(path);
   const cur = new Set(pendingTagIdsForPath(state, path));
@@ -163,12 +159,10 @@ export function mergePendingAutoTag(state: TagsState, path: string, tagId: strin
 
 export function addPendingAutoTag(state: TagsState, path: string, tagId: string): TagsState {
   const newState = mergePendingAutoTag(state, path, tagId);
-  // Immediately persist pending auto-tags so they are available across instances/reloads
   saveTagsState(newState);
   return newState;
 }
 
-/** Apply several pending adds in one pass (avoids parallel `setTagsState` clobbering). */
 export function mergePendingAutoTagBatch(
   state: TagsState,
   paths: string[],
@@ -181,7 +175,6 @@ export function mergePendingAutoTagBatch(
   return next;
 }
 
-/** Total (path × tag) pending rows — matches review UI list length. */
 export function countPendingSuggestionPairs(state: TagsState): number {
   let n = 0;
   for (const ids of Object.values(state.pendingAutoTags)) {
@@ -242,7 +235,6 @@ export function rejectAllPendingAutoTags(state: TagsState): TagsState {
   return { ...state, pendingAutoTags: {} };
 }
 
-/** Accept every pending suggestion for a single tag (all paths). */
 export function acceptAllPendingForTag(state: TagsState, tagId: string): TagsState {
   let nextState = state;
   const paths = Object.keys(state.pendingAutoTags).filter((p) =>
@@ -254,7 +246,6 @@ export function acceptAllPendingForTag(state: TagsState, tagId: string): TagsSta
   return nextState;
 }
 
-/** Drop pending suggestions for `tagId` on every path. */
 export function rejectAllPendingForTag(state: TagsState, tagId: string): TagsState {
   const nextPending = { ...state.pendingAutoTags };
   for (const path of Object.keys(nextPending)) {
