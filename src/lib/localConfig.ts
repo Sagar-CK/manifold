@@ -88,7 +88,7 @@ function defaultConfig(): LocalConfig {
     include: [],
     exclude: [],
     useDefaultFolderExcludes: true,
-    extensions: ["png", "jpg", "jpeg", "pdf", "mp3", "wav", "mp4", "mov"],
+    extensions: ["png", "jpg", "jpeg", "pdf"],
     scoreThreshold: 0.3,
     searchMode: "topK",
     topK: 10,
