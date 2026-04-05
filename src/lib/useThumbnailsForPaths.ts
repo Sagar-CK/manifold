@@ -3,17 +3,26 @@ import { invoke } from "@tauri-apps/api/core";
 
 const THUMBNAIL_CONCURRENCY = 4;
 
+const sharedCache: Record<string, string> = {};
+const sharedFailed: Record<string, true> = {};
+
 export function isPreviewablePath(path: string) {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
   return ext === "png" || ext === "jpg" || ext === "jpeg" || ext === "pdf";
 }
 
-/**
- * Loads PNG thumbnails for previewable paths (in-memory cache for this hook instance).
- */
-export function useThumbnailsForPaths(pathsKey: string, paths: string[]) {
-  const cacheRef = useRef<Record<string, string>>({});
-  const failedRef = useRef<Record<string, true>>({});
+export type UseThumbnailsForPathsOptions = {
+  onThumbError?: (path: string, error: unknown) => void;
+};
+
+/** Loads PNG thumbnails for previewable paths (module-level cache). */
+export function useThumbnailsForPaths(
+  pathsKey: string,
+  paths: string[],
+  options?: UseThumbnailsForPathsOptions,
+) {
+  const onThumbErrorRef = useRef(options?.onThumbError);
+  onThumbErrorRef.current = options?.onThumbError;
   const pathsRef = useRef(paths);
   pathsRef.current = paths;
   const [thumbByPath, setThumbByPath] = useState<Record<string, string>>({});
@@ -24,17 +33,17 @@ export function useThumbnailsForPaths(pathsKey: string, paths: string[]) {
     const cachedMap: Record<string, string> = {};
     const failedMap: Record<string, true> = {};
     for (const p of paths) {
-      const c = cacheRef.current[p];
+      const c = sharedCache[p];
       if (c) cachedMap[p] = c;
-      if (failedRef.current[p]) failedMap[p] = true;
+      if (sharedFailed[p]) failedMap[p] = true;
     }
     setThumbByPath(cachedMap);
     setThumbFailedByPath(failedMap);
 
     const previewPaths = paths.filter((p) => {
       if (!isPreviewablePath(p)) return false;
-      if (cacheRef.current[p]) return false;
-      if (failedRef.current[p]) return false;
+      if (sharedCache[p]) return false;
+      if (sharedFailed[p]) return false;
       return true;
     });
 
@@ -53,8 +62,8 @@ export function useThumbnailsForPaths(pathsKey: string, paths: string[]) {
             args: { path: p, max_edge: 96, page: 0 },
           })) as { png_base64: string };
           const dataUrl = `data:image/png;base64,${thumb.png_base64}`;
-          cacheRef.current[p] = dataUrl;
-          delete failedRef.current[p];
+          sharedCache[p] = dataUrl;
+          delete sharedFailed[p];
           if (!cancelled) {
             setThumbByPath((m) => ({ ...m, [p]: dataUrl }));
             setThumbFailedByPath((m) => {
@@ -64,11 +73,11 @@ export function useThumbnailsForPaths(pathsKey: string, paths: string[]) {
               return next;
             });
           }
-        } catch {
-          failedRef.current[p] = true;
-          if (!cancelled) {
-            setThumbFailedByPath((m) => ({ ...m, [p]: true }));
-          }
+        } catch (e) {
+          sharedFailed[p] = true;
+          if (cancelled) return;
+          onThumbErrorRef.current?.(p, e);
+          setThumbFailedByPath((m) => ({ ...m, [p]: true }));
         }
       }
     });

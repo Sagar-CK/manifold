@@ -1,62 +1,39 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
-import { homeDir } from "@tauri-apps/api/path";
 import { openPath } from "@tauri-apps/plugin-opener";
-import { ChartScatter, ListChecks, ListFilter, Settings } from "lucide-react";
+import { SearchPageHeaderActions } from "../components/search/SearchPageHeaderActions";
+import { SearchQueryBar } from "../components/search/SearchQueryBar";
+import type { MatchTypeFilter } from "../components/search/searchTypes";
 import { Button } from "../components/ui/button";
-import { Spinner } from "../components/ui/spinner";
 import { ScrollArea } from "../components/ui/scroll-area";
-import {
-  InputGroup,
-  InputGroupAddon,
-  InputGroupButton,
-  InputGroupInput,
-} from "../components/ui/input-group";
-import {
-  DropdownMenu,
-  DropdownMenuCheckboxItem,
-  DropdownMenuContent,
-  DropdownMenuGroup,
-  DropdownMenuTrigger,
-} from "../components/ui/dropdown-menu";
-import {
-  AlertDialog,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "../components/ui/alert-dialog";
+import { ContentHashPathPickerDialog } from "../components/ContentHashPathPickerDialog";
 import type { LocalConfig } from "../lib/localConfig";
-import { formatIndexedPathForDisplay } from "../lib/pathDisplay";
 import { isPathSelected } from "../lib/pathSelection";
 import {
-  loadTagsState,
   normalizePathKey,
   tagIdsForPath,
   tagsForPath,
-  type TagsState,
 } from "../lib/tags";
 import { ErrorMessage } from "../components/ErrorMessage";
 import { EmbeddingStatusPanel } from "../components/EmbeddingStatusPanel";
 import { PageHeader } from "../components/PageHeader";
 import { FileSearchResultCard } from "../components/FileSearchResultCard";
 import { SearchNoResults } from "../components/SearchNoResults";
-import { TagFilterPill } from "../components/TagFilterPill";
 import { TagsPathDropdown } from "../components/TagsPathDropdown";
-import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip";
 import type { FileResultLocationState } from "./FileResultPage";
+import { useEmbeddingStatus } from "@/context/EmbeddingStatusContext";
 import { invokeErrorText } from "@/lib/errors";
 import { isSearchDebugEnabled, logSearchRun, searchLog } from "@/lib/log";
+import { useIndexedPointCount } from "@/lib/qdrantPointCount";
+import { useHomeDir } from "@/lib/useHomeDir";
+import { useTagsState } from "@/lib/useTagsState";
+import { isPreviewablePath, useThumbnailsForPaths } from "@/lib/useThumbnailsForPaths";
 
 function formatSimilarityScore(score: number) {
   if (score >= 0 && score <= 1) return `${(score * 100).toFixed(1)}%`;
   return score.toFixed(4);
 }
-
-const THUMBNAIL_CONCURRENCY = 4;
 
 type SearchResult = {
   score: number;
@@ -65,11 +42,6 @@ type SearchResult = {
     path: string;
     contentHash: string;
   };
-};
-
-type MatchTypeFilter = {
-  textMatch: boolean;
-  semantic: boolean;
 };
 
 const MATCH_TYPE_FILTER_KEY = "manifold:search:matchTypeFilter:v1";
@@ -153,23 +125,15 @@ function groupResultsByContentHash(results: SearchResult[]): SearchResultGroup[]
   return Array.from(byHash.values());
 }
 
-export function SearchPage({
-  cfg,
-  embedding,
-  hasPendingEmbeds,
-  embeddingPhase,
-  embedProgress,
-  lastEmbedError,
-  embedFailures,
-}: {
-  cfg: LocalConfig;
-  embedding: boolean;
-  hasPendingEmbeds: boolean;
-  embeddingPhase: "idle" | "scanning" | "embedding" | "paused" | "cancelling" | "done" | "error";
-  embedProgress: { processed: number; total: number; status: string };
-  lastEmbedError: string | null;
-  embedFailures: Array<{ path: string; reason: string }>;
-}) {
+export function SearchPage({ cfg }: { cfg: LocalConfig }) {
+  const {
+    embedding,
+    hasPendingEmbeds,
+    embeddingPhase,
+    embedProgress,
+    lastEmbedError,
+    embedFailures,
+  } = useEmbeddingStatus();
   const [query, setQuery] = useState("");
   const [searchTypeMenuOpen, setSearchTypeMenuOpen] = useState(false);
   const [matchTypeFilter, setMatchTypeFilter] = useState<MatchTypeFilter>(loadMatchTypeFilter);
@@ -179,31 +143,19 @@ export function SearchPage({
   }, [matchTypeFilter]);
   const [isSearching, setIsSearching] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
-  const [embeddedCount, setEmbeddedCount] = useState<number | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [results, setResults] = useState<SearchResult[]>([]);
   const [selectedGroupForOpen, setSelectedGroupForOpen] = useState<SearchResultGroup | null>(null);
-  /** Cmd/Ctrl+click on duplicate-content results: pick which path to open in the default app. */
   const [pathChooserOpen, setPathChooserOpen] = useState(false);
-  const [homePath, setHomePath] = useState("");
-  const [thumbByPath, setThumbByPath] = useState<Record<string, string>>({});
-  const [thumbFailedByPath, setThumbFailedByPath] = useState<Record<string, true>>({});
+  const homePath = useHomeDir();
+  const [searchThumbnailKey, setSearchThumbnailKey] = useState("");
   const navigate = useNavigate();
   const searchRunSeqRef = useRef(0);
   const latestRunRef = useRef(0);
-  const tagBrowseThumbRunSeqRef = useRef(0);
   const runStartMsRef = useRef(0);
-  const thumbCacheRef = useRef<Record<string, string>>({});
-  const thumbFailedRef = useRef<Record<string, true>>({});
   const fullTextCacheRef = useRef<Record<string, string>>({});
-  const [tagsState, setTagsState] = useState<TagsState>(() => loadTagsState());
+  const [tagsState, setTagsState] = useTagsState();
   const [tagFilterIds, setTagFilterIds] = useState<string[]>(loadTagFilterIds);
-
-  useEffect(() => {
-    const onTagsUpdated = () => setTagsState(loadTagsState());
-    window.addEventListener("manifold:tags-updated", onTagsUpdated);
-    return () => window.removeEventListener("manifold:tags-updated", onTagsUpdated);
-  }, []);
 
   useEffect(() => {
     saveTagFilterIds(tagFilterIds);
@@ -225,69 +177,46 @@ export function SearchPage({
     return n;
   }, [tagsState.pendingAutoTags]);
 
+  const [embeddedCount] = useIndexedPointCount(cfg.sourceId, {
+    refetchAfterEmbedSettles: {
+      embedding,
+      hasPendingEmbeds,
+      embeddingPhase,
+    },
+  });
+
   const liveIndexedCount =
     embedding || hasPendingEmbeds
       ? Math.max(embeddedCount ?? 0, embedProgress.processed)
       : embeddedCount;
 
-  useEffect(() => {
-    let cancelled = false;
-    async function loadCount() {
-      try {
-        const res = (await invoke("qdrant_count_points", {
-          args: { sourceId: cfg.sourceId },
-        })) as { count: number } | { count: string };
-        const count = typeof res.count === "string" ? Number.parseInt(res.count, 10) : res.count;
-        if (!cancelled) setEmbeddedCount(Number.isFinite(count) ? count : 0);
-      } catch {
-        if (!cancelled) setEmbeddedCount(null);
-      }
-    }
-    void loadCount();
-    return () => {
-      cancelled = true;
-    };
-  }, [cfg.sourceId]);
-
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const home = await homeDir();
-        if (!cancelled) setHomePath(home);
-      } catch {
-        if (!cancelled) setHomePath("");
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    // Refresh once the embedding job is no longer running so empty-state text
-    // reflects the final indexed count without requiring a route remount.
-    if (embedding || hasPendingEmbeds) return;
-    if (embeddingPhase !== "done" && embeddingPhase !== "idle" && embeddingPhase !== "error") return;
-
-    let cancelled = false;
-    async function refreshCountAfterJobSettles() {
-      try {
-        const res = (await invoke("qdrant_count_points", {
-          args: { sourceId: cfg.sourceId },
-        })) as { count: number } | { count: string };
-        const count = typeof res.count === "string" ? Number.parseInt(res.count, 10) : res.count;
-        if (!cancelled) setEmbeddedCount(Number.isFinite(count) ? count : 0);
-      } catch {
-        if (!cancelled) setEmbeddedCount(null);
-      }
-    }
-
-    void refreshCountAfterJobSettles();
-    return () => {
-      cancelled = true;
-    };
-  }, [cfg.sourceId, embedding, hasPendingEmbeds, embeddingPhase]);
+  const searchCfgFingerprint = useMemo(
+    () =>
+      JSON.stringify({
+        sourceId: cfg.sourceId,
+        searchMode: cfg.searchMode,
+        scoreThreshold: cfg.scoreThreshold,
+        topK: cfg.topK,
+        include: [...cfg.include].sort(),
+        exclude: [...cfg.exclude].sort(),
+        useDefaultFolderExcludes: cfg.useDefaultFolderExcludes,
+        extensions: [...cfg.extensions].sort(),
+        textMatch: matchTypeFilter.textMatch,
+        semantic: matchTypeFilter.semantic,
+      }),
+    [
+      cfg.sourceId,
+      cfg.searchMode,
+      cfg.scoreThreshold,
+      cfg.topK,
+      cfg.include,
+      cfg.exclude,
+      cfg.useDefaultFolderExcludes,
+      cfg.extensions,
+      matchTypeFilter.textMatch,
+      matchTypeFilter.semantic,
+    ],
+  );
 
   async function runSearch(queryText: string) {
     const runId = ++searchRunSeqRef.current;
@@ -364,87 +293,16 @@ export function SearchPage({
     if (latestRunRef.current !== runId) return;
     setHasSearched(true);
     setResults(selectedOnly);
-    const cachedThumbsForSelection: Record<string, string> = {};
-    const failedThumbsForSelection: Record<string, true> = {};
-    for (const r of selectedOnly) {
-      const cached = thumbCacheRef.current[r.file.path];
-      if (cached) cachedThumbsForSelection[r.file.path] = cached;
-      if (thumbFailedRef.current[r.file.path]) failedThumbsForSelection[r.file.path] = true;
-    }
-    setThumbByPath(cachedThumbsForSelection);
-    setThumbFailedByPath(failedThumbsForSelection);
+    setSearchThumbnailKey(`${runId}\t${selectedOnly.map((r) => r.file.path).join("\0")}`);
     setIsSearching(false);
 
-    const previewPaths = selectedOnly
-      .map((r) => r.file.path)
-      .filter((p) => {
-        if (thumbCacheRef.current[p]) return false;
-        if (thumbFailedRef.current[p]) return false;
-        const ext = p.split(".").pop()?.toLowerCase() ?? "";
-        return ext === "png" || ext === "jpg" || ext === "jpeg" || ext === "pdf";
-      });
-    void (async () => {
-      const thumbStartMs = performance.now();
-      let thumbAttempts = 0;
-      let thumbSuccesses = 0;
-      let nextIndex = 0;
-      const workerCount = Math.min(THUMBNAIL_CONCURRENCY, previewPaths.length);
-
-      const workers = Array.from({ length: workerCount }, async () => {
-        while (nextIndex < previewPaths.length) {
-          if (latestRunRef.current !== runId) return;
-          const current = nextIndex;
-          nextIndex += 1;
-          const p = previewPaths[current];
-          thumbAttempts += 1;
-          try {
-            const thumb = (await invoke("thumbnail_image_base64_png", {
-              args: { path: p, max_edge: 96, page: 0 },
-            })) as { png_base64: string };
-            const dataUrl = `data:image/png;base64,${thumb.png_base64}`;
-            thumbCacheRef.current[p] = dataUrl;
-            delete thumbFailedRef.current[p];
-            thumbSuccesses += 1;
-            if (latestRunRef.current === runId) {
-              setThumbByPath((m) => ({ ...m, [p]: dataUrl }));
-              setThumbFailedByPath((m) => {
-                if (!m[p]) return m;
-                const next = { ...m };
-                delete next[p];
-                return next;
-              });
-            }
-          } catch (e) {
-            thumbFailedRef.current[p] = true;
-            logSearchRun(
-              runId,
-              "thumbnail generation failed",
-              {
-                path: p,
-                error: String(e),
-              },
-              "warn",
-            );
-            if (latestRunRef.current === runId) {
-              setThumbFailedByPath((m) => ({ ...m, [p]: true }));
-            }
-          }
-        }
-      });
-
-      await Promise.all(workers);
-      logSearchRun(runId, "thumbnails completed", {
-        elapsedMs: Math.round(performance.now() - thumbStartMs),
-        attempts: thumbAttempts,
-        successes: thumbSuccesses,
-        cachedBeforeRun: Object.keys(cachedThumbsForSelection).length,
-      });
-    })();
+    const thumbnailsQueued = selectedOnly.filter((r) =>
+      isPreviewablePath(r.file.path),
+    ).length;
     logSearchRun(runId, "search completed", {
       totalElapsedMs: Math.round(performance.now() - runStartMsRef.current),
       totalResults: selectedOnly.length,
-      cachedThumbsUsed: Object.keys(cachedThumbsForSelection).length,
-        thumbnailsQueued: previewPaths.length,
+      thumbnailsQueued,
     });
   }
 
@@ -454,10 +312,7 @@ export function SearchPage({
       setHasSearched(false);
       setIsSearching(false);
       setResults([]);
-      if (tagFilterIds.length === 0) {
-        setThumbByPath({});
-        setThumbFailedByPath({});
-      }
+      setSearchThumbnailKey("");
       return;
     }
 
@@ -471,20 +326,7 @@ export function SearchPage({
       void runSearch(trimmed);
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [
-    query,
-    tagFilterIds.length,
-    cfg.sourceId,
-    cfg.searchMode,
-    cfg.scoreThreshold,
-    cfg.topK,
-    cfg.include,
-    cfg.exclude,
-    cfg.useDefaultFolderExcludes,
-    cfg.extensions,
-    matchTypeFilter.textMatch,
-    matchTypeFilter.semantic,
-  ]);
+  }, [query, tagFilterIds.length, searchCfgFingerprint]);
 
   const tagBrowseResults = useMemo((): SearchResult[] => {
     const trimmed = query.trim();
@@ -508,65 +350,44 @@ export function SearchPage({
     return out;
   }, [query, tagFilterIds, tagsState.pathToTagIds, cfg]);
 
-  useEffect(() => {
-    if (tagBrowseResults.length === 0) return;
-    const runId = ++tagBrowseThumbRunSeqRef.current;
-    const paths = tagBrowseResults.map((r) => r.file.path);
+  const tagFilterSet = useMemo(() => new Set(tagFilterIds), [tagFilterIds]);
+  const showingTagBrowse = query.trim() === "" && tagFilterSet.size > 0;
+  const pathsForThumbs = useMemo(() => {
+    if (showingTagBrowse) return tagBrowseResults.map((r) => r.file.path);
+    return results.map((r) => r.file.path);
+  }, [showingTagBrowse, tagBrowseResults, results]);
 
-    const cachedThumbsForSelection: Record<string, string> = {};
-    const failedThumbsForSelection: Record<string, true> = {};
-    for (const p of paths) {
-      const cached = thumbCacheRef.current[p];
-      if (cached) cachedThumbsForSelection[p] = cached;
-      if (thumbFailedRef.current[p]) failedThumbsForSelection[p] = true;
+  const thumbPathsKey = useMemo(() => {
+    if (showingTagBrowse) {
+      return `tag:${tagBrowseResults.map((r) => r.file.path).join("\0")}`;
     }
-    setThumbByPath(cachedThumbsForSelection);
-    setThumbFailedByPath(failedThumbsForSelection);
+    return `search:${searchThumbnailKey}`;
+  }, [showingTagBrowse, tagBrowseResults, searchThumbnailKey]);
 
-    const previewPaths = paths.filter((p) => {
-      if (thumbCacheRef.current[p]) return false;
-      if (thumbFailedRef.current[p]) return false;
-      const ext = p.split(".").pop()?.toLowerCase() ?? "";
-      return ext === "png" || ext === "jpg" || ext === "jpeg" || ext === "pdf";
-    });
-
-    void (async () => {
-      let nextIndex = 0;
-      const workerCount = Math.min(THUMBNAIL_CONCURRENCY, previewPaths.length);
-      const workers = Array.from({ length: workerCount }, async () => {
-        while (nextIndex < previewPaths.length) {
-          if (tagBrowseThumbRunSeqRef.current !== runId) return;
-          const current = nextIndex;
-          nextIndex += 1;
-          const p = previewPaths[current];
-          try {
-            const thumb = (await invoke("thumbnail_image_base64_png", {
-              args: { path: p, max_edge: 96, page: 0 },
-            })) as { png_base64: string };
-            const dataUrl = `data:image/png;base64,${thumb.png_base64}`;
-            thumbCacheRef.current[p] = dataUrl;
-            delete thumbFailedRef.current[p];
-            if (tagBrowseThumbRunSeqRef.current === runId) {
-              setThumbByPath((m) => ({ ...m, [p]: dataUrl }));
-              setThumbFailedByPath((m) => {
-                if (!m[p]) return m;
-                const next = { ...m };
-                delete next[p];
-                return next;
-              });
-            }
-          } catch (e) {
-            thumbFailedRef.current[p] = true;
-            searchLog.warn("tag-browse thumbnail failed", { path: p, error: String(e) });
-            if (tagBrowseThumbRunSeqRef.current === runId) {
-              setThumbFailedByPath((m) => ({ ...m, [p]: true }));
-            }
-          }
+  const { thumbByPath, thumbFailedByPath } = useThumbnailsForPaths(
+    thumbPathsKey,
+    pathsForThumbs,
+    {
+      onThumbError: (path, e) => {
+        if (thumbPathsKey.startsWith("tag:")) {
+          searchLog.warn("tag-browse thumbnail failed", {
+            path,
+            error: String(e),
+          });
+          return;
         }
-      });
-      await Promise.all(workers);
-    })();
-  }, [tagBrowseResults]);
+        const rid = latestRunRef.current;
+        if (rid > 0) {
+          logSearchRun(
+            rid,
+            "thumbnail generation failed",
+            { path, error: String(e) },
+            "warn",
+          );
+        }
+      },
+    },
+  );
 
   useEffect(() => {
     if (!isSearchDebugEnabled() || latestRunRef.current === 0) return;
@@ -578,8 +399,6 @@ export function SearchPage({
     });
   }, [results, thumbByPath]);
 
-  const tagFilterSet = new Set(tagFilterIds);
-  const showingTagBrowse = query.trim() === "" && tagFilterSet.size > 0;
   const sourceResults = showingTagBrowse ? tagBrowseResults : results;
   const typeFilteredResults = showingTagBrowse
     ? sourceResults
@@ -608,143 +427,22 @@ export function SearchPage({
   return (
     <section className="flex h-full min-h-0 flex-col">
       <div className="relative flex flex-col items-center justify-center text-center gap-2 mb-6">
-        <div className="absolute right-0 top-0 flex items-center gap-0.5">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="relative text-muted-foreground"
-                asChild
-              >
-                <Link
-                  to="/review-tags"
-                  aria-label={
-                    pendingReviewCount > 0
-                      ? `Review ${pendingReviewCount} suggested tag${pendingReviewCount === 1 ? "" : "s"}`
-                      : "Review suggested tags"
-                  }
-                >
-                  <ListChecks className="h-5 w-5" aria-hidden="true" />
-                  {pendingReviewCount > 0 ? (
-                    <span className="absolute -right-0.5 -top-0.5 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-orange-500 px-1 text-[10px] font-semibold leading-none text-white">
-                      {pendingReviewCount > 99 ? "99+" : pendingReviewCount}
-                    </span>
-                  ) : null}
-                </Link>
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="bottom">Review suggested tags</TooltipContent>
-          </Tooltip>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button variant="ghost" size="icon" className="text-muted-foreground" asChild>
-                <Link to="/graph" aria-label="Open graph explorer">
-                  <ChartScatter className="h-5 w-5" aria-hidden="true" />
-                </Link>
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="bottom">Graph explorer</TooltipContent>
-          </Tooltip>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button variant="ghost" size="icon" className="text-muted-foreground" asChild>
-                <Link to="/settings" aria-label="Open settings">
-                  <Settings className="h-5 w-5" aria-hidden="true" />
-                </Link>
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="bottom">Settings</TooltipContent>
-          </Tooltip>
-        </div>
-
+        <SearchPageHeaderActions pendingReviewCount={pendingReviewCount} />
         <PageHeader heading="manifold" subtitle="native indexed file search" />
       </div>
 
-      <div className="flex w-full flex-col">
-        <InputGroup className="w-full">
-          <InputGroupInput
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search across your files…"
-            className="flex-1"
-            aria-label="Search query"
-          />
-          <InputGroupAddon align="inline-end">
-            <DropdownMenu open={searchTypeMenuOpen} onOpenChange={setSearchTypeMenuOpen}>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <span className="inline-flex">
-                    <DropdownMenuTrigger asChild>
-                      <InputGroupButton
-                        variant={hasMatchTypeEnabled ? "ghost" : "secondary"}
-                        size="icon-xs"
-                        aria-label="Filter search types"
-                      >
-                        <ListFilter className="size-3.5" />
-                      </InputGroupButton>
-                    </DropdownMenuTrigger>
-                  </span>
-                </TooltipTrigger>
-                <TooltipContent side="bottom">Filter search types</TooltipContent>
-              </Tooltip>
-              <DropdownMenuContent align="end" onPointerLeave={() => setSearchTypeMenuOpen(false)}>
-                <DropdownMenuGroup>
-                  <DropdownMenuCheckboxItem
-                    checked={matchTypeFilter.textMatch}
-                    onSelect={(event) => event.preventDefault()}
-                    onCheckedChange={(checked) => {
-                      setMatchTypeFilter((current) => {
-                        if (checked !== true && !current.semantic) return current;
-                        return {
-                          ...current,
-                          textMatch: checked === true,
-                        };
-                      });
-                    }}
-                  >
-                    Text match
-                  </DropdownMenuCheckboxItem>
-                  <DropdownMenuCheckboxItem
-                    checked={matchTypeFilter.semantic}
-                    onSelect={(event) => event.preventDefault()}
-                    onCheckedChange={(checked) => {
-                      setMatchTypeFilter((current) => {
-                        if (checked !== true && !current.textMatch) return current;
-                        return {
-                          ...current,
-                          semantic: checked === true,
-                        };
-                      });
-                    }}
-                  >
-                    Semantic
-                  </DropdownMenuCheckboxItem>
-                </DropdownMenuGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
-            {isSearching ? <Spinner className="size-3.5" /> : null}
-          </InputGroupAddon>
-        </InputGroup>
-        {tagsState.tags.length > 0 ? (
-          <div className="mt-2 w-full text-center">
-            <div className="inline-flex max-w-full flex-wrap items-center justify-center gap-2">
-            {tagsState.tags.map((t) => {
-              const on = tagFilterIds.includes(t.id);
-              return (
-                <TagFilterPill
-                  key={t.id}
-                  tag={t}
-                  pressed={on}
-                  onPressedChange={() => toggleTagFilter(t.id)}
-                  ariaLabel={`Filter by tag ${t.name}`}
-                />
-              );
-            })}
-            </div>
-          </div>
-        ) : null}
-      </div>
+      <SearchQueryBar
+        query={query}
+        onQueryChange={setQuery}
+        searchTypeMenuOpen={searchTypeMenuOpen}
+        onSearchTypeMenuOpenChange={setSearchTypeMenuOpen}
+        matchTypeFilter={matchTypeFilter}
+        onMatchTypeFilterChange={setMatchTypeFilter}
+        isSearching={isSearching}
+        tagDefs={tagsState.tags}
+        tagFilterIds={tagFilterIds}
+        onToggleTagFilter={toggleTagFilter}
+      />
 
       <div className="mt-5 min-h-0 flex-1">
         <ScrollArea className="h-full pr-3">
@@ -868,51 +566,23 @@ export function SearchPage({
         </ScrollArea>
       </div>
 
-      <AlertDialog
+      <ContentHashPathPickerDialog
         open={pathChooserOpen}
         onOpenChange={(open) => {
           setPathChooserOpen(open);
           if (!open) setSelectedGroupForOpen(null);
         }}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Open in default app</AlertDialogTitle>
-            <AlertDialogDescription>
-              These files have identical content. Select the path to open with the system&apos;s default
-              application.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <div className="max-h-64 space-y-2 overflow-y-auto">
-            {(selectedGroupForOpen?.variants ?? []).map((variant) => (
-              <Tooltip key={variant.file.path}>
-                <TooltipTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    className="h-auto w-full justify-start p-0 font-normal hover:bg-transparent focus-visible:bg-transparent"
-                    onClick={() => {
-                      void openPathInDefaultApp(variant.file.path);
-                      setPathChooserOpen(false);
-                      setSelectedGroupForOpen(null);
-                    }}
-                  >
-                    <span className="block min-w-0 w-full truncate rounded-md bg-muted px-2 py-1.5 font-mono text-xs text-foreground">
-                      {formatIndexedPathForDisplay(variant.file.path, homePath, cfg.include)}
-                    </span>
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom" className="max-w-md break-all font-mono text-xs">
-                  {variant.file.path}
-                </TooltipContent>
-              </Tooltip>
-            ))}
-          </div>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+        paths={(selectedGroupForOpen?.variants ?? []).map((v) => v.file.path)}
+        homePath={homePath}
+        includeRoots={cfg.include}
+        title="Open in default app"
+        description="These files have identical content. Select the path to open with the system's default application."
+        onSelectPath={(p) => {
+          void openPathInDefaultApp(p);
+          setPathChooserOpen(false);
+          setSelectedGroupForOpen(null);
+        }}
+      />
 
       <div className="mt-auto pt-4">
         <div className="flex min-h-24 items-center justify-center">

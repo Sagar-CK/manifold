@@ -1,10 +1,11 @@
 import { ArrowLeft, Check } from "lucide-react";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { useNavigate } from "react-router-dom";
-import { useMemo, useState, useEffect } from "react";
+import { useMemo } from "react";
 import { navigateBackOrFallback } from "../lib/navigateBack";
 import { createLogger } from "../lib/log";
 import { ReviewPendingTagRow } from "../components/ReviewPendingTagRow";
+import { useTagsState } from "@/lib/useTagsState";
 import {
   acceptPendingAutoTag,
   rejectPendingAutoTag,
@@ -12,9 +13,7 @@ import {
   rejectAllPendingForTag,
   saveTagsState,
   tagIdsForPath,
-  loadTagsState,
   type TagDef,
-  type TagsState,
 } from "../lib/tags";
 import { TagDefLabel } from "../components/TagDefBadge";
 import { syncPathTagsToQdrant } from "../lib/qdrantTags";
@@ -40,13 +39,7 @@ export function ReviewTagsPage({
   sourceId: string;
 }) {
   const navigate = useNavigate();
-  const [tagsState, setTagsState] = useState<TagsState>(() => loadTagsState());
-
-  useEffect(() => {
-    const onTagsUpdated = () => setTagsState(loadTagsState());
-    window.addEventListener("manifold:tags-updated", onTagsUpdated);
-    return () => window.removeEventListener("manifold:tags-updated", onTagsUpdated);
-  }, []);
+  const [tagsState, setTagsState] = useTagsState();
 
   const pendingPaths = Object.keys(tagsState.pendingAutoTags).filter(
     (p) => tagsState.pendingAutoTags[p]?.length > 0,

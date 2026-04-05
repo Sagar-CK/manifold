@@ -23,6 +23,7 @@ import { navigateBackOrFallback } from "@/lib/navigateBack";
 import type { LocalConfig } from "@/lib/localConfig";
 import { runGraphLayout, type GraphLayoutAlgorithm } from "@/lib/graphLayout";
 import { loadTagsState, type TagsState } from "@/lib/tags";
+import { useTagsState } from "@/lib/useTagsState";
 import { isPreviewablePath, useThumbnailsForPaths } from "@/lib/useThumbnailsForPaths";
 
 type ContentPoint = {
@@ -150,7 +151,7 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
   const [debouncedLimitInput, setDebouncedLimitInput] = useState(String(DEFAULT_LIMIT));
   const [algorithm, setAlgorithm] = useState<GraphLayoutAlgorithm>("pca");
   const [tagFilterIds, setTagFilterIds] = useState<string[]>([]);
-  const [tagsState, setTagsState] = useState<TagsState>(() => loadTagsState());
+  const [tagsState, setTagsState] = useTagsState();
 
   useEffect(() => {
     function refreshTags() {

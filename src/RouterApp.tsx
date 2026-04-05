@@ -17,15 +17,10 @@ import { ReviewTagsPage } from "./pages/ReviewTagsPage";
 import { setNavigateToReviewTagsCallback } from "./lib/autoTagging";
 import { invokeErrorText } from "./lib/errors";
 import { cn } from "./lib/utils";
-
-type EmbeddingJobPhase =
-  | "idle"
-  | "scanning"
-  | "embedding"
-  | "paused"
-  | "cancelling"
-  | "done"
-  | "error";
+import {
+  EmbeddingStatusProvider,
+  type EmbeddingJobPhase,
+} from "./context/EmbeddingStatusContext";
 
 type EmbeddingJobStatus = {
   phase: EmbeddingJobPhase;
@@ -91,6 +86,10 @@ export default function RouterApp() {
     embeddingPhase === "paused" ||
     embeddingPhase === "cancelling";
   const hasPendingEmbeds = embedding;
+
+  const cancelEmbedding = useCallback(async () => {
+    await invoke("cancel_embedding_job");
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -278,46 +277,37 @@ export default function RouterApp() {
         )}
       >
         <EnvIssuesBanner issues={envIssues} />
-        <div className="flex min-h-0 flex-1 flex-col">
-        <Routes>
-          <Route
-            path="/"
-            element={
-              <SearchPage
-                cfg={cfg}
-                embedding={embedding}
-                hasPendingEmbeds={hasPendingEmbeds}
-                embeddingPhase={embeddingPhase}
-                embedProgress={embedProgress}
-                lastEmbedError={lastEmbedError}
-                embedFailures={embedFailures}
+        <EmbeddingStatusProvider
+          embedding={embedding}
+          hasPendingEmbeds={hasPendingEmbeds}
+          embeddingPhase={embeddingPhase}
+          embedProgress={embedProgress}
+          lastEmbedError={lastEmbedError}
+          embedFailures={embedFailures}
+          cancelEmbedding={cancelEmbedding}
+        >
+          <div className="flex min-h-0 flex-1 flex-col">
+            <Routes>
+              <Route path="/" element={<SearchPage cfg={cfg} />} />
+              <Route path="/file" element={<FileResultPage cfg={cfg} />} />
+              <Route path="/graph" element={<GraphExplorerPage cfg={cfg} />} />
+              <Route
+                path="/settings"
+                element={
+                  <SettingsPage
+                    cfg={cfg}
+                    setCfg={setCfg}
+                    extOptions={extOptions}
+                  />
+                }
               />
-            }
-          />
-          <Route path="/file" element={<FileResultPage cfg={cfg} />} />
-          <Route path="/graph" element={<GraphExplorerPage cfg={cfg} />} />
-          <Route
-            path="/settings"
-            element={
-              <SettingsPage
-                cfg={cfg}
-                setCfg={setCfg}
-                embedding={embedding}
-                hasPendingEmbeds={hasPendingEmbeds}
-                embedProgress={embedProgress}
-                extOptions={extOptions}
-                embeddingPhase={embeddingPhase}
-                lastEmbedError={lastEmbedError}
-                embedFailures={embedFailures}
-                onCancelEmbedding={async () => {
-                  await invoke("cancel_embedding_job");
-                }}
+              <Route
+                path="/review-tags"
+                element={<ReviewTagsPage sourceId={cfg.sourceId} />}
               />
-            }
-          />
-          <Route path="/review-tags" element={<ReviewTagsPage sourceId={cfg.sourceId} />} />
-        </Routes>
-        </div>
+            </Routes>
+          </div>
+        </EmbeddingStatusProvider>
       </div>
       <KeyboardShortcutsHelp />
     </main>
