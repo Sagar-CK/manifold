@@ -11,6 +11,7 @@ use std::time::Duration;
 use tauri::Manager;
 use walkdir::WalkDir;
 
+mod logging;
 mod qdrant;
 mod embedding;
 mod text_index;
@@ -230,14 +231,8 @@ fn load_env() {
 }
 
 fn init_logging() {
-    // Error-only logging by default.
-    let filter = std::env::var("MANIFOLD_LOG")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| std::env::var("RUST_LOG").ok())
-        .unwrap_or_else(|| "error".to_string());
-
-    let env_filter = tracing_subscriber::EnvFilter::try_new(filter)
+    let filter = logging::env_filter_directives();
+    let env_filter = tracing_subscriber::EnvFilter::try_new(&filter)
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("error"));
 
     let _ = tracing_subscriber::fmt()
@@ -1003,6 +998,7 @@ async fn thumbnail_image_base64_png(
         Ok(value) => value,
         Err(err) => {
             tracing::warn!(
+                target: crate::logging::TARGET_THUMBNAIL,
                 path = %args.path,
                 max_edge = max_edge,
                 page = page,
@@ -1444,7 +1440,11 @@ async fn gemini_judge_tag(
     )
     .await
         .map_err(|e| {
-            tracing::error!("judge_tag failed: {}", e);
+            tracing::error!(
+                target: crate::logging::TARGET_JUDGE,
+                error = %e,
+                "judge_tag failed"
+            );
             e
         })
 }

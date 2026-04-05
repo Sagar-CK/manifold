@@ -158,9 +158,16 @@ fn emit_status(app: &tauri::AppHandle, status: &EmbeddingJobStatus) {
 
 fn emit_error(app: &tauri::AppHandle, message: &str) {
     if message == "Cancelled" {
-        tracing::info!("embedding job cancelled");
+        tracing::info!(
+            target: crate::logging::TARGET_EMBEDDING,
+            "embedding job cancelled"
+        );
     } else {
-        tracing::error!(message = %message, "embedding job error");
+        tracing::error!(
+            target: crate::logging::TARGET_EMBEDDING,
+            message = %message,
+            "embedding job error"
+        );
     }
     let _ = app.emit(
         "embedding://error",
@@ -395,6 +402,7 @@ async fn gemini_embed_post(client: &GeminiClient, body: serde_json::Value) -> Re
                 let chain = format_error_chain(&e);
                 let should_retry = attempt < 5;
                 tracing::error!(
+                    target: crate::logging::TARGET_EMBEDDING,
                     attempt,
                     elapsed_ms,
                     will_retry = should_retry,
@@ -443,6 +451,7 @@ async fn gemini_embed_post(client: &GeminiClient, body: serde_json::Value) -> Re
         let retryable = matches!(status.as_u16(), 429 | 500 | 503);
         if retryable && attempt < 5 {
             tracing::error!(
+                target: crate::logging::TARGET_EMBEDDING,
                 attempt,
                 elapsed_ms,
                 status = status.as_u16(),
@@ -454,6 +463,7 @@ async fn gemini_embed_post(client: &GeminiClient, body: serde_json::Value) -> Re
             continue;
         }
         tracing::error!(
+            target: crate::logging::TARGET_EMBEDDING,
             attempt,
             elapsed_ms,
             status = status.as_u16(),
@@ -563,6 +573,7 @@ async fn extract_text_with_gemini(
                 let chain = format_error_chain(&e);
                 let should_retry = attempt < GEMINI_OCR_HTTP_MAX_ATTEMPTS;
                 tracing::error!(
+                    target: crate::logging::TARGET_EMBEDDING,
                     file_path = %file_path,
                     mime_type = %mime_type,
                     model = GEMINI_OCR_MODEL,
@@ -594,6 +605,7 @@ async fn extract_text_with_gemini(
 
         if status.is_success() {
             tracing::debug!(
+                target: crate::logging::TARGET_EMBEDDING,
                 file_path = %file_path,
                 input_size_bytes,
                 attempt,
@@ -614,6 +626,7 @@ async fn extract_text_with_gemini(
         let retryable = matches!(status.as_u16(), 429 | 500 | 503);
         if retryable && attempt < GEMINI_OCR_HTTP_MAX_ATTEMPTS {
             tracing::error!(
+                target: crate::logging::TARGET_EMBEDDING,
                 file_path = %file_path,
                 mime_type = %mime_type,
                 model = GEMINI_OCR_MODEL,
@@ -632,6 +645,7 @@ async fn extract_text_with_gemini(
         }
 
         tracing::error!(
+            target: crate::logging::TARGET_EMBEDDING,
             file_path = %file_path,
             mime_type = %mime_type,
             model = GEMINI_OCR_MODEL,
@@ -702,7 +716,7 @@ pub async fn judge_tag(
     );
 
     tracing::info!(
-        target: "manifold::judge",
+        target: crate::logging::TARGET_JUDGE,
         "judge_tag labeled='{}' candidate='{}'",
         labeled_path,
         candidate_path
@@ -816,6 +830,7 @@ pub async fn start(
             }
         };
         tracing::info!(
+            target: crate::logging::TARGET_EMBEDDING,
             source_id = %source_id,
             include_count = args.include.len(),
             exclude_count = args.exclude.len(),
@@ -856,6 +871,7 @@ pub async fn start(
         };
         let total = pending_files.len() as u64;
         tracing::info!(
+            target: crate::logging::TARGET_EMBEDDING,
             source_id = %source_id,
             total_files = total,
             scan_elapsed_ms = scan_started.elapsed().as_millis(),
@@ -906,6 +922,7 @@ pub async fn start(
             .map(|n| (n.get() * 2).clamp(2, 16))
             .unwrap_or(8);
         tracing::info!(
+            target: crate::logging::TARGET_EMBEDDING,
             source_id = %source_id,
             max_parallelism,
             vision_gemini_max_in_flight = VISION_GEMINI_MAX_IN_FLIGHT,
@@ -984,6 +1001,7 @@ pub async fn start(
                                 Ok((b, m)) => (Some(b), Some(m.to_string())),
                                 Err(e) => {
                                     tracing::warn!(
+                                        target: crate::logging::TARGET_EMBEDDING,
                                         path = %file_path,
                                         error = %e,
                                         "gemini vision image preprocess failed; sending original bytes"
@@ -1073,6 +1091,7 @@ pub async fn start(
                                         local.chars().filter(|c| !c.is_whitespace()).count();
                                     if nonspace >= PDF_LOCAL_TEXT_MIN_NONSPACE {
                                         tracing::debug!(
+                                            target: crate::logging::TARGET_EMBEDDING,
                                             path = %file_path_for_text,
                                             nonspace,
                                             "pdf text extraction used local PDFium text"
@@ -1086,6 +1105,7 @@ pub async fn start(
                                 }
                                 Ok(Err(e)) => {
                                     tracing::debug!(
+                                        target: crate::logging::TARGET_EMBEDDING,
                                         path = %file_path_for_text,
                                         error = %e,
                                         "pdf local text extraction failed; falling back to Gemini OCR"
@@ -1093,6 +1113,7 @@ pub async fn start(
                                 }
                                 Err(e) => {
                                     tracing::debug!(
+                                        target: crate::logging::TARGET_EMBEDDING,
                                         path = %file_path_for_text,
                                         error = %e,
                                         "pdf local text extraction task failed; falling back to Gemini OCR"
@@ -1222,6 +1243,7 @@ pub async fn start(
                     ).await;
                 }
                 tracing::info!(
+                    target: crate::logging::TARGET_EMBEDDING,
                     path = %file_path,
                     source_id = %source_id_for_file,
                     should_embed_content = pending.should_embed_content,
@@ -1281,6 +1303,7 @@ pub async fn start(
             emit_done(&app2);
         }
         tracing::info!(
+            target: crate::logging::TARGET_EMBEDDING,
             source_id = %source_id,
             processed_files = processed,
             cancelled,

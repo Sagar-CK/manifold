@@ -19,14 +19,30 @@ Desktop app for local file indexing and search: **Tauri + React**, **Gemini** em
 
 **Without Docker:** unset `MANIFOLD_QDRANT_URL`, run `pnpm setup:binaries`, then `pnpm tauri dev` — the app can start the bundled Qdrant from `src-tauri/resources/qdrant/`.
 
-Collections: `manifold_files_content_v2`, `manifold_files_metadata_v2` (see `src-tauri/src/qdrant.rs`).
+Collections: `content_embeddings`, `metadata_embeddings` (see `src-tauri/src/qdrant.rs`).
 
 ## Optional env
 
 - `MANIFOLD_QDRANT_GRPC_URL` — override gRPC if needed  
 - `MANIFOLD_QDRANT_API_KEY` — secured/remote Qdrant  
-- `MANIFOLD_LOG` — e.g. `info`  
 - `MANIFOLD_QDRANT_URL` — external Qdrant; if unset in packaged builds, bundled Qdrant starts
+
+### `MANIFOLD_LOG` (Rust / Tauri)
+
+Backend logging uses [`tracing`](https://docs.rs/tracing) in `src-tauri/src/lib.rs` (`init_logging()`). Only **`MANIFOLD_LOG`** is read (not `RUST_LOG`).
+
+**Allowed values**
+
+- **Unset or empty** — default: show **error** logs only (for all crates).
+- **Exactly one of** `error`, `warn`, `info`, `debug`, `trace` (lowercase) — dependencies stay at **error**; all app logs under the `manifold::…` target prefix use that level.
+
+Any other value (typo or old-style filter string) is treated as invalid and falls back to the same default as unset (errors only).
+
+Example:
+
+```bash
+MANIFOLD_LOG=info pnpm tauri dev
+```
 
 ## Release build
 
@@ -59,4 +75,3 @@ Output: `src-tauri/target/release/bundle/`. CI runs the same binary setup before
 - Do not commit `.env.local`.
 - Clearing the index removes vectors only, not files on disk.
 - Binary sources and licensing: `docs/runtime-binaries.md`.
-

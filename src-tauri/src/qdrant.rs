@@ -19,8 +19,8 @@ use qdrant_client::qdrant::{
 use qdrant_client::Payload;
 use qdrant_client::qdrant::Value;
 
-const CONTENT_COLLECTION_NAME: &str = "manifold_files_content_v2";
-const METADATA_COLLECTION_NAME: &str = "manifold_files_metadata_v2";
+const CONTENT_COLLECTION_NAME: &str = "content_embeddings";
+const METADATA_COLLECTION_NAME: &str = "metadata_embeddings";
 const VECTOR_DIM: usize = 3072;
 const CONNECT_COOLDOWN: Duration = Duration::from_secs(15);
 
@@ -92,7 +92,7 @@ fn external_connection_dashboard_hint(grpc_endpoint: &str) -> String {
 
 fn log_qdrant_connected(connection_mode: &str, grpc_endpoint: &str, dashboard_url: &str) {
     info!(
-        target: "manifold::qdrant",
+        target: crate::logging::TARGET_QDRANT,
         connection_mode,
         grpc_endpoint = %grpc_endpoint,
         dashboard_url = %dashboard_url,
