@@ -1,44 +1,108 @@
+<p align="center">
+  <img src="src-tauri/icons/128x128.png" alt="Manifold logo" width="128" height="128" />
+</p>
+
 # Manifold
 
-Desktop app for local file indexing and search: **Tauri + React**, **Gemini** embeddings, **Qdrant** vectors, plus a local text index for keyword matches.
+**Manifold** is a desktop app for indexing folders on your machine and searching them with **keyword** and **semantic** search. It runs as a **Tauri 2** shell around a **React** UI; indexing and search orchestration live in **Rust**. Embeddings and text extraction use the **Google Gemini** API. Vectors are stored in **Qdrant**; a local **full-text index** backs substring-style matches. **Hybrid search** combines both.
 
-## Features
+Everything stays local except calls to Gemini (and optional remote Qdrant).
 
-- Pick include/exclude folders; index `png`, `jpg`, `jpeg`, `pdf`, `mp3`, `wav`, `mp4`, `mov`.
-- Embeddings: `models/gemini-embedding-2-preview`; text/OCR: `models/gemini-3-flash-preview`.
-- Hybrid search: substring/text index + semantic search over Qdrant (content + metadata collections).
-- Thumbnails in results when supported.
+## What you can do
 
-## Quick setup
+- **Configure scopes** — choose include folders, exclude paths, file extensions, and optional default folder excludes (see Settings).
+- **Index media** — `png`, `jpg`, `jpeg`, `pdf`, `mp3`, `wav`, `mp4`, `mov`. PDFs use bundled **PDFium**; text/OCR paths use Gemini.
+- **Search** — hybrid query over the text index plus semantic search across Qdrant collections `content_embeddings` and `metadata_embeddings` (see `src-tauri/src/qdrant.rs`).
+- **Browse results** — open file detail, thumbnails where supported (`thumbnail_image_base64_png` and related UI).
+- **Graph view** — explore embeddings in a 2D projection (`/graph`).
+- **Tags** — organize with tags; use review flows and Gemini-assisted tagging where enabled.
 
-1. **Deps:** `pnpm install`
-2. **Env + PDFium:** `pnpm setup:dev` — creates `.env.local` from `.env.example` if needed; downloads PDFium into `src-tauri/resources/pdfium/`.
-3. **Qdrant:** Default URL is `http://127.0.0.1:6333`. Start Docker: `pnpm qdrant:up`. Dashboard: [http://127.0.0.1:6333/dashboard](http://127.0.0.1:6333/dashboard). On macOS, use `127.0.0.1` instead of `localhost` if the UI and API disagree (IPv4 vs IPv6).
-4. **Gemini:** Set `MANIFOLD_GEMINI_API_KEY` or `GOOGLE_GENERATIVE_AI_API_KEY` in `.env.local`.
-5. **Run:** `pnpm tauri dev`
+Routes (hash router for the packaged app): `/` search, `/file` result, `/graph`, `/settings`, `/review-tags`.
 
-**Without Docker:** unset `MANIFOLD_QDRANT_URL`, run `pnpm setup:binaries`, then `pnpm tauri dev` — the app can start the bundled Qdrant from `src-tauri/resources/qdrant/`.
+## Stack
 
-Collections: `content_embeddings`, `metadata_embeddings` (see `src-tauri/src/qdrant.rs`).
+| Layer | Technologies |
+| ----- | ------------ |
+| Desktop | Tauri 2, Rust |
+| UI | React 19, Vite 7, Tailwind CSS 4, shadcn/Radix, `lucide-react`, React Router |
+| Vectors | Qdrant (HTTP/gRPC; v1.17.x in Docker and bundled binary manifest) |
+| Models | `models/gemini-embedding-2-preview` (embeddings), `models/gemini-3-flash-preview` (text/OCR) — `src-tauri/src/embedding.rs` |
 
-## Optional env
+## Prerequisites
 
-- `MANIFOLD_QDRANT_GRPC_URL` — override gRPC if needed  
-- `MANIFOLD_QDRANT_API_KEY` — secured/remote Qdrant  
-- `MANIFOLD_QDRANT_URL` — external Qdrant; if unset in packaged builds, bundled Qdrant starts
+- **Node** 22+ and **pnpm** (CI uses pnpm 10)
+- **Rust** stable (for `pnpm tauri dev` / `pnpm tauri build`)
+- **Docker** (optional but convenient for Qdrant during development)
+
+## Quick start
+
+1. **Install dependencies**
+
+   ```bash
+   pnpm install
+   ```
+
+2. **Bootstrap dev resources** — creates `.env.local` from `.env.example` when missing and downloads **PDFium** into `src-tauri/resources/pdfium/`.
+
+   ```bash
+   pnpm setup:dev
+   ```
+
+3. **Qdrant**
+
+   - **With Docker (typical dev):** default HTTP URL is `http://127.0.0.1:6333`. Start the stack:
+
+     ```bash
+     pnpm qdrant:up
+     ```
+
+     Dashboard: [http://127.0.0.1:6333/dashboard](http://127.0.0.1:6333/dashboard). On macOS, prefer `127.0.0.1` over `localhost` if the UI and API disagree (IPv4 vs IPv6).
+
+   - **Without Docker:** clear `MANIFOLD_QDRANT_URL` in `.env.local`, run `pnpm setup:binaries`, then start the app — the bundled Qdrant binary under `src-tauri/resources/qdrant/` can be launched automatically when no external URL is set (see `.env.example` comments).
+
+4. **Gemini API key** — set in `.env.local`:
+
+   - `MANIFOLD_GEMINI_API_KEY` (primary), or  
+   - `GOOGLE_GENERATIVE_AI_API_KEY` (fallback name the backend accepts)
+
+5. **Run the app**
+
+   ```bash
+   pnpm tauri dev
+   ```
+
+Do not commit `.env.local`.
+
+## Scripts
+
+| Command | Purpose |
+| ------- | ------- |
+| `pnpm dev` | Vite dev server only (Tauri runs this via `beforeDevCommand`) |
+| `pnpm build` | Production frontend build (`tsc` + Vite) |
+| `pnpm tauri dev` / `pnpm tauri build` | Desktop app |
+| `pnpm setup:dev` | `.env.local` + PDFium |
+| `pnpm setup:binaries` | PDFium + Qdrant binaries (release / CI) |
+| `pnpm setup:pdfium` / `pnpm setup:qdrant-binary` | Single-artifact setup |
+| `pnpm qdrant:up` / `pnpm qdrant:down` | Docker Compose Qdrant |
+
+`docker-compose.yml` pins the Qdrant image version; keep it aligned with `scripts/binaries-manifest.json`.
+
+## Environment variables
+
+See `.env.example` for the full list. Highlights:
+
+- **`MANIFOLD_QDRANT_URL`** — HTTP API base (unset in packaged builds to allow bundled Qdrant).
+- **`MANIFOLD_QDRANT_GRPC_URL`** — optional gRPC override.
+- **`MANIFOLD_QDRANT_API_KEY`** — for secured or remote Qdrant.
 
 ### `MANIFOLD_LOG` (Rust / Tauri)
 
-Backend logging uses [`tracing`](https://docs.rs/tracing) in `src-tauri/src/lib.rs` (`init_logging()`). Only **`MANIFOLD_LOG`** is read (not `RUST_LOG`).
+Backend logging uses [`tracing`](https://docs.rs/tracing) (`init_logging()` in `src-tauri/src/lib.rs`). Only **`MANIFOLD_LOG`** is read (not `RUST_LOG`).
 
-**Allowed values**
+- **Unset or empty** — default: **error** only (all crates).
+- **Exactly one of** `error`, `warn`, `info`, `debug`, `trace` (lowercase) — dependencies stay at **error**; logs under the `manifold::…` target prefix use the chosen level.
 
-- **Unset or empty** — default: show **error** logs only (for all crates).
-- **Exactly one of** `error`, `warn`, `info`, `debug`, `trace` (lowercase) — dependencies stay at **error**; all app logs under the `manifold::…` target prefix use that level.
-
-Any other value (typo or old-style filter string) is treated as invalid and falls back to the same default as unset (errors only).
-
-Example:
+Any other value is invalid and falls back to the same default as unset.
 
 ```bash
 MANIFOLD_LOG=info pnpm tauri dev
@@ -52,26 +116,24 @@ pnpm setup:binaries
 pnpm tauri build
 ```
 
-Output: `src-tauri/target/release/bundle/`. CI runs the same binary setup before `tauri build`.
+Artifacts: `src-tauri/target/release/bundle/`. GitHub Actions (`.github/workflows/tauri-build.yml`) runs `pnpm setup:binaries` before `pnpm tauri build` on macOS, Ubuntu, and Windows.
 
-## Layout
+## Repository layout
 
-
-| Path                             | Role                          |
-| -------------------------------- | ----------------------------- |
-| `src/`                           | React UI                      |
-| `src-tauri/src/lib.rs`           | Tauri commands                |
-| `src-tauri/src/embedding.rs`     | Indexing + Gemini             |
-| `src-tauri/src/qdrant.rs`        | Qdrant client                 |
-| `src-tauri/src/text_index.rs`    | Local text index              |
-| `scripts/setup-dev.mjs`          | Dev bootstrap                 |
-| `scripts/setup-binaries.mjs`     | Pinned PDFium/Qdrant download |
-| `scripts/binaries-manifest.json` | Versions / URLs               |
-| `docker-compose.yml`             | Dev Qdrant                    |
-
+| Path | Role |
+| ---- | ---- |
+| `src/` | React UI, routes, components |
+| `src-tauri/src/lib.rs` | Tauri commands, app wiring |
+| `src-tauri/src/embedding.rs` | Indexing pipeline, Gemini embed + text extraction |
+| `src-tauri/src/qdrant.rs` | Qdrant client, collections, search helpers |
+| `src-tauri/src/text_index.rs` | Local full-text index |
+| `src-tauri/resources/` | Bundled PDFium/Qdrant (populated by setup scripts) |
+| `scripts/setup-dev.mjs` | Dev bootstrap |
+| `scripts/setup-binaries.mjs` | Pinned binary download + checksums |
+| `scripts/binaries-manifest.json` | Version and URL manifest |
+| `docs/runtime-binaries.md` | Binary sources, verification, licensing notes |
 
 ## Notes
 
-- Do not commit `.env.local`.
-- Clearing the index removes vectors only, not files on disk.
-- Binary sources and licensing: `docs/runtime-binaries.md`.
+- Clearing the index removes **vectors and index data**, not files on disk.
+- Binary provenance and licensing: **`docs/runtime-binaries.md`**.
