@@ -1,3 +1,5 @@
+use base64::engine::general_purpose::STANDARD as B64_ENGINE;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -1273,6 +1275,36 @@ pub struct ScrollContentVectorsResult {
     pub points: Vec<ContentEmbeddingPoint>,
 }
 
+/// Graph explorer: same semantics as [qdrant-web-ui requestData scroll](https://github.com/qdrant/qdrant-web-ui/blob/master/src/components/VisualizeChart/requestData.js) — **one** scroll request, no full-index reservoir pass.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScrollGraphArgs {
+    pub source_id: String,
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub filter: Option<serde_json::Value>,
+    #[serde(default)]
+    pub tag_filter_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScrollGraphPointMeta {
+    pub path: String,
+    pub content_hash: String,
+    pub tag_ids: Vec<String>,
+}
+
+/// Embeddings are concatenated little-endian `f32` values, shape `n * d`, encoded as standard base64 (avoids huge JSON float arrays over Tauri IPC).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScrollGraphResult {
+    pub points: Vec<ScrollGraphPointMeta>,
+    pub packed_embeddings_f32_base64: String,
+    pub n: usize,
+    pub d: usize,
+}
+
 fn build_graph_scroll_filter(source_id: &str, tag_filter_ids: &[String]) -> Filter {
     let source = Condition::matches("sourceId", source_id.to_string());
     if tag_filter_ids.is_empty() {
@@ -1593,6 +1625,214 @@ async fn scroll_content_vectors_http(
     }
 
     Ok(ScrollContentVectorsResult { points: reservoir })
+}
+
+fn content_point_from_scrolled(
+    p: qdrant_client::qdrant::RetrievedPoint,
+) -> Option<ContentEmbeddingPoint> {
+    use qdrant_client::qdrant::vector_output::Vector;
+    let path = payload_string_field(&p.payload, "path");
+    let content_hash = payload_string_field(&p.payload, "contentHash");
+    let (Some(path), Some(content_hash)) = (path, content_hash) else {
+        return None;
+    };
+    let embedding: Vec<f32> = match p.vectors.as_ref().and_then(|vo| vo.get_vector()) {
+        Some(Vector::Dense(d)) => d.data.clone(),
+        _ => return None,
+    };
+    if embedding.len() != VECTOR_DIM {
+        return None;
+    }
+    let tag_ids = payload_tag_ids_field(&p.payload);
+    Some(ContentEmbeddingPoint {
+        path,
+        content_hash,
+        embedding,
+        tag_ids,
+    })
+}
+
+/// One scroll page (qdrant-web-ui style): at most `limit` points, Qdrant’s natural order.
+async fn scroll_graph_first_page_grpc(
+    app: &AppHandle,
+    state: &QdrantState,
+    source_id: &str,
+    tag_filter_ids: &[String],
+    limit: usize,
+) -> Result<Vec<ContentEmbeddingPoint>, String> {
+    let client = instance(app, state).await?;
+    let filter = build_graph_scroll_filter(source_id, tag_filter_ids);
+    let scroll_limit = limit.min(SCROLL_CONTENT_VECTORS_HARD_MAX as usize).max(1) as u32;
+    let builder = ScrollPointsBuilder::new(CONTENT_COLLECTION_NAME)
+        .filter(filter)
+        .limit(scroll_limit)
+        .with_payload(true)
+        .with_vectors(true);
+    let res = client
+        .scroll(builder)
+        .await
+        .map_err(|e| format!("qdrant scroll (graph first page) failed: {e}"))?;
+    let mut out = Vec::new();
+    for p in res.result {
+        if let Some(pt) = content_point_from_scrolled(p) {
+            out.push(pt);
+        }
+    }
+    Ok(out)
+}
+
+async fn scroll_graph_first_page_http(
+    base_url: &str,
+    filter: &serde_json::Value,
+    limit: usize,
+) -> Result<Vec<ContentEmbeddingPoint>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+
+    let url = format!(
+        "{}/collections/{}/points/scroll",
+        base_url.trim_end_matches('/'),
+        CONTENT_COLLECTION_NAME
+    );
+
+    let scroll_limit = limit.min(SCROLL_CONTENT_VECTORS_HARD_MAX as usize).max(1);
+    let body = serde_json::json!({
+        "filter": filter,
+        "limit": scroll_limit,
+        "with_payload": true,
+        "with_vector": true,
+    });
+
+    let mut req = client.post(&url).json(&body);
+    if let Ok(k) = std::env::var("MANIFOLD_QDRANT_API_KEY") {
+        let t = k.trim();
+        if !t.is_empty() {
+            req = req.header("api-key", t);
+        }
+    }
+
+    let res = req
+        .send()
+        .await
+        .map_err(|e| format!("qdrant http scroll request failed: {e}"))?;
+    let status = res.status();
+    let text = res.text().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!(
+            "qdrant http scroll failed ({status}): {text}"
+        ));
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("scroll response json: {e}"))?;
+
+    let points = v
+        .get("result")
+        .and_then(|r| r.get("points"))
+        .and_then(|p| p.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut out = Vec::new();
+    for p in points {
+        let path = p
+            .get("payload")
+            .and_then(|pl| pl.get("path"))
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string());
+        let content_hash = p
+            .get("payload")
+            .and_then(|pl| pl.get("contentHash"))
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string());
+        let (Some(path), Some(content_hash)) = (path, content_hash) else {
+            continue;
+        };
+
+        let tag_ids: Vec<String> = p
+            .get("payload")
+            .and_then(|pl| pl.get("tagIds"))
+            .and_then(|t| t.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let vec_json = p.get("vector").cloned().unwrap_or(serde_json::Value::Null);
+        let Some(embedding) = parse_scroll_json_vector(&vec_json) else {
+            continue;
+        };
+        if embedding.len() != VECTOR_DIM {
+            continue;
+        }
+
+        out.push(ContentEmbeddingPoint {
+            path,
+            content_hash,
+            embedding,
+            tag_ids,
+        });
+    }
+
+    Ok(out)
+}
+
+/// Pack embeddings for compact Tauri IPC (base64 `f32` LE, no per-point JSON arrays).
+fn pack_graph_embeddings(points: &[ContentEmbeddingPoint]) -> (String, usize, usize) {
+    let n = points.len();
+    if n == 0 {
+        return (String::new(), 0, 0);
+    }
+    let d = points[0].embedding.len();
+    let mut packed = Vec::with_capacity(n * d * 4);
+    for p in points {
+        for &f in &p.embedding {
+            packed.extend_from_slice(&f.to_le_bytes());
+        }
+    }
+    (B64_ENGINE.encode(&packed), n, d)
+}
+
+/// Graph data: single scroll (web-ui parity) + compact embedding payload.
+pub async fn scroll_graph(
+    app: &AppHandle,
+    state: &QdrantState,
+    args: ScrollGraphArgs,
+) -> Result<ScrollGraphResult, String> {
+    let requested = args.limit.unwrap_or(500).max(1);
+    let limit = (requested.min(SCROLL_CONTENT_VECTORS_HARD_MAX)) as usize;
+    let tag_filter = args.tag_filter_ids.as_deref().unwrap_or(&[]);
+    let use_http = args
+        .filter
+        .as_ref()
+        .is_some_and(|f| scroll_user_filter_is_nonempty(f));
+
+    let points = if use_http {
+        let base = qdrant_http_base_url(app, state).await?;
+        let merged = merge_scroll_filter_json(&args.source_id, tag_filter, args.filter.as_ref());
+        scroll_graph_first_page_http(&base, &merged, limit).await?
+    } else {
+        scroll_graph_first_page_grpc(app, state, &args.source_id, tag_filter, limit).await?
+    };
+
+    let meta: Vec<ScrollGraphPointMeta> = points
+        .iter()
+        .map(|p| ScrollGraphPointMeta {
+            path: p.path.clone(),
+            content_hash: p.content_hash.clone(),
+            tag_ids: p.tag_ids.clone(),
+        })
+        .collect();
+    let (packed_embeddings_f32_base64, n, d) = pack_graph_embeddings(&points);
+    Ok(ScrollGraphResult {
+        points: meta,
+        packed_embeddings_f32_base64,
+        n,
+        d,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

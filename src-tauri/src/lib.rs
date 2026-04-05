@@ -302,6 +302,7 @@ pub fn run() {
             hybrid_search,
             qdrant_count_points,
             qdrant_scroll_content_vectors,
+            qdrant_scroll_graph,
             qdrant_set_path_tag_ids,
             qdrant_sync_tags_backfill,
             qdrant_delete_all_points,
@@ -1142,6 +1143,15 @@ async fn qdrant_scroll_content_vectors(
     args: qdrant::ScrollContentVectorsArgs,
 ) -> Result<qdrant::ScrollContentVectorsResult, String> {
     qdrant::scroll_content_vectors(&app, &state, args).await
+}
+
+#[tauri::command]
+async fn qdrant_scroll_graph(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, qdrant::QdrantState>,
+    args: qdrant::ScrollGraphArgs,
+) -> Result<qdrant::ScrollGraphResult, String> {
+    qdrant::scroll_graph(&app, &state, args).await
 }
 
 #[tauri::command]
