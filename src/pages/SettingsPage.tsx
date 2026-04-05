@@ -38,6 +38,7 @@ import { PageHeader } from "../components/PageHeader";
 import { EmbeddingStatusPanel } from "../components/EmbeddingStatusPanel";
 import { Button } from "../components/ui/button";
 import { ScrollArea } from "../components/ui/scroll-area";
+import { cn } from "@/lib/utils";
 import {
   Tooltip,
   TooltipContent,
@@ -72,9 +73,12 @@ export function SettingsPage({
   const [clearingIndex, setClearingIndex] = useState(false);
   const [clearIndexError, setClearIndexError] = useState<string | null>(null);
   const [confirmClearOpen, setConfirmClearOpen] = useState(false);
-  const [embeddedCount, refetchEmbeddedCount] = useIndexedPointCount(cfg.sourceId, {
-    refetchKey: clearingIndex,
-  });
+  const [embeddedCount, refetchEmbeddedCount] = useIndexedPointCount(
+    cfg.sourceId,
+    {
+      refetchKey: clearingIndex,
+    },
+  );
   const [includeToRemove, setIncludeToRemove] = useState<string | null>(null);
   const [confirmRemoveIncludeOpen, setConfirmRemoveIncludeOpen] =
     useState(false);
@@ -106,6 +110,10 @@ export function SettingsPage({
   const selectedSearchModeOption: SearchModeOption | null =
     SEARCH_MODE_OPTIONS.find((option) => option.value === cfg.searchMode) ??
     null;
+  const indexingActive = embedding || hasPendingEmbeds;
+  const embeddingFooterSupplemental =
+    embedFailures.length > 0 ||
+    (lastEmbedError != null && lastEmbedError !== "Cancelled");
 
   function updateConfig(next: LocalConfig) {
     setCfg(next);
@@ -303,7 +311,12 @@ export function SettingsPage({
 
       <ScrollArea className="min-h-0 h-full flex-1 overflow-hidden p-4">
         {/* Horizontal padding on both sides so card ring/shadow and radii are not clipped by the viewport */}
-        <section className="flex min-w-0 flex-col gap-6 p-2">
+        <section
+          className={cn(
+            "flex min-w-0 flex-col gap-6 p-2",
+            !indexingActive && "min-h-full",
+          )}
+        >
           <div className="grid min-w-0 gap-6 lg:grid-cols-2 lg:items-start">
             <div className="flex min-w-0 flex-col gap-6">
               <SettingsAppearanceCard
@@ -320,8 +333,6 @@ export function SettingsPage({
                 setTopKDraft={setTopKDraft}
                 selectedSearchModeOption={selectedSearchModeOption}
               />
-
-              <SettingsEmbeddingImageCard cfg={cfg} updateConfig={updateConfig} />
 
               <SettingsTagsCard
                 cfg={cfg}
@@ -349,6 +360,11 @@ export function SettingsPage({
                 setConfirmDisableDefaultExcludesOpen={
                   setConfirmDisableDefaultExcludesOpen
                 }
+              />
+
+              <SettingsEmbeddingImageCard
+                cfg={cfg}
+                updateConfig={updateConfig}
               />
             </div>
           </div>
@@ -400,8 +416,13 @@ export function SettingsPage({
           />
         </section>
       </ScrollArea>
-      <div className="shrink-0 pt-2">
-        <div className="flex min-h-24 items-center justify-center">
+      <div
+        className={cn(
+          "shrink-0",
+          (indexingActive || embeddingFooterSupplemental) && "pt-2",
+        )}
+      >
+        <div className="flex min-h-0 items-center justify-center">
           <EmbeddingStatusPanel
             embedding={embedding}
             hasPendingEmbeds={hasPendingEmbeds}

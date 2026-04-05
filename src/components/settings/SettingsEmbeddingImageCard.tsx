@@ -16,17 +16,17 @@ const PRESETS: {
   {
     value: "fast",
     label: "Faster",
-    detail: "768px max edge, stronger JPEG compression. Smaller uploads and quicker Gemini vision/OCR.",
+    detail: "768px max edge.",
   },
   {
     value: "balanced",
     label: "Balanced",
-    detail: "1536px max edge, default quality. Matches the original embedding pipeline.",
+    detail: "1536px max edge.",
   },
   {
     value: "highQuality",
     label: "Higher quality",
-    detail: "Same max size as balanced with less compression. Slightly larger payloads, finer detail.",
+    detail: "Same as source.",
   },
 ];
 
@@ -41,10 +41,6 @@ export function SettingsEmbeddingImageCard({
     <Card size="sm" className="shadow-xs">
       <CardHeader>
         <CardTitle>Embedding images</CardTitle>
-        <CardDescription>
-          Controls how PNG/JPEG files are resized and compressed before they are sent to Gemini for
-          embeddings and text extraction. PDFs and other types are unchanged.
-        </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
         <div className="flex flex-wrap gap-2">
@@ -65,12 +61,6 @@ export function SettingsEmbeddingImageCard({
             PRESETS.find((p) => p.value === cfg.embeddingImagePreset)?.detail ??
             PRESETS[1].detail
           }
-        </p>
-        <p className="text-xs text-muted-foreground leading-relaxed">
-          Already indexed files keep their existing vectors until the file changes or you clear the
-          index. After changing this, use{" "}
-          <span className="font-medium text-foreground/90">Clear index</span> below if you want
-          everything re-embedded with the new preset.
         </p>
       </CardContent>
     </Card>
