@@ -28,3 +28,11 @@ target/
 
 qdrant_storage/
 qdrant_storage_dev/
+
+# Runtime binaries from scripts/setup-binaries.mjs (pinned in binaries-manifest.json).
+# Keep out of Git to avoid huge objects and Git LFS / host size limits.
+src-tauri/resources/qdrant/qdrant
+src-tauri/resources/qdrant/qdrant.exe
+src-tauri/resources/pdfium/libpdfium.dylib
+src-tauri/resources/pdfium/libpdfium.so
+src-tauri/resources/pdfium/pdfium.dll

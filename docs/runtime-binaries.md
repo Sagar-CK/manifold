@@ -10,6 +10,8 @@ Manifold depends on native runtime binaries for:
 - Binary manifest: `scripts/binaries-manifest.json`
 - Installer script: `scripts/setup-binaries.mjs`
 
+The actual `qdrant` and PDFium library files are **not committed** to this repository (they are listed in `.gitignore`). After cloning, run `pnpm setup:dev` (PDFium only) and/or `pnpm setup:binaries` so `src-tauri/resources/` contains the artifacts for your platform. CI runs `pnpm setup:binaries` on each matrix runner before `tauri build`.
+
 The manifest pins versioned release URLs by platform:
 
 - `darwin-arm64`
