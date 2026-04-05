@@ -78,9 +78,12 @@ export function SettingsPage({
   const [clearingIndex, setClearingIndex] = useState(false);
   const [clearIndexError, setClearIndexError] = useState<string | null>(null);
   const [confirmClearOpen, setConfirmClearOpen] = useState(false);
-  const [embeddedCount, refetchEmbeddedCount] = useIndexedPointCount(cfg.sourceId, {
-    refetchKey: clearingIndex,
-  });
+  const [embeddedCount, refetchEmbeddedCount] = useIndexedPointCount(
+    cfg.sourceId,
+    {
+      refetchKey: clearingIndex,
+    },
+  );
   const [includeToRemove, setIncludeToRemove] = useState<string | null>(null);
   const [confirmRemoveIncludeOpen, setConfirmRemoveIncludeOpen] =
     useState(false);
@@ -321,10 +324,6 @@ export function SettingsPage({
         >
           <div className="grid min-w-0 gap-6 lg:grid-cols-2 lg:items-start">
             <div className="flex min-w-0 flex-col gap-6">
-              <SettingsGeminiApiKeyCard
-                onSaved={onGeminiApiKeySaved}
-                onStoredKeyCleared={onGeminiStoredKeyCleared}
-              />
               <SettingsAppearanceCard
                 themeMounted={themeMounted}
                 theme={theme}
@@ -356,6 +355,11 @@ export function SettingsPage({
             </div>
 
             <div className="flex min-w-0 flex-col gap-6">
+              <SettingsGeminiApiKeyCard
+                onSaved={onGeminiApiKeySaved}
+                onStoredKeyCleared={onGeminiStoredKeyCleared}
+              />
+
               <SettingsPathsCard
                 cfg={cfg}
                 updateConfig={updateConfig}
