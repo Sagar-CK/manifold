@@ -11,8 +11,10 @@ export function isPathSelected(path: string, cfg: LocalConfig) {
   const exclude = cfg.exclude.map(normalizePathForMatch).filter(Boolean);
   const ext = (p.split(".").pop() ?? "").trim().toLowerCase();
 
+  // No include roots means nothing is in scope (avoids showing stale tagged paths after all
+  // folders are removed, and matches "only search inside selected folders").
   const inInclude =
-    include.length === 0 ? true : include.some((root) => p === root || p.startsWith(`${root}/`));
+    include.length > 0 && include.some((root) => p === root || p.startsWith(`${root}/`));
   const inUserExclude = exclude.some((root) => p === root || p.startsWith(`${root}/`));
   const inDefaultFolderExclude =
     cfg.useDefaultFolderExcludes && pathHasDefaultExcludedSegment(p);

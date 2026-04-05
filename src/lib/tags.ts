@@ -1,3 +1,5 @@
+import { normalizePathForMatch } from "./pathSelection";
+
 export type TagDef = {
   id: string;
   name: string;
@@ -143,6 +145,29 @@ export function removeTagEverywhere(state: TagsState, tagId: string): TagsState 
     if (next.length > 0) pendingAutoTags[p] = next;
   }
   return { tags, pathToTagIds, pendingAutoTags };
+}
+
+/** Remove stored tag mappings for paths under an include root (vectors were deleted for those files). */
+export function removePathMappingsUnderRoot(state: TagsState, includeRoot: string): TagsState {
+  const root = normalizePathForMatch(includeRoot);
+  if (!root) return state;
+
+  const under = (path: string) => {
+    const n = normalizePathForMatch(path);
+    return n === root || n.startsWith(`${root}/`);
+  };
+
+  const pathToTagIds: Record<string, string[]> = { ...state.pathToTagIds };
+  for (const p of Object.keys(pathToTagIds)) {
+    if (under(p)) delete pathToTagIds[p];
+  }
+
+  const pendingAutoTags: Record<string, string[]> = { ...state.pendingAutoTags };
+  for (const p of Object.keys(pendingAutoTags)) {
+    if (under(p)) delete pendingAutoTags[p];
+  }
+
+  return { ...state, pathToTagIds, pendingAutoTags };
 }
 
 export function mergePendingAutoTag(state: TagsState, path: string, tagId: string): TagsState {
