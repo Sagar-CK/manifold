@@ -39,6 +39,17 @@ type EmbeddingFileFailure = {
   reason: string;
 };
 
+/** Stable fingerprint of scan-related config; must match `autoEmbedKey` useMemo below. */
+function embedAutoKeyFromCfg(cfg: LocalConfig): string {
+  return JSON.stringify({
+    include: [...cfg.include].sort(),
+    exclude: [...cfg.exclude].sort(),
+    extensions: [...cfg.extensions].sort(),
+    useDefaultFolderExcludes: cfg.useDefaultFolderExcludes,
+    sourceId: cfg.sourceId,
+  });
+}
+
 /** Second start while a job is active — not a failure for the user; job is already in progress. */
 function isBenignConcurrentEmbedStartError(msg: string): boolean {
   return /embedding job already running/i.test(msg);
@@ -71,14 +82,7 @@ export default function RouterApp() {
   );
 
   const autoEmbedKey = useMemo(
-    () =>
-      JSON.stringify({
-        include: [...cfg.include].sort(),
-        exclude: [...cfg.exclude].sort(),
-        extensions: [...cfg.extensions].sort(),
-        useDefaultFolderExcludes: cfg.useDefaultFolderExcludes,
-        sourceId: cfg.sourceId,
-      }),
+    () => embedAutoKeyFromCfg(cfg),
     [cfg.exclude, cfg.extensions, cfg.include, cfg.sourceId, cfg.useDefaultFolderExcludes],
   );
   const embedding =
@@ -172,6 +176,7 @@ export default function RouterApp() {
           sourceId: cfg.sourceId,
         },
       });
+      lastAutoEmbedKeyRef.current = embedAutoKeyFromCfg(cfg);
     } catch (e) {
       const msg = invokeErrorText(e);
       if (isBenignConcurrentEmbedStartError(msg)) {
@@ -191,11 +196,12 @@ export default function RouterApp() {
     if (cfg.include.length === 0) {
       setEmbeddingPhase("idle");
       setEmbedProgress({ processed: 0, total: 0, status: "All files indexed." });
+      // So re-adding the same folder (or swapping paths) is not mistaken for "already embedded".
+      lastAutoEmbedKeyRef.current = autoEmbedKey;
       return;
     }
     if (embedding) return;
     if (lastAutoEmbedKeyRef.current === autoEmbedKey) return;
-    lastAutoEmbedKeyRef.current = autoEmbedKey;
     void runEmbed();
   }, [autoEmbedKey, cfg.include.length, embedding, runEmbed]);
 
