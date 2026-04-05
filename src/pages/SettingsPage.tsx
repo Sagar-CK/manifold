@@ -73,12 +73,9 @@ export function SettingsPage({
   const [clearingIndex, setClearingIndex] = useState(false);
   const [clearIndexError, setClearIndexError] = useState<string | null>(null);
   const [confirmClearOpen, setConfirmClearOpen] = useState(false);
-  const [embeddedCount, refetchEmbeddedCount] = useIndexedPointCount(
-    cfg.sourceId,
-    {
-      refetchKey: clearingIndex,
-    },
-  );
+  const [embeddedCount, refetchEmbeddedCount] = useIndexedPointCount(cfg.sourceId, {
+    refetchKey: clearingIndex,
+  });
   const [includeToRemove, setIncludeToRemove] = useState<string | null>(null);
   const [confirmRemoveIncludeOpen, setConfirmRemoveIncludeOpen] =
     useState(false);

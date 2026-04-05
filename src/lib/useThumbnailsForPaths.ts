@@ -3,7 +3,6 @@ import { invoke } from "@tauri-apps/api/core";
 
 const THUMBNAIL_CONCURRENCY = 4;
 
-/** Cache keyed by `${maxEdge}\0${path}` so different resolutions do not collide. */
 const sharedCache: Record<string, string> = {};
 const sharedFailed: Record<string, true> = {};
 
@@ -29,9 +28,7 @@ export function isPreviewablePath(path: string) {
 
 export type UseThumbnailsForPathsOptions = {
   onThumbError?: (path: string, error: unknown) => void;
-  /** Passed to `thumbnail_image_base64_png`; default 96. */
   maxEdge?: number;
-  /** When true, merge multiple completions into one state update per animation frame. */
   batchUpdates?: boolean;
 };
 

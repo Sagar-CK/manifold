@@ -39,7 +39,6 @@ type LayoutPoint = ContentPoint & {
 
 const THUMB = 44;
 const MARGIN = 28;
-/** Matches `maxEdge` for graph thumbnails — enough for on-canvas size. */
 const GRAPH_THUMB_MAX_EDGE = 48;
 const DEFAULT_LIMIT = 500;
 /** Debounce limit input so typing does not refetch on every keystroke. */
@@ -53,7 +52,6 @@ const RING_MAX_SEGMENTS = 4;
 const RING_OVERFLOW_COLOR = "#78716c";
 /** Radians of gap between ring segments (readability at small thumbnails). */
 const RING_GAP_RAD = 0.1;
-/** Muted fill while a previewable thumb URL is loading or decoding (no DOM skeletons). */
 const LOADING_FILL = "#e4e4e7";
 
 const ALGORITHM_OPTIONS = [
@@ -358,12 +356,12 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
       const canvas = canvasRef.current;
       const wrap = wrapRef.current;
       if (!canvas || !wrap) return;
-      const rr = wrap.getBoundingClientRect();
+      const r = wrap.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
-      canvas.width = Math.floor(rr.width * dpr);
-      canvas.height = Math.floor(rr.height * dpr);
-      canvas.style.width = `${rr.width}px`;
-      canvas.style.height = `${rr.height}px`;
+      canvas.width = Math.floor(r.width * dpr);
+      canvas.height = Math.floor(r.height * dpr);
+      canvas.style.width = `${r.width}px`;
+      canvas.style.height = `${r.height}px`;
       const ctx = canvas.getContext("2d");
       if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       drawRef.current();
