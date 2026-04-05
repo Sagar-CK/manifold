@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-const THUMBNAIL_CONCURRENCY = 4;
+const DEFAULT_THUMBNAIL_CONCURRENCY = 4;
 
 const sharedCache: Record<string, string> = {};
 const sharedFailed: Record<string, true> = {};
@@ -30,6 +30,12 @@ export type UseThumbnailsForPathsOptions = {
   onThumbError?: (path: string, error: unknown) => void;
   maxEdge?: number;
   batchUpdates?: boolean;
+  /** Max parallel `thumbnail_image_base64_png` invokes (default 4). Graph uses 2 to reduce IPC load. */
+  concurrency?: number;
+  /** Reorder preview paths (e.g. viewport-first for graph). Called once per pathsKey change. */
+  reorderPreviewPaths?: (previewPaths: string[]) => string[];
+  /** When true, defer starting fetches until the browser is idle (helps first paint on heavy graphs). */
+  deferStartUntilIdle?: boolean;
 };
 
 /** Loads PNG thumbnails for previewable paths (module-level cache). */
@@ -42,6 +48,10 @@ export function useThumbnailsForPaths(
   onThumbErrorRef.current = options?.onThumbError;
   const maxEdge = options?.maxEdge ?? 96;
   const batchUpdates = options?.batchUpdates ?? false;
+  const concurrency = options?.concurrency ?? DEFAULT_THUMBNAIL_CONCURRENCY;
+  const reorderRef = useRef(options?.reorderPreviewPaths);
+  reorderRef.current = options?.reorderPreviewPaths;
+  const deferStartUntilIdle = options?.deferStartUntilIdle ?? false;
 
   const pathsRef = useRef(paths);
   pathsRef.current = paths;
@@ -64,16 +74,19 @@ export function useThumbnailsForPaths(
     setThumbByPath(cachedMap);
     setThumbFailedByPath(failedMap);
 
-    const previewPaths = paths.filter((p) => {
+    let previewPaths = paths.filter((p) => {
       if (!isPreviewablePath(p)) return false;
       if (readCachedUrl(p, maxEdge)) return false;
       if (sharedFailed[p]) return false;
       return true;
     });
 
+    const reorder = reorderRef.current;
+    if (reorder) previewPaths = reorder(previewPaths);
+
     let cancelled = false;
     let nextIndex = 0;
-    const workerCount = Math.min(THUMBNAIL_CONCURRENCY, previewPaths.length);
+    const workerCount = Math.min(concurrency, Math.max(1, previewPaths.length));
 
     const flushBatched = () => {
       flushRafRef.current = null;
@@ -108,49 +121,68 @@ export function useThumbnailsForPaths(
       flushRafRef.current = requestAnimationFrame(flushBatched);
     };
 
-    const workers = Array.from({ length: workerCount }, async () => {
-      while (nextIndex < previewPaths.length) {
-        if (cancelled) return;
-        const current = nextIndex;
-        nextIndex += 1;
-        const p = previewPaths[current];
-        try {
-          const thumb = (await invoke("thumbnail_image_base64_png", {
-            args: { path: p, max_edge: maxEdge, page: 0 },
-          })) as { png_base64: string };
-          const dataUrl = `data:image/png;base64,${thumb.png_base64}`;
-          sharedCache[cacheKey(p, maxEdge)] = dataUrl;
-          delete sharedFailed[p];
+    const runWorkers = () => {
+      const workers = Array.from({ length: workerCount }, async () => {
+        while (nextIndex < previewPaths.length) {
           if (cancelled) return;
-          if (batchUpdates) {
-            pendingThumbsRef.current[p] = dataUrl;
-            scheduleFlush();
-          } else {
-            setThumbByPath((m) => ({ ...m, [p]: dataUrl }));
-            setThumbFailedByPath((m) => {
-              if (!m[p]) return m;
-              const next = { ...m };
-              delete next[p];
-              return next;
-            });
-          }
-        } catch (e) {
-          sharedFailed[p] = true;
-          if (cancelled) return;
-          onThumbErrorRef.current?.(p, e);
-          if (batchUpdates) {
-            pendingFailedRef.current[p] = true;
-            scheduleFlush();
-          } else {
-            setThumbFailedByPath((m) => ({ ...m, [p]: true }));
+          const current = nextIndex;
+          nextIndex += 1;
+          const p = previewPaths[current];
+          try {
+            const thumb = (await invoke("thumbnail_image_base64_png", {
+              args: { path: p, max_edge: maxEdge, page: 0 },
+            })) as { png_base64: string };
+            const dataUrl = `data:image/png;base64,${thumb.png_base64}`;
+            sharedCache[cacheKey(p, maxEdge)] = dataUrl;
+            delete sharedFailed[p];
+            if (cancelled) return;
+            if (batchUpdates) {
+              pendingThumbsRef.current[p] = dataUrl;
+              scheduleFlush();
+            } else {
+              setThumbByPath((m) => ({ ...m, [p]: dataUrl }));
+              setThumbFailedByPath((m) => {
+                if (!m[p]) return m;
+                const next = { ...m };
+                delete next[p];
+                return next;
+              });
+            }
+          } catch (e) {
+            sharedFailed[p] = true;
+            if (cancelled) return;
+            onThumbErrorRef.current?.(p, e);
+            if (batchUpdates) {
+              pendingFailedRef.current[p] = true;
+              scheduleFlush();
+            } else {
+              setThumbFailedByPath((m) => ({ ...m, [p]: true }));
+            }
           }
         }
-      }
-    });
+      });
 
-    void Promise.all(workers);
+      void Promise.all(workers);
+    };
+
+    let idleId: number | null = null;
+    if (deferStartUntilIdle && previewPaths.length > 0 && typeof requestIdleCallback !== "undefined") {
+      idleId = requestIdleCallback(
+        () => {
+          idleId = null;
+          if (!cancelled) runWorkers();
+        },
+        { timeout: 800 },
+      );
+    } else {
+      runWorkers();
+    }
+
     return () => {
       cancelled = true;
+      if (idleId !== null && typeof cancelIdleCallback !== "undefined") {
+        cancelIdleCallback(idleId);
+      }
       if (flushRafRef.current != null) {
         cancelAnimationFrame(flushRafRef.current);
         flushRafRef.current = null;
@@ -158,7 +190,7 @@ export function useThumbnailsForPaths(
       pendingThumbsRef.current = {};
       pendingFailedRef.current = {};
     };
-  }, [pathsKey, maxEdge, batchUpdates]);
+  }, [pathsKey, maxEdge, batchUpdates, concurrency, deferStartUntilIdle]);
 
   return { thumbByPath, thumbFailedByPath };
 }

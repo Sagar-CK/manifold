@@ -21,7 +21,9 @@ import { invokeErrorText } from "@/lib/errors";
 import { navigateBackOrFallback } from "@/lib/navigateBack";
 import type { LocalConfig } from "@/lib/localConfig";
 import { runGraphLayout, type GraphLayoutAlgorithm } from "@/lib/graphLayout";
-import { loadTagsState, type TagsState } from "@/lib/tags";
+import { graphPerfMark, graphPerfSessionStart } from "@/lib/graphPerfDebug";
+import { decodePackedF32Base64 } from "@/lib/packedEmbeddings";
+import { loadTagsState } from "@/lib/tags";
 import { useTagsState } from "@/lib/useTagsState";
 import { isPreviewablePath, useThumbnailsForPaths } from "@/lib/useThumbnailsForPaths";
 
@@ -37,9 +39,13 @@ type LayoutPoint = ContentPoint & {
   ny: number;
 };
 
-const THUMB = 44;
+/** On-canvas node diameter in CSS px (thumbnails use GRAPH_THUMB_MAX_EDGE). */
+const THUMB = 22;
 const MARGIN = 28;
-const GRAPH_THUMB_MAX_EDGE = 48;
+const GRAPH_THUMB_MAX_EDGE = 28;
+const GRID_DIM = 32;
+const MAX_CANVAS_DPR = 2;
+const GRAPH_THUMB_CONCURRENCY = 2;
 const DEFAULT_LIMIT = 500;
 /** Debounce limit input so typing does not refetch on every keystroke. */
 const LIMIT_DEBOUNCE_MS = 350;
@@ -67,31 +73,82 @@ function parseLimitInput(raw: string): number {
   return Math.max(1, Math.min(5000, n));
 }
 
-function normalizeCoords(x: number[], y: number[]): { nx: number[]; ny: number[] } {
+function normalizeCoords(x: ArrayLike<number>, y: ArrayLike<number>): { nx: number[]; ny: number[] } {
+  const len = x.length;
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
   let maxY = -Infinity;
-  for (let i = 0; i < x.length; i++) {
-    minX = Math.min(minX, x[i]);
-    minY = Math.min(minY, y[i]);
-    maxX = Math.max(maxX, x[i]);
-    maxY = Math.max(maxY, y[i]);
+  for (let i = 0; i < len; i++) {
+    minX = Math.min(minX, x[i]!);
+    minY = Math.min(minY, y[i]!);
+    maxX = Math.max(maxX, x[i]!);
+    maxY = Math.max(maxY, y[i]!);
   }
   const w = maxX - minX || 1;
   const h = maxY - minY || 1;
   const pad = 0.06;
-  const nx = x.map((v) => pad + (1 - 2 * pad) * ((v - minX) / w));
-  const ny = y.map((v) => pad + (1 - 2 * pad) * ((v - minY) / h));
+  const nx: number[] = new Array(len);
+  const ny: number[] = new Array(len);
+  for (let i = 0; i < len; i++) {
+    nx[i] = pad + (1 - 2 * pad) * ((x[i]! - minX) / w);
+    ny[i] = pad + (1 - 2 * pad) * ((y[i]! - minY) / h);
+  }
   return { nx, ny };
 }
 
-function tagRingColorsOrdered(tagIds: string[], tagsState: TagsState): string[] {
-  const map = new Map(tagsState.tags.map((t) => [t.id, t.color]));
-  const out: string[] = [];
-  for (const id of tagIds) {
-    const c = map.get(id);
-    if (c) out.push(c);
+function buildSpatialGrid(points: LayoutPoint[], dim: number): number[][] {
+  const cells: number[][] = Array.from({ length: dim * dim }, () => []);
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i]!;
+    const gx = Math.min(dim - 1, Math.max(0, Math.floor(p.nx * dim)));
+    const gy = Math.min(dim - 1, Math.max(0, Math.floor(p.ny * dim)));
+    cells[gx + gy * dim]!.push(i);
+  }
+  return cells;
+}
+
+function normalizedVisibleBounds(
+  cw: number,
+  ch: number,
+  innerW: number,
+  innerH: number,
+  cx: number,
+  cy: number,
+  panX: number,
+  panY: number,
+  sc: number,
+  padPx: number,
+): { nx0: number; nx1: number; ny0: number; ny1: number } {
+  const nxAt = (tsx: number) => ((tsx - cx - panX) / sc + cx - MARGIN) / innerW;
+  const nyAt = (tsy: number) => ((tsy - cy - panY) / sc + cy - MARGIN) / innerH;
+  const nxLo = Math.min(nxAt(-padPx), nxAt(cw + padPx));
+  const nxHi = Math.max(nxAt(-padPx), nxAt(cw + padPx));
+  const nyLo = Math.min(nyAt(-padPx), nyAt(ch + padPx));
+  const nyHi = Math.max(nyAt(-padPx), nyAt(ch + padPx));
+  const padN = 0.04;
+  return {
+    nx0: Math.max(0, nxLo - padN),
+    nx1: Math.min(1, nxHi + padN),
+    ny0: Math.max(0, nyLo - padN),
+    ny1: Math.min(1, nyHi + padN),
+  };
+}
+
+function collectVisibleIndices(
+  bounds: { nx0: number; nx1: number; ny0: number; ny1: number },
+  gridIndex: number[][],
+  dim: number,
+): number[] {
+  const gx0 = Math.max(0, Math.floor(bounds.nx0 * dim));
+  const gx1 = Math.min(dim - 1, Math.floor(bounds.nx1 * dim));
+  const gy0 = Math.max(0, Math.floor(bounds.ny0 * dim));
+  const gy1 = Math.min(dim - 1, Math.floor(bounds.ny1 * dim));
+  const out: number[] = [];
+  for (let gy = gy0; gy <= gy1; gy++) {
+    for (let gx = gx0; gx <= gx1; gx++) {
+      out.push(...gridIndex[gx + gy * dim]!);
+    }
   }
   return out;
 }
@@ -104,7 +161,7 @@ function strokeSegmentedTagRing(
   scale: number,
   colors: string[],
 ): void {
-  ctx.lineWidth = 2.5 / scale;
+  ctx.lineWidth = 2 / scale;
   ctx.lineCap = "butt";
 
   if (colors.length === 0) {
@@ -147,6 +204,11 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
   const navigate = useNavigate();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
+  const pointsRef = useRef<LayoutPoint[]>([]);
+  const gridRef = useRef<number[][]>([]);
+  const loadGenerationRef = useRef(0);
+  /** Bumps each graph `useEffect` run so React Strict Mode’s double effect abandons stale work (avoids duplicate Qdrant invoke + duplicate perf logs). */
+  const graphEffectIdRef = useRef(0);
 
   const [limitInput, setLimitInput] = useState(String(DEFAULT_LIMIT));
   const [debouncedLimitInput, setDebouncedLimitInput] = useState(String(DEFAULT_LIMIT));
@@ -179,9 +241,14 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
   const dragActiveRef = useRef(false);
   const drawRafRef = useRef<number | null>(null);
   const wheelScaleRafRef = useRef<number | null>(null);
+  /** Throttle redraws while many thumbnails finish decoding (avoids main-thread jank). */
+  const thumbDrawTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastThumbPaintAtRef = useRef(0);
   const dragRef = useRef<{ active: boolean; sx: number; sy: number; px: number; py: number } | null>(
     null,
   );
+
+  pointsRef.current = points;
 
   const pathsKey = useMemo(
     () => points.map((p) => p.path).sort().join("\0"),
@@ -189,17 +256,60 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
   );
   const paths = useMemo(() => points.map((p) => p.path), [points]);
 
-  const legendShowsRingOverflow = useMemo(() => {
+  const gridIndex = useMemo(() => buildSpatialGrid(points, GRID_DIM), [points]);
+  gridRef.current = gridIndex;
+
+  const ringColorsByPath = useMemo(() => {
+    const map = new Map<string, string[]>();
+    const tagMap = new Map(tagsState.tags.map((t) => [t.id, t.color] as const));
     for (const pt of points) {
-      if (tagRingColorsOrdered(pt.tagIds, tagsState).length > RING_MAX_SEGMENTS) {
-        return true;
+      const out: string[] = [];
+      for (const id of pt.tagIds) {
+        const c = tagMap.get(id);
+        if (c) out.push(c);
       }
+      map.set(pt.path, out);
+    }
+    return map;
+  }, [points, tagsState]);
+
+  const legendShowsRingOverflow = useMemo(() => {
+    for (const colors of ringColorsByPath.values()) {
+      if (colors.length > RING_MAX_SEGMENTS) return true;
     }
     return false;
-  }, [points, tagsState]);
+  }, [ringColorsByPath]);
+
+  const reorderPreviewPaths = useCallback((previewPaths: string[]) => {
+    const pts = pointsRef.current;
+    const grid = gridRef.current;
+    const wrap = wrapRef.current;
+    if (!wrap || pts.length === 0) return previewPaths;
+    const r = wrap.getBoundingClientRect();
+    const cw = r.width;
+    const ch = r.height;
+    const innerW = cw - 2 * MARGIN;
+    const innerH = ch - 2 * MARGIN;
+    const cx = cw / 2;
+    const cy = ch / 2;
+    const panX = panRef.current.x;
+    const panY = panRef.current.y;
+    const sc = scaleRef.current;
+    const pad = THUMB / 2 + 12;
+    const bounds = normalizedVisibleBounds(cw, ch, innerW, innerH, cx, cy, panX, panY, sc, pad);
+    const visIdx = collectVisibleIndices(bounds, grid, GRID_DIM);
+    const visible = new Set(visIdx.map((i) => pts[i]!.path));
+    const pri = previewPaths.filter((p) => visible.has(p));
+    const rest = previewPaths.filter((p) => !visible.has(p));
+    return [...pri, ...rest];
+  }, []);
+
   const { thumbByPath, thumbFailedByPath } = useThumbnailsForPaths(pathsKey, paths, {
     maxEdge: GRAPH_THUMB_MAX_EDGE,
     batchUpdates: true,
+    concurrency: GRAPH_THUMB_CONCURRENCY,
+    reorderPreviewPaths,
+    deferStartUntilIdle: true,
   });
 
   const imgCacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
@@ -243,6 +353,8 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
     const sc = scaleRef.current;
 
     const cullPad = THUMB / 2 + 10;
+    const bounds = normalizedVisibleBounds(cw, ch, innerW, innerH, cx, cy, panX, panY, sc, cullPad);
+    const vis = collectVisibleIndices(bounds, gridIndex, GRID_DIM);
 
     ctx.save();
     ctx.translate(cx + panX, cy + panY);
@@ -251,9 +363,11 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
 
     const radius = THUMB / 2 / sc;
     const size = THUMB / sc;
-    const labelPx = 10 / sc;
-    const tagRingExtra = 3 / sc;
-    for (const pt of points) {
+    const labelPx = 8 / sc;
+    const tagRingExtra = 2.5 / sc;
+    for (const i of vis) {
+      const pt = points[i];
+      if (!pt) continue;
       const px = MARGIN + pt.nx * innerW;
       const py = MARGIN + pt.ny * innerH;
       const tsx = (px - cx) * sc + cx + panX;
@@ -264,7 +378,7 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
 
       const isSel = pt.path === selectedPath;
       const img = imgCacheRef.current.get(pt.path);
-      const ringColors = tagRingColorsOrdered(pt.tagIds, tagsState);
+      const ringColors = ringColorsByPath.get(pt.path) ?? [];
       strokeSegmentedTagRing(ctx, px, py, radius + tagRingExtra, sc, ringColors);
 
       ctx.save();
@@ -295,7 +409,7 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
       ctx.restore();
       if (isSel) {
         ctx.strokeStyle = "rgba(239, 68, 68, 0.85)";
-        ctx.lineWidth = 3 / sc;
+        ctx.lineWidth = 2.5 / sc;
         ctx.beginPath();
         ctx.arc(px, py, radius + tagRingExtra + 2 / sc, 0, Math.PI * 2);
         ctx.stroke();
@@ -303,7 +417,7 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
     }
 
     ctx.restore();
-  }, [points, selectedPath, thumbFailedByPath, tagsState]);
+  }, [points, selectedPath, thumbFailedByPath, ringColorsByPath, gridIndex]);
 
   drawRef.current = draw;
 
@@ -314,6 +428,23 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
       drawRef.current();
     });
   }, []);
+
+  const THUMB_DRAW_MIN_MS = 100;
+  const scheduleDrawAfterThumb = useCallback(() => {
+    const now = performance.now();
+    if (now - lastThumbPaintAtRef.current >= THUMB_DRAW_MIN_MS) {
+      lastThumbPaintAtRef.current = now;
+      scheduleDraw();
+      return;
+    }
+    if (thumbDrawTimeoutRef.current != null) return;
+    const delay = Math.max(8, THUMB_DRAW_MIN_MS - (now - lastThumbPaintAtRef.current));
+    thumbDrawTimeoutRef.current = setTimeout(() => {
+      thumbDrawTimeoutRef.current = null;
+      lastThumbPaintAtRef.current = performance.now();
+      scheduleDraw();
+    }, delay);
+  }, [scheduleDraw]);
 
   useEffect(() => {
     draw();
@@ -329,6 +460,10 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
         cancelAnimationFrame(wheelScaleRafRef.current);
         wheelScaleRafRef.current = null;
       }
+      if (thumbDrawTimeoutRef.current != null) {
+        clearTimeout(thumbDrawTimeoutRef.current);
+        thumbDrawTimeoutRef.current = null;
+      }
     };
   }, []);
 
@@ -343,13 +478,13 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
       img.onload = () => {
         if (cancelled) return;
         cache.set(p, img);
-        drawRef.current();
+        scheduleDrawAfterThumb();
       };
     }
     return () => {
       cancelled = true;
     };
-  }, [pathsKey, thumbByPath, paths]);
+  }, [pathsKey, thumbByPath, paths, scheduleDrawAfterThumb]);
 
   useEffect(() => {
     const ro = new ResizeObserver(() => {
@@ -357,7 +492,7 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
       const wrap = wrapRef.current;
       if (!canvas || !wrap) return;
       const r = wrap.getBoundingClientRect();
-      const dpr = window.devicePixelRatio || 1;
+      const dpr = Math.min(window.devicePixelRatio || 1, MAX_CANVAS_DPR);
       canvas.width = Math.floor(r.width * dpr);
       canvas.height = Math.floor(r.height * dpr);
       canvas.style.width = `${r.width}px`;
@@ -374,7 +509,8 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
     ALGORITHM_OPTIONS.find((o) => o.value === algorithm) ?? ALGORITHM_OPTIONS[0];
 
   const runLoad = useCallback(
-    async (limit: number, algo: GraphLayoutAlgorithm, tagFilters: string[]) => {
+    async (limit: number, algo: GraphLayoutAlgorithm, tagFilters: string[], effectId: number) => {
+      const gen = ++loadGenerationRef.current;
       setLimitInput(String(limit));
       setAlgorithm(algo);
       setError(null);
@@ -383,47 +519,93 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
       setLayoutBusy(false);
       setPoints([]);
       setPointCount(null);
+      lastThumbPaintAtRef.current = 0;
+      if (thumbDrawTimeoutRef.current != null) {
+        clearTimeout(thumbDrawTimeoutRef.current);
+        thumbDrawTimeoutRef.current = null;
+      }
       try {
-        const res = (await invoke("qdrant_scroll_content_vectors", {
+        const res = (await invoke("qdrant_scroll_graph", {
           args: {
             sourceId: cfg.sourceId,
             limit,
             tagFilterIds: tagFilters.length > 0 ? tagFilters : undefined,
           },
-        })) as { points: ContentPoint[] };
+        })) as {
+          points: { path: string; contentHash: string; tagIds: string[] }[];
+          packedEmbeddingsF32Base64: string;
+          n: number;
+          d: number;
+        };
 
-        if (res.points.length === 0) {
+        if (gen !== loadGenerationRef.current) return;
+        if (effectId !== graphEffectIdRef.current) return;
+
+        graphPerfSessionStart();
+        graphPerfMark("invoke_qdrant_scroll_graph_done", {
+          n: res.n,
+          d: res.d,
+          packedBase64Chars: res.packedEmbeddingsF32Base64.length,
+          limit,
+          algo,
+        });
+
+        if (res.n === 0) {
+          graphPerfMark("no_results");
           setNoResults(true);
           return;
         }
 
-        const n = res.points.length;
+        const n = res.n;
         setPointCount(n);
-        const d = res.points[0].embedding.length;
-        const flat = new Float32Array(n * d);
-        for (let i = 0; i < n; i++) {
-          flat.set(res.points[i].embedding, i * d);
-        }
+        const d = res.d;
+        graphPerfMark("decode_packed_embeddings_start");
+        const flat = decodePackedF32Base64(res.packedEmbeddingsF32Base64, n, d);
+        if (effectId !== graphEffectIdRef.current) return;
+        graphPerfMark("decode_packed_embeddings_done", { float32Length: flat.length });
+        const contentPoints: ContentPoint[] = res.points.map((p) => ({
+          path: p.path,
+          contentHash: p.contentHash,
+          tagIds: p.tagIds,
+          embedding: [],
+        }));
 
         setLayoutBusy(true);
+        graphPerfMark("runGraphLayout_worker_start", { algo, n, d });
         const { x, y } = await runGraphLayout(flat, n, d, algo);
-        const { nx, ny } = normalizeCoords(Array.from(x), Array.from(y));
-        const next: LayoutPoint[] = res.points.map((p, i) => ({
+        graphPerfMark("runGraphLayout_worker_done");
+        if (gen !== loadGenerationRef.current) return;
+        if (effectId !== graphEffectIdRef.current) return;
+
+        graphPerfMark("normalize_coords_start");
+        const { nx, ny } = normalizeCoords(x, y);
+        graphPerfMark("normalize_coords_done");
+        const next: LayoutPoint[] = contentPoints.map((p, i) => ({
           ...p,
           nx: nx[i] ?? 0,
           ny: ny[i] ?? 0,
         }));
         setPoints(next);
+        graphPerfMark("setPoints_done", { layoutPoints: next.length });
         dragActiveRef.current = false;
         setPan({ x: 0, y: 0 });
         setScale(1);
         panRef.current = { x: 0, y: 0 };
         scaleRef.current = 1;
       } catch (e) {
+        if (gen !== loadGenerationRef.current) return;
+        if (e instanceof Error && e.message === "Graph layout superseded") {
+          graphPerfMark("run_superseded");
+          return;
+        }
+        graphPerfMark("load_error", { message: e instanceof Error ? e.message : String(e) });
         setError(invokeErrorText(e));
       } finally {
-        setLoading(false);
-        setLayoutBusy(false);
+        if (gen === loadGenerationRef.current) {
+          graphPerfMark("load_pipeline_finally_ui_idle");
+          setLoading(false);
+          setLayoutBusy(false);
+        }
       }
     },
     [cfg.sourceId],
@@ -435,7 +617,8 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
   }, [limitInput]);
 
   useEffect(() => {
-    void runLoad(parseLimitInput(debouncedLimitInput), algorithm, tagFilterIds);
+    const effectId = ++graphEffectIdRef.current;
+    void runLoad(parseLimitInput(debouncedLimitInput), algorithm, tagFilterIds, effectId);
   }, [debouncedLimitInput, algorithm, tagFilterIds, runLoad]);
 
   function hitTest(clientX: number, clientY: number): string | null {
@@ -454,15 +637,22 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
     const panY = panRef.current.y;
     const sc = scaleRef.current;
 
-    for (let i = points.length - 1; i >= 0; i--) {
-      const pt = points[i];
+    const hitR = THUMB / 2 + 4;
+    const hitR2 = hitR * hitR;
+    const pad = THUMB / 2 + 14;
+    const bounds = normalizedVisibleBounds(cw, ch, innerW, innerH, cx, cy, panX, panY, sc, pad);
+    const vis = collectVisibleIndices(bounds, gridIndex, GRID_DIM);
+
+    for (let vi = vis.length - 1; vi >= 0; vi--) {
+      const pt = points[vis[vi]!];
+      if (!pt) continue;
       const px = MARGIN + pt.nx * innerW;
       const py = MARGIN + pt.ny * innerH;
       const tsx = (px - cx) * sc + cx + panX;
       const tsy = (py - cy) * sc + cy + panY;
       const dx = sx - tsx;
       const dy = sy - tsy;
-      if (dx * dx + dy * dy <= (THUMB / 2 + 4) * (THUMB / 2 + 4)) {
+      if (dx * dx + dy * dy <= hitR2) {
         return pt.path;
       }
     }
