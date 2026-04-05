@@ -333,7 +333,7 @@ fn format_error_chain(err: &(dyn std::error::Error + 'static)) -> String {
 }
 
 /// Downscale and JPEG-encode raster images to reduce upload size and OCR latency.
-fn prepare_raster_image_for_gemini(bytes: &[u8]) -> Result<(Vec<u8>, &'static str), String> {
+pub fn prepare_raster_image_for_gemini(bytes: &[u8]) -> Result<(Vec<u8>, &'static str), String> {
     let img = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
     let thumb = img.thumbnail(EMBED_VISION_MAX_EDGE, EMBED_VISION_MAX_EDGE);
     let rgb = thumb.to_rgb8();
@@ -681,6 +681,78 @@ async fn embed_query_text_with_client(client: &GeminiClient, text: &str) -> Resu
     }
 
     Ok(v)
+}
+
+pub async fn judge_tag(
+    app: &tauri::AppHandle,
+    tag_name: &str,
+    similarity_score: f32,
+    labeled_path: &str,
+    candidate_path: &str,
+    source_part: serde_json::Value,
+    target_part: serde_json::Value,
+) -> Result<bool, String> {
+    let mgr = app.state::<EmbeddingManager>();
+    let client = mgr.get_gemini_client().await?;
+
+    // Value is Qdrant search score for Distance::Cosine (cosine similarity): higher = more similar.
+    let prompt = format!(
+        "You are evaluating if two files belong to the same category/tag based on their content. The tag is: '{}'. The embedding cosine similarity score between these two files is {} (higher is more similar). Do these files both belong to the tag '{}'? Answer strictly YES or NO.",
+        tag_name, similarity_score, tag_name
+    );
+
+    tracing::info!(
+        target: "manifold::judge",
+        "judge_tag labeled='{}' candidate='{}'",
+        labeled_path,
+        candidate_path
+    );
+
+    let body = serde_json::json!({
+        "contents": [{
+            "parts": [
+                { "text": prompt },
+                { "text": "File 1:" },
+                source_part,
+                { "text": "File 2:" },
+                target_part
+            ]
+        }],
+        "generationConfig": {
+            "temperature": 0,
+            "responseMimeType": "text/plain"
+        }
+    });
+
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/{}:generateContent",
+        GEMINI_OCR_MODEL
+    );
+
+    let res = client
+        .http
+        .post(&url)
+        .header("x-goog-api-key", &client.api_key)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+        .map_err(|e| format!("Gemini judge tag request failed: {}", e))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let body_text = res.text().await.unwrap_or_default();
+        return Err(format!("Gemini judge tag failed (HTTP {}): {}", status, body_text));
+    }
+
+    let json: serde_json::Value = res.json().await.map_err(|e| format!("Invalid JSON: {}", e))?;
+    if let Some(text) = json["candidates"][0]["content"]["parts"][0]["text"].as_str() {
+        let text = text.trim().to_uppercase();
+        Ok(text.contains("YES"))
+    } else {
+        Err("Gemini response missing text".to_string())
+    }
 }
 
 

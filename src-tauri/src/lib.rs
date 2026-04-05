@@ -294,7 +294,8 @@ pub fn run() {
             cancel_embedding_job,
             embedding_job_status,
             embed_query_text,
-            text_index_full_text_for_path
+            text_index_full_text_for_path,
+            gemini_judge_tag
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -1361,5 +1362,90 @@ struct EmbedQueryTextArgs {
 #[tauri::command]
 async fn embed_query_text(app: tauri::AppHandle, args: EmbedQueryTextArgs) -> Result<Vec<f32>, String> {
     embedding::embed_query_text(&app, &args.text).await
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiJudgeTagArgs {
+    source_id: String,
+    source_path: String,
+    target_path: String,
+    tag_name: String,
+    similarity_score: f32,
+}
+
+#[tauri::command]
+async fn gemini_judge_tag(
+    app: tauri::AppHandle,
+    text_index_state: tauri::State<'_, text_index::TextIndexState>,
+    args: GeminiJudgeTagArgs,
+) -> Result<bool, String> {
+    use base64::Engine;
+    
+    let source_id = args.source_id.clone();
+    
+    let get_part = |path: &str| -> Result<serde_json::Value, String> {
+        let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+        let size = meta.len();
+        if size > MAX_EMBED_FILE_BYTES {
+            return Err("File too large".to_string());
+        }
+        let ext = std::path::Path::new(path)
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_lowercase();
+
+        if ["jpg", "jpeg", "png"].contains(&ext.as_str()) {
+            let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+            let (prepared_bytes, mime) = embedding::prepare_raster_image_for_gemini(&bytes)?;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&prepared_bytes);
+            Ok(serde_json::json!({
+                "inline_data": { "mime_type": mime, "data": b64 }
+            }))
+        } else {
+            // Cannot await inside closure, so we return a marker and handle it outside
+            Ok(serde_json::json!({ "fetch_text_for": path }))
+        }
+    };
+
+    let mut source_part = get_part(&args.source_path)?;
+    if source_part.get("fetch_text_for").is_some() {
+        let text = text_index::get_full_text_for_path(&app, &text_index_state, &source_id, &args.source_path)
+            .await?
+            .unwrap_or_else(|| std::fs::read_to_string(&args.source_path).unwrap_or_default());
+        let mut text = text;
+        if text.len() > 16000 {
+            text.truncate(16000);
+        }
+        source_part = serde_json::json!({ "text": text });
+    }
+
+    let mut target_part = get_part(&args.target_path)?;
+    if target_part.get("fetch_text_for").is_some() {
+        let text = text_index::get_full_text_for_path(&app, &text_index_state, &source_id, &args.target_path)
+            .await?
+            .unwrap_or_else(|| std::fs::read_to_string(&args.target_path).unwrap_or_default());
+        let mut text = text;
+        if text.len() > 16000 {
+            text.truncate(16000);
+        }
+        target_part = serde_json::json!({ "text": text });
+    }
+
+    embedding::judge_tag(
+        &app,
+        &args.tag_name,
+        args.similarity_score,
+        &args.source_path,
+        &args.target_path,
+        source_part,
+        target_part,
+    )
+    .await
+        .map_err(|e| {
+            tracing::error!("judge_tag failed: {}", e);
+            e
+        })
 }
 
