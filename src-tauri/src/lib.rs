@@ -11,6 +11,7 @@ use std::time::Duration;
 use tauri::Manager;
 use walkdir::WalkDir;
 
+mod gemini_settings;
 mod logging;
 mod qdrant;
 mod embedding;
@@ -230,6 +231,27 @@ fn load_env() {
     let _ = dotenvy::dotenv();
 }
 
+/// Loads `.env.local` from paths that exist in packaged apps (CWD is often not the repo root).
+/// Earlier `load_env()` already ran; `dotenvy` does not override existing variables, so we load
+/// user app data first, then bundle-adjacent paths.
+fn load_env_packaged_locations(app: &tauri::AppHandle) {
+    if let Ok(dir) = app.path().app_data_dir() {
+        let _ = dotenvy::from_path(dir.join(".env.local"));
+    }
+    if let Ok(dir) = app.path().resource_dir() {
+        let _ = dotenvy::from_path(dir.join(".env.local"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let _ = dotenvy::from_path(exe_dir.join(".env.local"));
+            // macOS .app: executable is in Contents/MacOS; resources live in Contents/Resources.
+            if let Some(contents) = exe_dir.parent() {
+                let _ = dotenvy::from_path(contents.join("Resources").join(".env.local"));
+            }
+        }
+    }
+}
+
 fn init_logging() {
     let filter = logging::env_filter_directives();
     let env_filter = tracing_subscriber::EnvFilter::try_new(&filter)
@@ -256,6 +278,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            load_env_packaged_locations(app.handle());
+            gemini_settings::init_storage(app.handle());
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let qdrant_state = app_handle.state::<qdrant::QdrantState>();
@@ -290,7 +314,10 @@ pub fn run() {
             embedding_job_status,
             embed_query_text,
             text_index_full_text_for_path,
-            gemini_judge_tag
+            gemini_judge_tag,
+            gemini_api_key_status,
+            save_gemini_api_key,
+            clear_stored_gemini_api_key
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -1486,5 +1513,37 @@ async fn gemini_judge_tag(
             );
             e
         })
+}
+
+#[tauri::command]
+fn gemini_api_key_status() -> gemini_settings::GeminiApiKeyStatus {
+    gemini_settings::api_key_status()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveGeminiApiKeyArgs {
+    api_key: String,
+}
+
+#[tauri::command]
+async fn save_gemini_api_key(
+    app: tauri::AppHandle,
+    mgr: tauri::State<'_, embedding::EmbeddingManager>,
+    args: SaveGeminiApiKeyArgs,
+) -> Result<(), String> {
+    gemini_settings::save_user_api_key(&app, &args.api_key)?;
+    mgr.reset_gemini_client_cache().await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn clear_stored_gemini_api_key(
+    app: tauri::AppHandle,
+    mgr: tauri::State<'_, embedding::EmbeddingManager>,
+) -> Result<(), String> {
+    gemini_settings::clear_stored_api_key_file(&app)?;
+    mgr.reset_gemini_client_cache().await;
+    Ok(())
 }
 

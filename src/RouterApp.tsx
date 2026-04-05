@@ -209,6 +209,24 @@ export default function RouterApp() {
     geminiApiKey,
   ]);
 
+  const clearGeminiEmbedError = useCallback(() => {
+    setLastEmbedError(null);
+    lastReportedEmbedErrorRef.current = null;
+    setEmbedFailures([]);
+  }, []);
+
+  const onGeminiApiKeySaved = useCallback(() => {
+    clearGeminiEmbedError();
+    const active =
+      embeddingPhase === "scanning" ||
+      embeddingPhase === "embedding" ||
+      embeddingPhase === "paused" ||
+      embeddingPhase === "cancelling";
+    if (cfg.include.length > 0 && !active) {
+      void runEmbed();
+    }
+  }, [cfg.include.length, clearGeminiEmbedError, embeddingPhase, runEmbed]);
+
   useEffect(() => {
     if (cfg.include.length === 0) {
       setEmbeddingPhase("idle");
@@ -316,6 +334,8 @@ export default function RouterApp() {
                     cfg={cfg}
                     setCfg={setCfg}
                     extOptions={extOptions}
+                    onGeminiApiKeySaved={onGeminiApiKeySaved}
+                    onGeminiStoredKeyCleared={clearGeminiEmbedError}
                   />
                 }
               />

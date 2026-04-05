@@ -5,6 +5,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
 import { SettingsAppearanceCard } from "../components/settings/SettingsAppearanceCard";
+import { SettingsGeminiApiKeyCard } from "../components/settings/SettingsGeminiApiKeyCard";
 import { SettingsEmbeddingImageCard } from "../components/settings/SettingsEmbeddingImageCard";
 import { SettingsClearIndexCard } from "../components/settings/SettingsClearIndexCard";
 import type { IncludeFolderBreakdown } from "../components/settings/SettingsFolderDialogs";
@@ -54,10 +55,14 @@ export function SettingsPage({
   cfg,
   setCfg,
   extOptions,
+  onGeminiApiKeySaved,
+  onGeminiStoredKeyCleared,
 }: {
   cfg: LocalConfig;
   setCfg: (next: LocalConfig) => void;
   extOptions: SupportedExt[];
+  onGeminiApiKeySaved?: () => void;
+  onGeminiStoredKeyCleared?: () => void;
 }) {
   const {
     embedding,
@@ -316,6 +321,10 @@ export function SettingsPage({
         >
           <div className="grid min-w-0 gap-6 lg:grid-cols-2 lg:items-start">
             <div className="flex min-w-0 flex-col gap-6">
+              <SettingsGeminiApiKeyCard
+                onSaved={onGeminiApiKeySaved}
+                onStoredKeyCleared={onGeminiStoredKeyCleared}
+              />
               <SettingsAppearanceCard
                 themeMounted={themeMounted}
                 theme={theme}

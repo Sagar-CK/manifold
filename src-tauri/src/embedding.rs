@@ -114,6 +114,11 @@ impl EmbeddingManager {
         s.gemini_client = Some(client.clone());
         Ok(client)
     }
+
+    pub async fn reset_gemini_client_cache(&self) {
+        let mut s = self.state.lock().await;
+        s.gemini_client = None;
+    }
 }
 
 
@@ -184,8 +189,9 @@ fn read_gemini_api_key() -> Result<String, String> {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
         })
+        .or_else(|| crate::gemini_settings::read_stored_key())
         .ok_or_else(|| {
-            "Missing MANIFOLD_GEMINI_API_KEY (or GOOGLE_GENERATIVE_AI_API_KEY) in .env.local"
+            "Missing Gemini API key. Set MANIFOLD_GEMINI_API_KEY or GOOGLE_GENERATIVE_AI_API_KEY (e.g. in .env.local or your environment), or save a key in Settings."
                 .to_string()
         })?;
     Ok(key)
