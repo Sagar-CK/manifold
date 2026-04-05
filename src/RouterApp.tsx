@@ -5,7 +5,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 import { loadConfig, type LocalConfig, type SupportedExt } from "./lib/localConfig";
+import { syncTagsBackfill } from "./lib/qdrantTags";
+import { loadTagsState } from "./lib/tags";
 import { EnvIssuesBanner } from "./components/EnvIssuesBanner";
+import { KeyboardShortcutsHelp } from "./components/KeyboardShortcutsHelp";
 import { FileResultPage } from "./pages/FileResultPage";
 import { GraphExplorerPage } from "./pages/GraphExplorerPage";
 import { SearchPage } from "./pages/SearchPage";
@@ -90,6 +93,39 @@ export default function RouterApp() {
       cancelled = true;
     };
   }, [geminiApiKey]);
+
+  /** One-time per source: push local tag membership into Qdrant payloads for paths that already exist in the index. */
+  useEffect(() => {
+    const key = `manifold:tagsQdrantBackfill:v1:${cfg.sourceId}`;
+    if (typeof window === "undefined" || localStorage.getItem(key)) return;
+    let cancelled = false;
+    async function run() {
+      const state = loadTagsState();
+      const entries = Object.entries(state.pathToTagIds).map(([path, tagIds]) => ({
+        path,
+        tagIds,
+      }));
+      if (entries.length === 0) {
+        localStorage.setItem(key, "1");
+        return;
+      }
+      const BATCH = 64;
+      try {
+        for (let i = 0; i < entries.length; i += BATCH) {
+          if (cancelled) return;
+          const chunk = entries.slice(i, i + BATCH);
+          await syncTagsBackfill(cfg.sourceId, chunk);
+        }
+        if (!cancelled) localStorage.setItem(key, "1");
+      } catch {
+        /* Qdrant down or offline; retry on next launch */
+      }
+    }
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [cfg.sourceId]);
 
   const runEmbed = useCallback(async () => {
     if (cfg.include.length === 0) {
@@ -234,6 +270,7 @@ export default function RouterApp() {
         </Routes>
         </div>
       </div>
+      <KeyboardShortcutsHelp />
     </main>
   );
 }

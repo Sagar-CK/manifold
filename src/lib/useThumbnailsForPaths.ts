@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 const THUMBNAIL_CONCURRENCY = 4;
 
-function isPreviewablePath(path: string) {
+export function isPreviewablePath(path: string) {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
   return ext === "png" || ext === "jpg" || ext === "jpeg" || ext === "pdf";
 }

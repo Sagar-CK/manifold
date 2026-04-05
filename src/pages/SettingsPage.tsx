@@ -8,11 +8,13 @@ import { navigateBackOrFallback } from "../lib/navigateBack";
 import { formatPathForDisplay } from "../lib/pathDisplay";
 import { collapseIncludeFolders, type LocalConfig, type SupportedExt } from "../lib/localConfig";
 import { saveConfig } from "../lib/localConfig";
+import { syncPathTagsToQdrant } from "../lib/qdrantTags";
 import {
   createTagDef,
   loadTagsState,
   removeTagEverywhere,
   saveTagsState,
+  tagIdsForPath,
   type TagsState,
 } from "../lib/tags";
 import { PageHeader } from "../components/PageHeader";
@@ -144,6 +146,13 @@ export function SettingsPage({
   function updateTags(next: TagsState) {
     saveTagsState(next);
     setTagsState(next);
+  }
+
+  function addTagFromDraft() {
+    if (!tagNameDraft.trim()) return;
+    const t = createTagDef(tagNameDraft, tagColorDraft);
+    updateTags({ ...tagsState, tags: [...tagsState.tags, t] });
+    setTagNameDraft("");
   }
 
   async function refreshEmbeddedCount(sourceId: string) {
@@ -611,52 +620,51 @@ export function SettingsPage({
           <Card size="sm" className="shadow-xs">
             <CardHeader>
               <CardTitle>Tags</CardTitle>
-              <CardDescription>Use in search cards and file view</CardDescription>
+              <CardDescription>
+                Name your tag, pick a color — shown in search cards and file view.
+              </CardDescription>
             </CardHeader>
             <CardContent className="flex flex-col gap-4">
-              <div className="flex flex-wrap items-end gap-2">
-                <div className="flex min-w-[8rem] flex-1 flex-col gap-1.5">
-                  <Label htmlFor="tag-name">Name</Label>
-                  <Input
-                    id="tag-name"
-                    type="text"
-                    value={tagNameDraft}
-                    onChange={(e) => setTagNameDraft(e.target.value)}
-                    placeholder="Review"
-                    autoComplete="off"
-                  />
-                </div>
-                <div className="flex flex-col gap-1.5">
-                  <Label htmlFor="tag-color">Color</Label>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <input
-                        id="tag-color"
-                        type="color"
-                        value={tagColorDraft}
-                        onChange={(e) => setTagColorDraft(e.target.value)}
-                        className="size-9 cursor-pointer rounded-md border border-input bg-background p-0.5 shadow-xs"
-                        aria-label="Tag color"
-                      />
-                    </TooltipTrigger>
-                    <TooltipContent side="top">Pick color</TooltipContent>
-                  </Tooltip>
-                </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Input
+                  id="tag-name"
+                  type="text"
+                  value={tagNameDraft}
+                  onChange={(e) => setTagNameDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      addTagFromDraft();
+                    }
+                  }}
+                  placeholder="Review"
+                  autoComplete="off"
+                  className="min-w-[8rem] flex-1"
+                  aria-label="Tag name"
+                />
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <span className="inline-flex shrink-0 self-end">
+                    <input
+                      id="tag-color"
+                      type="color"
+                      value={tagColorDraft}
+                      onChange={(e) => setTagColorDraft(e.target.value)}
+                      className="size-9 shrink-0 cursor-pointer rounded-md border border-input bg-background p-0.5 shadow-xs"
+                      aria-label="Tag color"
+                    />
+                  </TooltipTrigger>
+                  <TooltipContent side="top">Pick color</TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="inline-flex shrink-0">
                       <Button
                         type="button"
                         variant="secondary"
                         size="icon"
                         disabled={!tagNameDraft.trim()}
                         aria-label="Add tag"
-                        onClick={() => {
-                          if (!tagNameDraft.trim()) return;
-                          const t = createTagDef(tagNameDraft, tagColorDraft);
-                          updateTags({ ...tagsState, tags: [...tagsState.tags, t] });
-                          setTagNameDraft("");
-                        }}
+                        onClick={addTagFromDraft}
                       >
                         <Plus className="h-4 w-4" aria-hidden="true" />
                       </Button>
@@ -665,7 +673,7 @@ export function SettingsPage({
                   <TooltipContent side="top">Add tag</TooltipContent>
                 </Tooltip>
               </div>
-              <div className="flex flex-col gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 {tagsState.tags.length === 0 ? (
                   <p className="text-sm text-muted-foreground">No tags</p>
                 ) : (
@@ -677,6 +685,18 @@ export function SettingsPage({
                         setTagsState((prev) => {
                           const next = removeTagEverywhere(prev, t.id);
                           saveTagsState(next);
+                          const affected = Object.entries(prev.pathToTagIds)
+                            .filter(([, ids]) => ids.includes(t.id))
+                            .map(([p]) => p);
+                          for (const p of affected) {
+                            void syncPathTagsToQdrant(
+                              cfg.sourceId,
+                              p,
+                              tagIdsForPath(next, p),
+                            ).catch(() => {
+                              /* ignore */
+                            });
+                          }
                           return next;
                         })
                       }

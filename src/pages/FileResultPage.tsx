@@ -24,6 +24,7 @@ import { navigateBackOrFallback } from "../lib/navigateBack";
 import { formatIndexedPathForDisplay } from "../lib/pathDisplay";
 import { isPathSelected } from "../lib/pathSelection";
 import { useThumbnailsForPaths } from "../lib/useThumbnailsForPaths";
+import { syncPathTagsToQdrant } from "../lib/qdrantTags";
 import {
   loadTagsState,
   saveTagsState,
@@ -96,6 +97,8 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
   const [similarError, setSimilarError] = useState<string | null>(null);
   const [pathChooserOpen, setPathChooserOpen] = useState(false);
   const [selectedSimilarGroup, setSelectedSimilarGroup] = useState<SimilarGroup | null>(null);
+  /** When true, duplicate-picker confirms open-in-default-app instead of navigating. */
+  const [pathChooserOpenInAppMode, setPathChooserOpenInAppMode] = useState(false);
   const [homePath, setHomePath] = useState("");
   const [tagsState, setTagsState] = useState<TagsState>(() => loadTagsState());
 
@@ -355,39 +358,41 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
                 {tagsState.tags.map((t) => {
                   const active = tagIdsForPath(tagsState, filePath).includes(t.id);
                   return (
-                    <Tooltip key={t.id}>
-                      <TooltipTrigger asChild>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setTagsState((prev) => {
-                              const next = togglePathTag(prev, filePath, t.id);
-                              saveTagsState(next);
-                              return next;
-                            });
-                          }}
-                        >
-                          <Badge
-                            variant={active ? "secondary" : "outline"}
-                            className="border font-normal"
-                            style={
-                              active
-                                ? {
-                                    backgroundColor: `${t.color}24`,
-                                    borderColor: t.color,
-                                    color: "inherit",
-                                  }
-                                : undefined
-                            }
-                          >
-                            {t.name}
-                          </Badge>
-                        </button>
-                      </TooltipTrigger>
-                      <TooltipContent side="bottom">
-                        {active ? `Remove “${t.name}”` : `Add “${t.name}”`}
-                      </TooltipContent>
-                    </Tooltip>
+                    <button
+                      key={t.id}
+                      type="button"
+                      aria-label={active ? `Remove tag ${t.name}` : `Add tag ${t.name}`}
+                      onClick={() => {
+                        setTagsState((prev) => {
+                          const next = togglePathTag(prev, filePath, t.id);
+                          saveTagsState(next);
+                          void syncPathTagsToQdrant(
+                            cfg.sourceId,
+                            filePath,
+                            tagIdsForPath(next, filePath),
+                          ).catch(() => {
+                            /* ignore */
+                          });
+                          return next;
+                        });
+                      }}
+                    >
+                      <Badge
+                        variant={active ? "secondary" : "outline"}
+                        className="border font-normal"
+                        style={
+                          active
+                            ? {
+                                backgroundColor: `${t.color}24`,
+                                borderColor: t.color,
+                                color: "inherit",
+                              }
+                            : undefined
+                        }
+                      >
+                        {t.name}
+                      </Badge>
+                    </button>
                   );
                 })}
               </div>
@@ -426,8 +431,24 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
                         ? `Similarity ${formatSimilarityScore(hit.score)}`
                         : null
                     }
-                    onClick={() => {
+                    onClick={(e) => {
+                      const openInApp = e.metaKey || e.ctrlKey;
+                      if (openInApp) {
+                        e.preventDefault();
+                        if (isStacked) {
+                          setPathChooserOpenInAppMode(true);
+                          setSelectedSimilarGroup(group);
+                          setPathChooserOpen(true);
+                          return;
+                        }
+                        setOpenError(null);
+                        void openPath(p).catch((err) => {
+                          setOpenError(String(err));
+                        });
+                        return;
+                      }
                       if (isStacked) {
+                        setPathChooserOpenInAppMode(false);
                         setSelectedSimilarGroup(group);
                         setPathChooserOpen(true);
                         return;
@@ -439,7 +460,12 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
                     tagDots={tagsForPath(tagsState, p)}
                     tagMenuSlot={
                       tagsState.tags.length > 0 ? (
-                        <TagsPathDropdown path={p} tagsState={tagsState} setTagsState={setTagsState} />
+                        <TagsPathDropdown
+                          path={p}
+                          sourceId={cfg.sourceId}
+                          tagsState={tagsState}
+                          setTagsState={setTagsState}
+                        />
                       ) : null
                     }
                   />
@@ -454,14 +480,21 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
         open={pathChooserOpen}
         onOpenChange={(open) => {
           setPathChooserOpen(open);
-          if (!open) setSelectedSimilarGroup(null);
+          if (!open) {
+            setSelectedSimilarGroup(null);
+            setPathChooserOpenInAppMode(false);
+          }
         }}
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Choose file</AlertDialogTitle>
+            <AlertDialogTitle>
+              {pathChooserOpenInAppMode ? "Open in default app" : "Choose file"}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              These files have identical content. Select the path to continue exploring similar files.
+              {pathChooserOpenInAppMode
+                ? "These files have identical content. Select the path to open with the system's default application."
+                : "These files have identical content. Select the path to continue exploring similar files."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <div className="max-h-64 space-y-2 overflow-y-auto">
@@ -470,22 +503,32 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
                 <TooltipTrigger asChild>
                   <Button
                     type="button"
-                    variant="outline"
-                    className="w-full justify-start truncate"
+                    variant="ghost"
+                    className="h-auto w-full justify-start p-0 font-normal hover:bg-transparent focus-visible:bg-transparent"
                     onClick={() => {
                       const p = variant.file.path;
                       const variants = selectedSimilarGroup?.variants ?? [];
-                      navigate(`/file?path=${encodeURIComponent(p)}`, {
-                        state: {
-                          resultStack: [...trail, p],
-                          sameContentPaths: variants.map((v) => v.file.path),
-                        },
-                      });
+                      if (pathChooserOpenInAppMode) {
+                        setOpenError(null);
+                        void openPath(p).catch((err) => {
+                          setOpenError(String(err));
+                        });
+                      } else {
+                        navigate(`/file?path=${encodeURIComponent(p)}`, {
+                          state: {
+                            resultStack: [...trail, p],
+                            sameContentPaths: variants.map((v) => v.file.path),
+                          },
+                        });
+                      }
                       setPathChooserOpen(false);
                       setSelectedSimilarGroup(null);
+                      setPathChooserOpenInAppMode(false);
                     }}
                   >
-                    {formatIndexedPathForDisplay(variant.file.path, homePath, cfg.include)}
+                    <span className="block min-w-0 w-full truncate rounded-md bg-muted px-2 py-1.5 font-mono text-xs text-foreground">
+                      {formatIndexedPathForDisplay(variant.file.path, homePath, cfg.include)}
+                    </span>
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent side="bottom" className="max-w-md break-all font-mono text-xs">

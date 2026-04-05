@@ -1,6 +1,5 @@
-import type { ReactNode } from "react";
+import type { MouseEvent, ReactNode } from "react";
 import { Skeleton } from "./ui/skeleton";
-import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
 function fileTypeLabel(ext: string) {
   const cleanExt = ext.replace(/^\./, "").trim().toUpperCase();
@@ -9,15 +8,14 @@ function fileTypeLabel(ext: string) {
 
 export type FileSearchResultCardProps = {
   path: string;
-  onClick: () => void;
+  onClick: (event: MouseEvent<HTMLButtonElement>) => void;
   onMouseEnter?: () => void;
   thumbUrl?: string | null;
   thumbFailed: boolean;
   /** When true, show skeleton until thumbUrl or failure (previewable types only). */
   thumbExpectLoading: boolean;
   hoverChip?: string | null;
-  title?: string;
-  /** Small colored dots with tooltip labels */
+  /** Small colored dots (name exposed via aria-label) */
   tagDots?: Array<{ id: string; name: string; color: string }>;
   /** Quick tag toggle UI (e.g. dropdown); clicks should call stopPropagation */
   tagMenuSlot?: ReactNode;
@@ -31,18 +29,16 @@ export function FileSearchResultCard({
   thumbFailed,
   thumbExpectLoading,
   hoverChip,
-  title,
   tagDots,
   tagMenuSlot,
 }: FileSearchResultCardProps) {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
   const showChip = hoverChip != null && hoverChip !== "";
-  const pathTooltip = title ?? path;
 
   return (
     <button
       type="button"
-      onClick={onClick}
+      onClick={(e) => onClick(e)}
       onMouseEnter={onMouseEnter}
       className="group relative flex min-w-0 flex-col items-center gap-2 rounded-lg p-1 transition-opacity hover:opacity-90"
     >
@@ -64,15 +60,13 @@ export function FileSearchResultCard({
         {tagDots && tagDots.length > 0 ? (
           <div className="absolute bottom-1 left-1 z-[1] flex max-w-[calc(100%-2rem)] flex-wrap gap-0.5">
             {tagDots.map((t) => (
-              <Tooltip key={t.id}>
-                <TooltipTrigger asChild>
-                  <span
-                    className="h-2 w-2 shrink-0 cursor-default rounded-full ring-1 ring-white/80"
-                    style={{ backgroundColor: t.color }}
-                  />
-                </TooltipTrigger>
-                <TooltipContent side="top">{t.name}</TooltipContent>
-              </Tooltip>
+              <span
+                key={t.id}
+                role="img"
+                aria-label={t.name}
+                className="h-2 w-2 shrink-0 cursor-default rounded-full ring-1 ring-white/80"
+                style={{ backgroundColor: t.color }}
+              />
             ))}
           </div>
         ) : null}
@@ -98,17 +92,8 @@ export function FileSearchResultCard({
           </div>
         )}
       </div>
-      <div className="w-full min-w-0">
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <div className="truncate cursor-default text-center text-xs font-normal leading-tight text-black/80">
-              {path.split("/").pop() ?? path}
-            </div>
-          </TooltipTrigger>
-          <TooltipContent side="bottom" className="max-w-sm break-all">
-            {pathTooltip}
-          </TooltipContent>
-        </Tooltip>
+      <div className="w-full min-w-0 truncate text-center text-xs font-normal leading-tight text-black/80">
+        {path.split("/").pop() ?? path}
       </div>
     </button>
   );

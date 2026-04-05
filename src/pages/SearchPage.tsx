@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
+import { homeDir } from "@tauri-apps/api/path";
+import { openPath } from "@tauri-apps/plugin-opener";
 import { ChartScatter, ListFilter, Settings } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { Spinner } from "../components/ui/spinner";
@@ -28,6 +30,7 @@ import {
   AlertDialogTitle,
 } from "../components/ui/alert-dialog";
 import type { LocalConfig } from "../lib/localConfig";
+import { formatIndexedPathForDisplay } from "../lib/pathDisplay";
 import { isPathSelected } from "../lib/pathSelection";
 import { loadTagsState, tagsForPath, type TagsState } from "../lib/tags";
 import { EmbeddingStatusPanel } from "../components/EmbeddingStatusPanel";
@@ -61,6 +64,32 @@ type MatchTypeFilter = {
   semantic: boolean;
 };
 
+const MATCH_TYPE_FILTER_KEY = "manifold:search:matchTypeFilter:v1";
+
+function defaultMatchTypeFilter(): MatchTypeFilter {
+  return { textMatch: true, semantic: true };
+}
+
+function loadMatchTypeFilter(): MatchTypeFilter {
+  if (typeof window === "undefined") return defaultMatchTypeFilter();
+  try {
+    const raw = window.localStorage.getItem(MATCH_TYPE_FILTER_KEY);
+    if (!raw) return defaultMatchTypeFilter();
+    const parsed = JSON.parse(raw) as Partial<MatchTypeFilter>;
+    const textMatch = typeof parsed.textMatch === "boolean" ? parsed.textMatch : true;
+    const semantic = typeof parsed.semantic === "boolean" ? parsed.semantic : true;
+    if (!textMatch && !semantic) return defaultMatchTypeFilter();
+    return { textMatch, semantic };
+  } catch {
+    return defaultMatchTypeFilter();
+  }
+}
+
+function saveMatchTypeFilter(filter: MatchTypeFilter): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(MATCH_TYPE_FILTER_KEY, JSON.stringify(filter));
+}
+
 type SearchResultGroup = {
   key: string;
   primaryResult: SearchResult;
@@ -72,6 +101,14 @@ function choosePrimaryResult(a: SearchResult, b: SearchResult) {
     return a.matchType === "textMatch" ? a : b;
   }
   return a.score >= b.score ? a : b;
+}
+
+async function openPathInDefaultApp(path: string) {
+  try {
+    await openPath(path);
+  } catch (e) {
+    console.error("[search] openPath failed", { path, error: String(e) });
+  }
 }
 
 function groupResultsByContentHash(results: SearchResult[]): SearchResultGroup[] {
@@ -108,17 +145,20 @@ export function SearchPage({
 }) {
   const [query, setQuery] = useState("");
   const [searchTypeMenuOpen, setSearchTypeMenuOpen] = useState(false);
-  const [matchTypeFilter, setMatchTypeFilter] = useState<MatchTypeFilter>({
-    textMatch: true,
-    semantic: true,
-  });
+  const [matchTypeFilter, setMatchTypeFilter] = useState<MatchTypeFilter>(loadMatchTypeFilter);
+
+  useEffect(() => {
+    saveMatchTypeFilter(matchTypeFilter);
+  }, [matchTypeFilter]);
   const [isSearching, setIsSearching] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
   const [embeddedCount, setEmbeddedCount] = useState<number | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [results, setResults] = useState<SearchResult[]>([]);
   const [selectedGroupForOpen, setSelectedGroupForOpen] = useState<SearchResultGroup | null>(null);
+  /** Cmd/Ctrl+click on duplicate-content results: pick which path to open in the default app. */
   const [pathChooserOpen, setPathChooserOpen] = useState(false);
+  const [homePath, setHomePath] = useState("");
   const [thumbByPath, setThumbByPath] = useState<Record<string, string>>({});
   const [thumbFailedByPath, setThumbFailedByPath] = useState<Record<string, true>>({});
   const navigate = useNavigate();
@@ -172,6 +212,21 @@ export function SearchPage({
       cancelled = true;
     };
   }, [cfg.sourceId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const home = await homeDir();
+        if (!cancelled) setHomePath(home);
+      } catch {
+        if (!cancelled) setHomePath("");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     // Refresh once the embedding job is no longer running so empty-state text
@@ -571,13 +626,25 @@ export function SearchPage({
                         }
                       })();
                     }}
-                    onClick={() => {
-                      if (isStacked) {
-                        setSelectedGroupForOpen(group);
-                        setPathChooserOpen(true);
+                    onClick={(e) => {
+                      const openInApp = e.metaKey || e.ctrlKey;
+                      if (openInApp) {
+                        e.preventDefault();
+                        if (isStacked) {
+                          setSelectedGroupForOpen(group);
+                          setPathChooserOpen(true);
+                          return;
+                        }
+                        void openPathInDefaultApp(r.file.path);
                         return;
                       }
-                      navigate(`/file?path=${encodeURIComponent(r.file.path)}`);
+                      navigate(`/file?path=${encodeURIComponent(r.file.path)}`, {
+                        state: isStacked
+                          ? ({
+                              sameContentPaths: group.variants.map((v) => v.file.path),
+                            } satisfies FileResultLocationState)
+                          : undefined,
+                      });
                     }}
                     thumbUrl={thumbByPath[r.file.path] ?? null}
                     thumbFailed={!!thumbFailedByPath[r.file.path]}
@@ -594,6 +661,7 @@ export function SearchPage({
                       tagsState.tags.length > 0 ? (
                         <TagsPathDropdown
                           path={r.file.path}
+                          sourceId={cfg.sourceId}
                           tagsState={tagsState}
                           setTagsState={setTagsState}
                         />
@@ -616,9 +684,10 @@ export function SearchPage({
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Choose file</AlertDialogTitle>
+            <AlertDialogTitle>Open in default app</AlertDialogTitle>
             <AlertDialogDescription>
-              These files have identical content. Select the path to open its detail view.
+              These files have identical content. Select the path to open with the system&apos;s default
+              application.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <div className="max-h-64 space-y-2 overflow-y-auto">
@@ -627,20 +696,17 @@ export function SearchPage({
                 <TooltipTrigger asChild>
                   <Button
                     type="button"
-                    variant="outline"
-                    className="w-full justify-start truncate"
+                    variant="ghost"
+                    className="h-auto w-full justify-start p-0 font-normal hover:bg-transparent focus-visible:bg-transparent"
                     onClick={() => {
-                      const variants = selectedGroupForOpen?.variants ?? [];
-                      navigate(`/file?path=${encodeURIComponent(variant.file.path)}`, {
-                        state: {
-                          sameContentPaths: variants.map((v) => v.file.path),
-                        } satisfies FileResultLocationState,
-                      });
+                      void openPathInDefaultApp(variant.file.path);
                       setPathChooserOpen(false);
                       setSelectedGroupForOpen(null);
                     }}
                   >
-                    {variant.file.path}
+                    <span className="block min-w-0 w-full truncate rounded-md bg-muted px-2 py-1.5 font-mono text-xs text-foreground">
+                      {formatIndexedPathForDisplay(variant.file.path, homePath, cfg.include)}
+                    </span>
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent side="bottom" className="max-w-md break-all font-mono text-xs">
