@@ -5,6 +5,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
 import { SettingsAppearanceCard } from "../components/settings/SettingsAppearanceCard";
+import { SettingsEmbeddingImageCard } from "../components/settings/SettingsEmbeddingImageCard";
 import { SettingsClearIndexCard } from "../components/settings/SettingsClearIndexCard";
 import type { IncludeFolderBreakdown } from "../components/settings/SettingsFolderDialogs";
 import { SettingsFolderDialogs } from "../components/settings/SettingsFolderDialogs";
@@ -319,6 +320,8 @@ export function SettingsPage({
                 setTopKDraft={setTopKDraft}
                 selectedSearchModeOption={selectedSearchModeOption}
               />
+
+              <SettingsEmbeddingImageCard cfg={cfg} updateConfig={updateConfig} />
 
               <SettingsTagsCard
                 cfg={cfg}

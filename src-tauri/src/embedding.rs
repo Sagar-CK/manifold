@@ -1,5 +1,6 @@
 use crate::{
-    compute_sha256, walk_scan_candidates, MAX_EMBED_FILE_BYTES, ScanFilesArgs, ScanWalkCandidate,
+    compute_sha256, walk_scan_candidates, VisionRasterOptions, MAX_EMBED_FILE_BYTES, ScanFilesArgs,
+    ScanWalkCandidate,
 };
 use crate::qdrant;
 use crate::text_index;
@@ -27,8 +28,6 @@ const GEMINI_EMBED_TIMEOUT_SECS: u64 = 120;
 /// OCR / text extraction can exceed embed latency; allow up to 3 minutes for slow API responses.
 const GEMINI_OCR_TIMEOUT_SECS: u64 = 180;
 const GEMINI_OCR_HTTP_MAX_ATTEMPTS: u32 = 5;
-const EMBED_VISION_MAX_EDGE: u32 = 1536;
-const EMBED_VISION_JPEG_QUALITY: u8 = 85;
 const PDF_LOCAL_TEXT_MIN_NONSPACE: usize = 48;
 /// Max concurrent `embedContent` (multimodal) calls to Gemini.
 const EMBED_GEMINI_MAX_IN_FLIGHT: usize = 12;
@@ -480,12 +479,15 @@ fn format_error_chain(err: &(dyn std::error::Error + 'static)) -> String {
 }
 
 /// Downscale and JPEG-encode raster images to reduce upload size and OCR latency.
-pub fn prepare_raster_image_for_gemini(bytes: &[u8]) -> Result<(Vec<u8>, &'static str), String> {
+pub fn prepare_raster_image_for_gemini(
+    bytes: &[u8],
+    opts: &VisionRasterOptions,
+) -> Result<(Vec<u8>, &'static str), String> {
     let img = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
-    let thumb = img.thumbnail(EMBED_VISION_MAX_EDGE, EMBED_VISION_MAX_EDGE);
+    let thumb = img.thumbnail(opts.max_edge_px, opts.max_edge_px);
     let rgb = thumb.to_rgb8();
     let mut buf = Vec::new();
-    let enc = JpegEncoder::new_with_quality(&mut buf, EMBED_VISION_JPEG_QUALITY);
+    let enc = JpegEncoder::new_with_quality(&mut buf, opts.jpeg_quality);
     enc.write_image(
         rgb.as_raw(),
         rgb.width(),
@@ -916,6 +918,7 @@ pub async fn start(
     _qdrant_state: tauri::State<'_, qdrant::QdrantState>,
     args: ScanFilesArgs,
     source_id: String,
+    vision_raster: VisionRasterOptions,
 ) -> Result<(), String> {
     let mut s = mgr.state.lock().await;
     if s.running {
@@ -975,6 +978,8 @@ pub async fn start(
             include_count = args.include.len(),
             exclude_count = args.exclude.len(),
             extensions_count = args.extensions.len(),
+            vision_max_edge_px = vision_raster.max_edge_px,
+            vision_jpeg_quality = vision_raster.jpeg_quality,
             "embedding job started"
         );
 
@@ -1121,6 +1126,7 @@ pub async fn start(
             let ocr_sem_for_job = ocr_sem.clone();
             let qdrant_batcher_for_file = qdrant_batcher.clone();
             let hash_runtime_cache_for_file = hash_runtime_cache.clone();
+            let vision_raster_for_file = vision_raster;
             join_set.spawn(async move {
                 let path = pending.path.as_path();
                 let ext = pending.ext.clone();
@@ -1163,7 +1169,7 @@ pub async fn start(
                 let (gemini_vision_bytes, gemini_vision_mime): (Option<Vec<u8>>, Option<String>) =
                     match (&bytes, ext.as_str()) {
                         (Some(raw), "png" | "jpg" | "jpeg") => {
-                            match prepare_raster_image_for_gemini(raw) {
+                            match prepare_raster_image_for_gemini(raw, &vision_raster_for_file) {
                                 Ok((b, m)) => (Some(b), Some(m.to_string())),
                                 Err(e) => {
                                     tracing::warn!(

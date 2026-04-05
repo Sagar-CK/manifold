@@ -314,6 +314,30 @@ pub struct ScanFilesArgs {
     pub use_default_folder_excludes: bool,
 }
 
+/// Max edge (px) and JPEG quality for raster images sent to Gemini (embed + OCR).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VisionRasterOptions {
+    pub max_edge_px: u32,
+    pub jpeg_quality: u8,
+}
+
+impl Default for VisionRasterOptions {
+    fn default() -> Self {
+        Self {
+            max_edge_px: 1536,
+            jpeg_quality: 85,
+        }
+    }
+}
+
+pub fn clamp_vision_raster_options(o: VisionRasterOptions) -> VisionRasterOptions {
+    VisionRasterOptions {
+        max_edge_px: o.max_edge_px.clamp(256, 2048),
+        jpeg_quality: o.jpeg_quality.clamp(50, 95),
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -1309,6 +1333,8 @@ async fn text_index_full_text_for_path(
 pub struct StartEmbeddingJobArgs {
     pub scan: ScanFilesArgs,
     pub source_id: String,
+    #[serde(default)]
+    pub vision_raster: VisionRasterOptions,
 }
 
 #[tauri::command]
@@ -1318,7 +1344,16 @@ async fn start_embedding_job(
     qdrant_state: tauri::State<'_, qdrant::QdrantState>,
     args: StartEmbeddingJobArgs,
 ) -> Result<(), String> {
-    embedding::start(app, embedding_mgr, qdrant_state, args.scan, args.source_id).await
+    let vision_raster = clamp_vision_raster_options(args.vision_raster);
+    embedding::start(
+        app,
+        embedding_mgr,
+        qdrant_state,
+        args.scan,
+        args.source_id,
+        vision_raster,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -1368,6 +1403,8 @@ struct GeminiJudgeTagArgs {
     target_path: String,
     tag_name: String,
     similarity_score: f32,
+    #[serde(default)]
+    vision_raster: VisionRasterOptions,
 }
 
 #[tauri::command]
@@ -1377,9 +1414,10 @@ async fn gemini_judge_tag(
     args: GeminiJudgeTagArgs,
 ) -> Result<bool, String> {
     use base64::Engine;
-    
+
+    let vision_raster = clamp_vision_raster_options(args.vision_raster);
     let source_id = args.source_id.clone();
-    
+
     let get_part = |path: &str| -> Result<serde_json::Value, String> {
         let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
         let size = meta.len();
@@ -1394,7 +1432,8 @@ async fn gemini_judge_tag(
 
         if ["jpg", "jpeg", "png"].contains(&ext.as_str()) {
             let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-            let (prepared_bytes, mime) = embedding::prepare_raster_image_for_gemini(&bytes)?;
+            let (prepared_bytes, mime) =
+                embedding::prepare_raster_image_for_gemini(&bytes, &vision_raster)?;
             let b64 = base64::engine::general_purpose::STANDARD.encode(&prepared_bytes);
             Ok(serde_json::json!({
                 "inline_data": { "mime_type": mime, "data": b64 }

@@ -1,5 +1,13 @@
 export type SupportedExt = string;
 
+/** Maps to max JPEG edge + quality sent to Gemini for images (embed + OCR). */
+export type EmbeddingImagePreset = "fast" | "balanced" | "highQuality";
+
+export type VisionRasterOptionsPayload = {
+  maxEdgePx: number;
+  jpegQuality: number;
+};
+
 export type LocalConfig = {
   sourceId: string;
   include: string[];
@@ -12,6 +20,8 @@ export type LocalConfig = {
   topK: number;
   showSimilarityOnHover: boolean;
   autoTaggingEnabled: boolean;
+  /** Raster resize/compression before Gemini vision (embed + OCR). */
+  embeddingImagePreset: EmbeddingImagePreset;
 };
 
 const KEY = "manifold:config:v1";
@@ -57,6 +67,21 @@ export function collapseIncludeFolders(paths: string[]): string[] {
   return collapsed;
 }
 
+const EMBEDDING_IMAGE_PRESETS: Record<
+  EmbeddingImagePreset,
+  VisionRasterOptionsPayload
+> = {
+  fast: { maxEdgePx: 768, jpegQuality: 72 },
+  balanced: { maxEdgePx: 1536, jpegQuality: 85 },
+  highQuality: { maxEdgePx: 1536, jpegQuality: 92 },
+};
+
+export function embeddingImageRasterOptions(
+  preset: EmbeddingImagePreset,
+): VisionRasterOptionsPayload {
+  return EMBEDDING_IMAGE_PRESETS[preset];
+}
+
 function defaultConfig(): LocalConfig {
   return {
     sourceId: crypto.randomUUID(),
@@ -69,6 +94,7 @@ function defaultConfig(): LocalConfig {
     topK: 10,
     showSimilarityOnHover: true,
     autoTaggingEnabled: true,
+    embeddingImagePreset: "balanced",
   };
 }
 
@@ -112,6 +138,12 @@ export function loadConfig(): LocalConfig {
         typeof parsed.autoTaggingEnabled === "boolean"
           ? parsed.autoTaggingEnabled
           : defaultConfig().autoTaggingEnabled,
+      embeddingImagePreset:
+        parsed.embeddingImagePreset === "fast" ||
+        parsed.embeddingImagePreset === "balanced" ||
+        parsed.embeddingImagePreset === "highQuality"
+          ? parsed.embeddingImagePreset
+          : defaultConfig().embeddingImagePreset,
     };
     saveConfig(cfg);
     return cfg;

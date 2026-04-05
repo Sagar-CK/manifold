@@ -2,7 +2,7 @@ import type { Dispatch, SetStateAction } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { TagDefLabel } from "@/components/TagDefBadge";
-import type { LocalConfig } from "@/lib/localConfig";
+import { embeddingImageRasterOptions, type LocalConfig } from "@/lib/localConfig";
 import { isPathSelected } from "@/lib/pathSelection";
 import {
   countPendingSuggestionPairs,
@@ -56,6 +56,7 @@ export async function runAutoTagOrchestration(
       .slice(0, cfg.topK);
 
     const matchedPaths: string[] = [];
+    const visionRaster = embeddingImageRasterOptions(cfg.embeddingImagePreset);
 
     const promises = hits.map(async (hit) => {
       if (hit.file.path === sourcePath) {
@@ -76,6 +77,10 @@ export async function runAutoTagOrchestration(
             targetPath: hit.file.path,
             tagName: tagDef.name,
             similarityScore: hit.score,
+            visionRaster: {
+              maxEdgePx: visionRaster.maxEdgePx,
+              jpegQuality: visionRaster.jpegQuality,
+            },
           },
         });
 

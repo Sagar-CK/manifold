@@ -4,7 +4,12 @@ import { Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
-import { loadConfig, type LocalConfig, type SupportedExt } from "./lib/localConfig";
+import {
+  embeddingImageRasterOptions,
+  loadConfig,
+  type LocalConfig,
+  type SupportedExt,
+} from "./lib/localConfig";
 import { syncTagsBackfill } from "./lib/qdrantTags";
 import { loadTagsState } from "./lib/tags";
 import { EnvIssuesBanner } from "./components/EnvIssuesBanner";
@@ -164,6 +169,7 @@ export default function RouterApp() {
       setLastEmbedError(null);
       lastReportedEmbedErrorRef.current = null;
       setEmbedFailures([]);
+      const visionRaster = embeddingImageRasterOptions(cfg.embeddingImagePreset);
       await invoke("start_embedding_job", {
         args: {
           scan: {
@@ -173,6 +179,10 @@ export default function RouterApp() {
             useDefaultFolderExcludes: cfg.useDefaultFolderExcludes,
           },
           sourceId: cfg.sourceId,
+          visionRaster: {
+            maxEdgePx: visionRaster.maxEdgePx,
+            jpegQuality: visionRaster.jpegQuality,
+          },
         },
       });
       lastAutoEmbedKeyRef.current = embedAutoKeyFromCfg(cfg);
@@ -189,7 +199,15 @@ export default function RouterApp() {
     } finally {
       embedStartInFlightRef.current = false;
     }
-  }, [cfg.exclude, cfg.extensions, cfg.include, cfg.sourceId, cfg.useDefaultFolderExcludes, geminiApiKey]);
+  }, [
+    cfg.embeddingImagePreset,
+    cfg.exclude,
+    cfg.extensions,
+    cfg.include,
+    cfg.sourceId,
+    cfg.useDefaultFolderExcludes,
+    geminiApiKey,
+  ]);
 
   useEffect(() => {
     if (cfg.include.length === 0) {
