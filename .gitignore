@@ -15,6 +15,16 @@ dist-ssr
 # Rust / Cargo (any crate in the repo, e.g. src-tauri/)
 target/
 
+# AI / editor assistant tooling (local only)
+.agents/
+.claude/
+.cursor/
+.junie/
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+skills-lock.json
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
