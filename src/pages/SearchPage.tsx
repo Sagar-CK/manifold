@@ -450,7 +450,7 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
             showingTagBrowse ? (
               <SearchNoResults variant="tag-filters" />
             ) : !hasSearched ? (
-              liveIndexedCount === 0 ? (
+              liveIndexedCount === 0 && embeddingPhase !== "scanning" ? (
                 <div className="flex w-full justify-center">
                   <Button variant="link" className="app-muted h-auto p-0" asChild>
                     <Link to="/settings" className="underline underline-offset-4 hover:text-foreground">
