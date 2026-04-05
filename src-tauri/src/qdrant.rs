@@ -574,6 +574,10 @@ pub struct ContentIndexEntry {
 pub struct SourcePreflightIndex {
     pub content_by_path: HashMap<String, ContentIndexEntry>,
     pub metadata_paths: HashSet<String>,
+    /// First path seen per `contentHash` during scroll (used to copy vectors / text for duplicate files).
+    pub hash_to_canonical_path: HashMap<String, String>,
+    /// One dense content vector per `contentHash` from existing points (canonical path).
+    pub content_vectors_by_hash: HashMap<String, Vec<f32>>,
 }
 
 fn payload_string_field(payload: &std::collections::HashMap<String, Value>, key: &str) -> Option<String> {
@@ -608,14 +612,29 @@ pub async fn load_source_preflight_index(
     let client = instance(app, state).await?;
     let filter = Filter::must([Condition::matches("sourceId", source_id.to_string())]);
 
+    fn dense_vector_from_retrieved(
+        p: &qdrant_client::qdrant::RetrievedPoint,
+    ) -> Option<Vec<f32>> {
+        use qdrant_client::qdrant::vector_output::Vector;
+        p.vectors
+            .as_ref()
+            .and_then(|vo| vo.get_vector())
+            .and_then(|v| match v {
+                Vector::Dense(d) => Some(d.data.clone()),
+                _ => None,
+            })
+    }
+
     let mut content_by_path: HashMap<String, ContentIndexEntry> = HashMap::new();
+    let mut content_vectors_by_hash: HashMap<String, Vec<f32>> = HashMap::new();
+    let mut hash_to_canonical_path: HashMap<String, String> = HashMap::new();
     let mut offset: Option<PointId> = None;
     loop {
         let mut builder = ScrollPointsBuilder::new(CONTENT_COLLECTION_NAME)
             .filter(filter.clone())
             .limit(256)
             .with_payload(true)
-            .with_vectors(false);
+            .with_vectors(true);
         if let Some(ref o) = offset {
             builder = builder.offset(o.clone());
         }
@@ -629,14 +648,23 @@ pub async fn load_source_preflight_index(
             let Some(path_str) = path_str else {
                 continue;
             };
+            let content_hash = payload_string_field(&p.payload, "contentHash");
             content_by_path.insert(
-                path_str,
+                path_str.clone(),
                 ContentIndexEntry {
-                    content_hash: payload_string_field(&p.payload, "contentHash"),
+                    content_hash: content_hash.clone(),
                     size_bytes: payload_u64_field(&p.payload, "sizeBytes"),
                     mtime_ms: payload_i64_field(&p.payload, "mtimeMs"),
                 },
             );
+            if let (Some(h), Some(vec)) = (content_hash.as_ref(), dense_vector_from_retrieved(&p)) {
+                if vec.len() == VECTOR_DIM {
+                    content_vectors_by_hash.entry(h.clone()).or_insert(vec);
+                    hash_to_canonical_path
+                        .entry(h.clone())
+                        .or_insert(path_str.clone());
+                }
+            }
         }
         offset = res.next_page_offset;
         if offset.is_none() {
@@ -674,7 +702,22 @@ pub async fn load_source_preflight_index(
     Ok(SourcePreflightIndex {
         content_by_path,
         metadata_paths,
+        hash_to_canonical_path,
+        content_vectors_by_hash,
     })
+}
+
+/// Returns a copy of an existing content vector when another path already has this `content_hash`.
+pub fn duplicate_content_vector_for_path(
+    index: &SourcePreflightIndex,
+    content_hash: &str,
+    path_str: &str,
+) -> Option<Vec<f32>> {
+    let canon = index.hash_to_canonical_path.get(content_hash)?;
+    if canon == path_str {
+        return None;
+    }
+    index.content_vectors_by_hash.get(content_hash).cloned()
 }
 
 /// Path-local only: reuse vectors when this path's stored hash matches and points exist in Qdrant.
@@ -760,7 +803,14 @@ pub async fn upsert_metadata(app: &AppHandle, state: &QdrantState, args: UpsertM
     })
 }
 
-pub async fn upsert_embedding(app: &AppHandle, state: &QdrantState, args: UpsertEmbeddingArgs) -> Result<(), String> {
+/// Batch size for embedding-job Qdrant upserts (content and metadata collections).
+pub const EMBEDDING_QDRANT_UPSERT_BATCH: usize = 24;
+
+async fn build_content_point_for_embedding(
+    app: &AppHandle,
+    state: &QdrantState,
+    args: UpsertEmbeddingArgs,
+) -> Result<PointStruct, String> {
     if args.embedding.len() != VECTOR_DIM {
         return Err(format!(
             "Embedding length {} does not match expected dimensions {}.",
@@ -784,21 +834,14 @@ pub async fn upsert_embedding(app: &AppHandle, state: &QdrantState, args: Upsert
         &tag_ids,
     );
 
-    let point = PointStruct::new(id, args.embedding, payload);
-
-    client
-        .upsert_points(UpsertPointsBuilder::new(CONTENT_COLLECTION_NAME, vec![point]).wait(true))
-        .await
-        .map_err(|e| format!("qdrant upsert request failed: {e}"))?;
-
-    Ok(())
+    Ok(PointStruct::new(id, args.embedding, payload))
 }
 
-pub async fn upsert_metadata_embedding(
+async fn build_metadata_point_for_embedding(
     app: &AppHandle,
     state: &QdrantState,
     args: UpsertMetadataEmbeddingArgs,
-) -> Result<(), String> {
+) -> Result<PointStruct, String> {
     if args.metadata_embedding.len() != VECTOR_DIM {
         return Err(format!(
             "Metadata embedding length {} does not match expected dimensions {}.",
@@ -806,7 +849,7 @@ pub async fn upsert_metadata_embedding(
             VECTOR_DIM
         ));
     }
-    
+
     let client = instance(app, state).await?;
     let id = point_id(&args.source_id, &args.path);
     let mut tag_ids = existing_tag_ids_from_collection(&client, METADATA_COLLECTION_NAME, &id).await;
@@ -822,14 +865,114 @@ pub async fn upsert_metadata_embedding(
         &tag_ids,
     );
 
-    let point = PointStruct::new(id, args.metadata_embedding, payload);
+    Ok(PointStruct::new(id, args.metadata_embedding, payload))
+}
 
+pub async fn upsert_content_points_batch(
+    app: &AppHandle,
+    state: &QdrantState,
+    points: Vec<PointStruct>,
+) -> Result<(), String> {
+    if points.is_empty() {
+        return Ok(());
+    }
+    let client = instance(app, state).await?;
     client
-        .upsert_points(UpsertPointsBuilder::new(METADATA_COLLECTION_NAME, vec![point]).wait(true))
+        .upsert_points(UpsertPointsBuilder::new(CONTENT_COLLECTION_NAME, points).wait(true))
         .await
-        .map_err(|e| format!("qdrant metadata upsert request failed: {e}"))?;
-
+        .map_err(|e| format!("qdrant batch content upsert failed: {e}"))?;
     Ok(())
+}
+
+pub async fn upsert_metadata_points_batch(
+    app: &AppHandle,
+    state: &QdrantState,
+    points: Vec<PointStruct>,
+) -> Result<(), String> {
+    if points.is_empty() {
+        return Ok(());
+    }
+    let client = instance(app, state).await?;
+    client
+        .upsert_points(UpsertPointsBuilder::new(METADATA_COLLECTION_NAME, points).wait(true))
+        .await
+        .map_err(|e| format!("qdrant batch metadata upsert failed: {e}"))?;
+    Ok(())
+}
+
+/// Buffers embedding upserts and flushes in batches of [`EMBEDDING_QDRANT_UPSERT_BATCH`].
+pub struct EmbeddingUpsertBatcher {
+    content: Mutex<Vec<PointStruct>>,
+    metadata: Mutex<Vec<PointStruct>>,
+}
+
+impl EmbeddingUpsertBatcher {
+    pub fn new() -> Self {
+        Self {
+            content: Mutex::new(Vec::new()),
+            metadata: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub async fn enqueue_content(
+        &self,
+        app: &AppHandle,
+        state: &QdrantState,
+        args: UpsertEmbeddingArgs,
+    ) -> Result<(), String> {
+        let point = build_content_point_for_embedding(app, state, args).await?;
+        let mut g = self.content.lock().await;
+        g.push(point);
+        if g.len() >= EMBEDDING_QDRANT_UPSERT_BATCH {
+            let chunk = std::mem::take(&mut *g);
+            drop(g);
+            upsert_content_points_batch(app, state, chunk).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn enqueue_metadata(
+        &self,
+        app: &AppHandle,
+        state: &QdrantState,
+        args: UpsertMetadataEmbeddingArgs,
+    ) -> Result<(), String> {
+        let point = build_metadata_point_for_embedding(app, state, args).await?;
+        let mut g = self.metadata.lock().await;
+        g.push(point);
+        if g.len() >= EMBEDDING_QDRANT_UPSERT_BATCH {
+            let chunk = std::mem::take(&mut *g);
+            drop(g);
+            upsert_metadata_points_batch(app, state, chunk).await?;
+        }
+        Ok(())
+    }
+
+    /// Flush any buffered points (call when the embedding job finishes or after errors).
+    pub async fn flush(&self, app: &AppHandle, state: &QdrantState) -> Result<(), String> {
+        {
+            let mut c = self.content.lock().await;
+            if !c.is_empty() {
+                let chunk = std::mem::take(&mut *c);
+                drop(c);
+                upsert_content_points_batch(app, state, chunk).await?;
+            }
+        }
+        {
+            let mut m = self.metadata.lock().await;
+            if !m.is_empty() {
+                let chunk = std::mem::take(&mut *m);
+                drop(m);
+                upsert_metadata_points_batch(app, state, chunk).await?;
+            }
+        }
+        Ok(())
+    }
+}
+
+pub async fn upsert_embedding(app: &AppHandle, state: &QdrantState, args: UpsertEmbeddingArgs) -> Result<(), String> {
+    let point = build_content_point_for_embedding(app, state, args).await?;
+    upsert_content_points_batch(app, state, vec![point]).await
 }
 
 pub async fn semantic_search(app: &AppHandle, state: &QdrantState, args: SemanticSearchArgs) -> Result<Vec<SemanticSearchHit>, String> {

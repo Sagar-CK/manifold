@@ -547,7 +547,7 @@ pub fn normalize_path_key(path: &Path) -> String {
         .to_ascii_lowercase()
 }
 
-fn compute_sha256(path: &Path, max_bytes: u64) -> Result<String, String> {
+pub(crate) fn compute_sha256(path: &Path, max_bytes: u64) -> Result<String, String> {
     let mut file = fs::File::open(path).map_err(|e| e.to_string())?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 1024 * 1024];

@@ -1,5 +1,5 @@
 use crate::{
-    compute_sha256, walk_scan_candidates, MAX_EMBED_FILE_BYTES, ScanFilesArgs,
+    compute_sha256, walk_scan_candidates, MAX_EMBED_FILE_BYTES, ScanFilesArgs, ScanWalkCandidate,
 };
 use crate::qdrant;
 use crate::text_index;
@@ -7,6 +7,7 @@ use base64::Engine;
 use image::codecs::jpeg::JpegEncoder;
 use image::ImageEncoder;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -15,6 +16,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 use tokio::sync::{watch, Mutex, Semaphore};
+use tokio::task::JoinSet;
 use lru::LruCache;
 use std::num::NonZeroUsize;
 
@@ -22,13 +24,19 @@ const OUTPUT_DIM: usize = 3072;
 const GEMINI_MODEL: &str = "models/gemini-embedding-2-preview";
 const GEMINI_OCR_MODEL: &str = "models/gemini-3-flash-preview";
 const GEMINI_EMBED_TIMEOUT_SECS: u64 = 120;
-/// Shorter than before: raster inputs are downscaled before OCR.
-const GEMINI_OCR_TIMEOUT_SECS: u64 = 90;
+/// OCR / text extraction can exceed embed latency; allow up to 3 minutes for slow API responses.
+const GEMINI_OCR_TIMEOUT_SECS: u64 = 180;
 const GEMINI_OCR_HTTP_MAX_ATTEMPTS: u32 = 5;
 const EMBED_VISION_MAX_EDGE: u32 = 1536;
 const EMBED_VISION_JPEG_QUALITY: u8 = 85;
 const PDF_LOCAL_TEXT_MIN_NONSPACE: usize = 48;
-const VISION_GEMINI_MAX_IN_FLIGHT: usize = 8;
+/// Max concurrent `embedContent` (multimodal) calls to Gemini.
+const EMBED_GEMINI_MAX_IN_FLIGHT: usize = 12;
+/// Max concurrent `generateContent` OCR calls to Gemini (separate pool from embed).
+const OCR_GEMINI_MAX_IN_FLIGHT: usize = 16;
+/// Concurrent SHA256 reads while scanning candidates for embedding.
+const HASH_SCAN_PARALLELISM: usize = 8;
+const SHA256_MAX_BYTES: u64 = 1024 * 1024 * 128;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -134,6 +142,38 @@ fn metadata_text_for_path(path: &std::path::Path) -> String {
     format!("filename: {file_name}\nextension: {ext}")
 }
 
+fn body_after_metadata_prefix(full: &str, meta_prefix: &str) -> String {
+    if let Some(rest) = full.strip_prefix(meta_prefix) {
+        rest.trim_start_matches('\n').to_string()
+    } else {
+        String::new()
+    }
+}
+
+async fn precopy_extracted_text_for_duplicate(
+    app: &tauri::AppHandle,
+    source_id: &str,
+    index: &qdrant::SourcePreflightIndex,
+    content_hash: &str,
+    current_path: &str,
+) -> Option<String> {
+    let canon = index.hash_to_canonical_path.get(content_hash)?;
+    if canon == current_path {
+        return None;
+    }
+    let text_state = app.state::<text_index::TextIndexState>();
+    let full = text_index::get_full_text_for_path(app, &text_state, source_id, canon)
+        .await
+        .ok()??;
+    let meta = metadata_text_for_path(std::path::Path::new(canon));
+    let body = body_after_metadata_prefix(&full, &meta);
+    if body.trim().is_empty() {
+        None
+    } else {
+        Some(body)
+    }
+}
+
 fn read_gemini_api_key() -> Result<String, String> {
     let key = std::env::var("MANIFOLD_GEMINI_API_KEY")
         .ok()
@@ -199,6 +239,12 @@ struct PendingEmbeddingFile {
     should_embed_metadata: bool,
     size_bytes: u64,
     mtime_ms: i64,
+    /// When true, skip reading bytes from disk (duplicate path with known text + precopied vector).
+    skip_file_read: bool,
+    /// When duplicating by content hash, use this vector for content upsert instead of Gemini.
+    precopied_content_embedding: Option<Vec<f32>>,
+    /// When duplicating by content hash, OCR/plain body reused from another path (no second OCR).
+    precopy_extracted_text: Option<String>,
 }
 
 async fn wait_if_paused(
@@ -235,40 +281,134 @@ async fn collect_pending_files(
 
     let index = qdrant::load_source_preflight_index(app, qdrant_state, source_id).await?;
 
-    let mut out: Vec<PendingEmbeddingFile> = Vec::new();
-    for c in candidates {
+    struct Staged {
+        idx: usize,
+        path_str: String,
+        c: ScanWalkCandidate,
+        reused_hash: Option<String>,
+    }
+
+    let mut staged: Vec<Staged> = Vec::with_capacity(candidates.len());
+    for (idx, c) in candidates.into_iter().enumerate() {
         if cancel_flag.load(Ordering::Relaxed) {
             return Ok(Vec::new());
         }
         let path_str = c.path.to_string_lossy().to_string();
-        let content_hash = if let Some(h) = qdrant::reuse_hash_if_fingerprint_matches(
+        let reused_hash = qdrant::reuse_hash_if_fingerprint_matches(
             &path_str,
             c.size_bytes,
             c.mtime_ms,
             &index,
-        ) {
+        );
+        staged.push(Staged {
+            idx,
+            path_str,
+            c,
+            reused_hash,
+        });
+    }
+
+    let hash_sem = Arc::new(Semaphore::new(HASH_SCAN_PARALLELISM));
+    let mut hash_tasks: JoinSet<(usize, Result<String, String>)> = JoinSet::new();
+    for s in &staged {
+        if cancel_flag.load(Ordering::Relaxed) {
+            hash_tasks.abort_all();
+            while hash_tasks.join_next().await.is_some() {}
+            return Ok(Vec::new());
+        }
+        if s.reused_hash.is_some() {
+            continue;
+        }
+        let path = s.c.path.clone();
+        let idx = s.idx;
+        let sem = hash_sem.clone();
+        hash_tasks.spawn(async move {
+            let Ok(_permit) = sem.acquire().await.map_err(|e| e.to_string()) else {
+                return (idx, Err("hash semaphore closed".to_string()));
+            };
+            let path_clone = path.clone();
+            let res = tokio::task::spawn_blocking(move || {
+                compute_sha256(&path_clone, SHA256_MAX_BYTES)
+            })
+            .await;
+            match res {
+                Ok(r) => (idx, r),
+                Err(e) => (idx, Err(format!("hash task join failed: {e}"))),
+            }
+        });
+    }
+
+    let mut computed_hashes: HashMap<usize, String> = HashMap::new();
+    while let Some(joined) = hash_tasks.join_next().await {
+        if cancel_flag.load(Ordering::Relaxed) {
+            hash_tasks.abort_all();
+            while hash_tasks.join_next().await.is_some() {}
+            return Ok(Vec::new());
+        }
+        let Ok((idx, res)) = joined else {
+            continue;
+        };
+        if let Ok(h) = res {
+            computed_hashes.insert(idx, h);
+        }
+    }
+
+    let mut out: Vec<PendingEmbeddingFile> = Vec::new();
+    for s in staged {
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Ok(Vec::new());
+        }
+        let content_hash = if let Some(h) = s.reused_hash {
             h
         } else {
-            match compute_sha256(&c.path, 1024 * 1024 * 128) {
-                Ok(h) => h,
-                Err(_) => continue,
-            }
+            let Some(h) = computed_hashes.get(&s.idx) else {
+                continue;
+            };
+            h.clone()
         };
         let should_embed =
-            qdrant::decide_embedding_need_from_index(&path_str, &content_hash, &index);
+            qdrant::decide_embedding_need_from_index(&s.path_str, &content_hash, &index);
         if !should_embed.should_embed_content && !should_embed.should_embed_metadata {
             continue;
         }
-        let mime = mime_type_for_ext(&c.ext);
+
+        let (precopied_content_embedding, precopy_extracted_text, skip_file_read) =
+            if should_embed.should_embed_content {
+                match qdrant::duplicate_content_vector_for_path(&index, &content_hash, &s.path_str) {
+                    Some(vec) => {
+                        let extracted = precopy_extracted_text_for_duplicate(
+                            app,
+                            source_id,
+                            &index,
+                            &content_hash,
+                            &s.path_str,
+                        )
+                        .await;
+                        let skip = extracted
+                            .as_ref()
+                            .map(|t| !t.trim().is_empty())
+                            .unwrap_or(false);
+                        (Some(vec), extracted, skip)
+                    }
+                    None => (None, None, false),
+                }
+            } else {
+                (None, None, false)
+            };
+
+        let mime = mime_type_for_ext(&s.c.ext);
         out.push(PendingEmbeddingFile {
-            path: c.path,
-            ext: c.ext,
+            path: s.c.path,
+            ext: s.c.ext,
             mime,
             content_hash,
             should_embed_content: should_embed.should_embed_content,
             should_embed_metadata: should_embed.should_embed_metadata,
-            size_bytes: c.size_bytes,
-            mtime_ms: c.mtime_ms,
+            size_bytes: s.c.size_bytes,
+            mtime_ms: s.c.mtime_ms,
+            skip_file_read,
+            precopied_content_embedding,
+            precopy_extracted_text,
         });
     }
     Ok(out)
@@ -925,11 +1065,16 @@ pub async fn start(
             target: crate::logging::TARGET_EMBEDDING,
             source_id = %source_id,
             max_parallelism,
-            vision_gemini_max_in_flight = VISION_GEMINI_MAX_IN_FLIGHT,
+            embed_gemini_max_in_flight = EMBED_GEMINI_MAX_IN_FLIGHT,
+            ocr_gemini_max_in_flight = OCR_GEMINI_MAX_IN_FLIGHT,
             "embedding parallel workers configured"
         );
         let pdfium_candidates = Arc::new(crate::pdfium_library_candidates(&app2));
-        let vision_sem = Arc::new(Semaphore::new(VISION_GEMINI_MAX_IN_FLIGHT));
+        let embed_sem = Arc::new(Semaphore::new(EMBED_GEMINI_MAX_IN_FLIGHT));
+        let ocr_sem = Arc::new(Semaphore::new(OCR_GEMINI_MAX_IN_FLIGHT));
+        let qdrant_batcher = Arc::new(qdrant::EmbeddingUpsertBatcher::new());
+        let hash_runtime_cache: Arc<Mutex<HashMap<String, (Vec<f32>, String)>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let mut join_set = tokio::task::JoinSet::new();
         for pending in pending_files {
             if cancel_flag.load(Ordering::Relaxed) {
@@ -972,17 +1117,38 @@ pub async fn start(
             let source_id_for_file = source_id.clone();
             let gemini_for_file = gemini.clone();
             let pdfium_for_job = pdfium_candidates.clone();
-            let vision_sem_for_job = vision_sem.clone();
+            let embed_sem_for_job = embed_sem.clone();
+            let ocr_sem_for_job = ocr_sem.clone();
+            let qdrant_batcher_for_file = qdrant_batcher.clone();
+            let hash_runtime_cache_for_file = hash_runtime_cache.clone();
             join_set.spawn(async move {
                 let path = pending.path.as_path();
                 let ext = pending.ext.clone();
                 let mime = pending.mime;
-                let sha256 = pending.content_hash;
+                let sha256 = pending.content_hash.clone();
                 let size_bytes = pending.size_bytes;
                 let mtime_ms = pending.mtime_ms;
                 let file_path = path.to_string_lossy().to_string();
                 let file_started = Instant::now();
-                let bytes = if pending.should_embed_content {
+
+                let mut precopied_embedding = pending.precopied_content_embedding.clone();
+                let mut precopy_extracted = pending.precopy_extracted_text.clone();
+                let mut skip_file_read = pending.skip_file_read;
+
+                if precopied_embedding.is_none() && pending.should_embed_content {
+                    let guard = hash_runtime_cache_for_file.lock().await;
+                    if let Some((v, ext_txt)) = guard.get(&sha256) {
+                        precopied_embedding = Some(v.clone());
+                        if !ext_txt.trim().is_empty() {
+                            precopy_extracted = Some(ext_txt.clone());
+                            skip_file_read = true;
+                        }
+                    }
+                }
+
+                let bytes = if skip_file_read {
+                    None
+                } else if pending.should_embed_content {
                     match std::fs::read(path) {
                         Ok(b) => Some(b),
                         Err(e) => {
@@ -1020,15 +1186,21 @@ pub async fn start(
                 let text_extract_elapsed_ms: u128;
                 let metadata_text = metadata_text_for_path(path);
                 let metadata_text_for_embedding = metadata_text.clone();
-                let content_handle = {
+                let precopy_emb = precopied_embedding.clone();
+                let content_handle = if let Some(vec) = precopy_emb {
+                    tokio::spawn(async move {
+                        Ok::<(Option<Vec<f32>>, u128), String>((Some(vec), 0))
+                    })
+                } else {
                     let gemini = gemini_for_file.clone();
                     let mime = gemini_vision_mime.clone();
                     let raw = gemini_vision_bytes.clone();
-                    let vision_sem = vision_sem_for_job.clone();
+                    let embed_sem = embed_sem_for_job.clone();
+                    let should_content = pending.should_embed_content;
                     tokio::spawn(async move {
-                        if pending.should_embed_content {
+                        if should_content {
                             if let (Some(mime), Some(raw)) = (mime, raw) {
-                                let _permit = vision_sem
+                                let _permit = embed_sem
                                     .acquire()
                                     .await
                                     .map_err(|e| e.to_string())?;
@@ -1046,11 +1218,12 @@ pub async fn start(
                         }
                     })
                 };
+                let should_embed_metadata = pending.should_embed_metadata;
                 let metadata_handle = {
                     let gemini = gemini_for_file.clone();
                     let metadata_text = metadata_text_for_embedding;
                     tokio::spawn(async move {
-                        if pending.should_embed_metadata {
+                        if should_embed_metadata {
                             let started = Instant::now();
                             let metadata_embedding =
                                 embed_query_text_with_client(&gemini, &metadata_text).await?;
@@ -1063,7 +1236,12 @@ pub async fn start(
                         }
                     })
                 };
-                let text_handle = {
+                let precopy_txt = precopy_extracted.clone();
+                let text_handle = if let Some(t) = precopy_txt {
+                    tokio::spawn(async move {
+                        Ok::<(Option<String>, u128, bool), String>((Some(t), 0, false))
+                    })
+                } else {
                     let gemini = gemini_for_file.clone();
                     let mime = gemini_vision_mime.clone();
                     let raw = gemini_vision_bytes.clone();
@@ -1071,10 +1249,10 @@ pub async fn start(
                     let ext_for_text = ext.clone();
                     let path_for_pdf = pending.path.clone();
                     let pdfium_c = pdfium_for_job.clone();
-                    let vision_sem = vision_sem_for_job.clone();
+                    let ocr_sem = ocr_sem_for_job.clone();
+                    let should_content = pending.should_embed_content;
                     tokio::spawn(async move {
-                        if !(pending.should_embed_content && supports_text_extraction(&ext_for_text))
-                        {
+                        if !(should_content && supports_text_extraction(&ext_for_text)) {
                             return Ok::<(Option<String>, u128, bool), String>((None, 0, false));
                         }
                         let started = Instant::now();
@@ -1122,7 +1300,7 @@ pub async fn start(
                             }
                         }
                         if let (Some(mime), Some(raw)) = (mime, raw) {
-                            let _permit = vision_sem
+                            let _permit = ocr_sem
                                 .acquire()
                                 .await
                                 .map_err(|e| e.to_string())?;
@@ -1179,20 +1357,21 @@ pub async fn start(
                 text_extract_elapsed_ms = text_elapsed;
 
                 let qdrant_state = app_for_file.state::<qdrant::QdrantState>();
-                if let Some(embedding) = content_embedding {
-                    if let Err(e) = qdrant::upsert_embedding(
-                        &app_for_file,
-                        &qdrant_state,
-                        qdrant::UpsertEmbeddingArgs {
-                            source_id: source_id_for_file.clone(),
-                            path: file_path.clone(),
-                            content_hash: sha256.clone(),
-                            size_bytes,
-                            mtime_ms,
-                            embedding,
-                        },
-                    )
-                    .await
+                if let Some(embedding) = content_embedding.clone() {
+                    if let Err(e) = qdrant_batcher_for_file
+                        .enqueue_content(
+                            &app_for_file,
+                            &qdrant_state,
+                            qdrant::UpsertEmbeddingArgs {
+                                source_id: source_id_for_file.clone(),
+                                path: file_path.clone(),
+                                content_hash: sha256.clone(),
+                                size_bytes,
+                                mtime_ms,
+                                embedding,
+                            },
+                        )
+                        .await
                     {
                         emit_file_failed(&app_for_file, path, &format!("vector upsert failed: {e}"));
                         return false;
@@ -1200,19 +1379,20 @@ pub async fn start(
                 }
 
                 if let Some(metadata_embedding) = metadata_embedding {
-                    if let Err(e) = qdrant::upsert_metadata_embedding(
-                        &app_for_file,
-                        &qdrant_state,
-                        qdrant::UpsertMetadataEmbeddingArgs {
-                            source_id: source_id_for_file.clone(),
-                            path: file_path.clone(),
-                            content_hash: sha256.clone(),
-                            size_bytes,
-                            mtime_ms,
-                            metadata_embedding,
-                        },
-                    )
-                    .await
+                    if let Err(e) = qdrant_batcher_for_file
+                        .enqueue_metadata(
+                            &app_for_file,
+                            &qdrant_state,
+                            qdrant::UpsertMetadataEmbeddingArgs {
+                                source_id: source_id_for_file.clone(),
+                                path: file_path.clone(),
+                                content_hash: sha256.clone(),
+                                size_bytes,
+                                mtime_ms,
+                                metadata_embedding,
+                            },
+                        )
+                        .await
                     {
                         emit_file_failed(
                             &app_for_file,
@@ -1220,6 +1400,34 @@ pub async fn start(
                             &format!("metadata vector upsert failed: {e}"),
                         );
                         return false;
+                    }
+                }
+
+                // Make vectors visible in Qdrant before logging completion. Otherwise
+                // `similar_by_path` and search see nothing until the job ends (buffer flush
+                // used to run only every N points or after all workers finished).
+                if let Err(e) = qdrant_batcher_for_file
+                    .flush(&app_for_file, &qdrant_state)
+                    .await
+                {
+                    emit_file_failed(
+                        &app_for_file,
+                        path,
+                        &format!("qdrant flush failed: {e}"),
+                    );
+                    return false;
+                }
+
+                if pending.should_embed_content {
+                    if let Some(ref emb) = content_embedding {
+                        let body = extracted_text
+                            .as_ref()
+                            .map(|s| s.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let mut g = hash_runtime_cache_for_file.lock().await;
+                        g.entry(sha256.clone())
+                            .or_insert_with(|| (emb.clone(), body));
                     }
                 }
 
@@ -1287,6 +1495,16 @@ pub async fn start(
                     message: s.message.clone(),
                 },
             );
+        }
+
+        let qdrant_state_job = app2.state::<qdrant::QdrantState>();
+        if let Err(e) = qdrant_batcher.flush(&app2, &qdrant_state_job).await {
+            tracing::error!(
+                target: crate::logging::TARGET_EMBEDDING,
+                error = %e,
+                "qdrant embedding batch flush failed"
+            );
+            emit_error(&app2, &e);
         }
 
         let cancelled = cancel_flag.load(Ordering::Relaxed);
