@@ -885,7 +885,7 @@ pub async fn semantic_search(app: &AppHandle, state: &QdrantState, args: Semanti
     Ok(out)
 }
 
-/// Nearest neighbors in the content collection using the stored embedding for `path`.
+/// Nearest neighbors in the content collection using this file's stored vector (content, or metadata if content is missing).
 pub async fn similar_by_path(
     app: &AppHandle,
     state: &QdrantState,
@@ -897,30 +897,52 @@ pub async fn similar_by_path(
     use qdrant_client::qdrant::GetPointsBuilder;
     use qdrant_client::qdrant::vector_output::Vector;
 
-    let get_res = client
+    fn dense_vector_from_point(
+        point: &qdrant_client::qdrant::RetrievedPoint,
+    ) -> Option<Vec<f32>> {
+        point
+            .vectors
+            .as_ref()
+            .and_then(|vo| vo.get_vector())
+            .and_then(|v| match v {
+                Vector::Dense(d) => Some(d.data.clone()),
+                _ => None,
+            })
+    }
+
+    let get_content = client
         .get_points(
-            GetPointsBuilder::new(CONTENT_COLLECTION_NAME, vec![id])
+            GetPointsBuilder::new(CONTENT_COLLECTION_NAME, vec![id.clone()])
                 .with_vectors(true)
                 .with_payload(false),
         )
         .await
         .map_err(|e| format!("qdrant get_points failed: {e}"))?;
 
-    let point = get_res
-        .result
-        .into_iter()
-        .next()
-        .ok_or_else(|| "No content embedding for this file.".to_string())?;
+    let content_point = get_content.result.into_iter().next();
+    let from_content = content_point.as_ref().and_then(dense_vector_from_point);
 
-    let query_vector: Vec<f32> = point
-        .vectors
-        .as_ref()
-        .and_then(|vo| vo.get_vector())
-        .and_then(|v| match v {
-            Vector::Dense(d) => Some(d.data),
-            _ => None,
-        })
-        .ok_or_else(|| "No content embedding for this file.".to_string())?;
+    let query_vector = if let Some(v) = from_content {
+        v
+    } else {
+        let get_meta = client
+            .get_points(
+                GetPointsBuilder::new(METADATA_COLLECTION_NAME, vec![id])
+                    .with_vectors(true)
+                    .with_payload(false),
+            )
+            .await
+            .map_err(|e| format!("qdrant get_points (metadata) failed: {e}"))?;
+
+        let meta_point = get_meta.result.into_iter().next();
+        meta_point
+            .as_ref()
+            .and_then(dense_vector_from_point)
+            .ok_or_else(|| {
+                "No embedding for this file in the index (it may have been removed or never embedded)."
+                    .to_string()
+            })?
+    };
 
     if query_vector.len() != VECTOR_DIM {
         return Err(format!(
