@@ -1,6 +1,6 @@
 import "./App.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Route, Routes, useLocation } from "react-router-dom";
+import { Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
@@ -13,6 +13,8 @@ import { FileResultPage } from "./pages/FileResultPage";
 import { GraphExplorerPage } from "./pages/GraphExplorerPage";
 import { SearchPage } from "./pages/SearchPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { ReviewTagsPage } from "./pages/ReviewTagsPage";
+import { setNavigateToReviewTagsCallback } from "./lib/autoTagging";
 import { cn } from "./lib/utils";
 
 type EmbeddingJobPhase =
@@ -37,6 +39,7 @@ type EmbeddingFileFailure = {
 };
 
 export default function RouterApp() {
+  const navigate = useNavigate();
   const { pathname } = useLocation();
   const graphLayout = pathname === "/graph";
   const [cfg, setCfg] = useState<LocalConfig>(() => loadConfig());
@@ -221,6 +224,12 @@ export default function RouterApp() {
     };
   }, []);
 
+  useEffect(() => {
+    setNavigateToReviewTagsCallback(() => {
+      navigate("/review-tags");
+    });
+  }, [navigate]);
+
   return (
     <main className="h-screen w-full overflow-hidden bg-[#f6f7fb] text-black">
       <div
@@ -267,6 +276,7 @@ export default function RouterApp() {
               />
             }
           />
+          <Route path="/review-tags" element={<ReviewTagsPage sourceId={cfg.sourceId} />} />
         </Routes>
         </div>
       </div>

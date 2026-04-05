@@ -21,6 +21,7 @@ import {
 } from "../components/ui/alert-dialog";
 import type { LocalConfig } from "../lib/localConfig";
 import { navigateBackOrFallback } from "../lib/navigateBack";
+import { runAutoTagOrchestration } from "../lib/autoTagging";
 import { formatIndexedPathForDisplay } from "../lib/pathDisplay";
 import { isPathSelected } from "../lib/pathSelection";
 import { useThumbnailsForPaths } from "../lib/useThumbnailsForPaths";
@@ -363,18 +364,24 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
                       type="button"
                       aria-label={active ? `Remove tag ${t.name}` : `Add tag ${t.name}`}
                       onClick={() => {
-                        setTagsState((prev) => {
-                          const next = togglePathTag(prev, filePath, t.id);
-                          saveTagsState(next);
-                          void syncPathTagsToQdrant(
-                            cfg.sourceId,
-                            filePath,
-                            tagIdsForPath(next, filePath),
-                          ).catch(() => {
-                            /* ignore */
-                          });
-                          return next;
+                        const next = togglePathTag(tagsState, filePath, t.id);
+                        setTagsState(next);
+                        saveTagsState(next);
+                        void syncPathTagsToQdrant(
+                          cfg.sourceId,
+                          filePath,
+                          tagIdsForPath(next, filePath),
+                        ).catch(() => {
+                          /* ignore */
                         });
+                        
+                        // If tag was added and auto-tagging is enabled, run orchestration
+                        if (cfg.autoTaggingEnabled && tagIdsForPath(next, filePath).includes(t.id)) {
+                          console.log(`[FileResultPage] Auto-tagging triggered for path=${filePath}, tag=${t.name}`);
+                          void runAutoTagOrchestration(cfg, filePath, t.id, next, setTagsState);
+                        } else {
+                          console.log(`[FileResultPage] Auto-tagging not triggered. autoTaggingEnabled=${cfg.autoTaggingEnabled}, hasTag=${tagIdsForPath(next, filePath).includes(t.id)}`);
+                        }
                       }}
                     >
                       <Badge
@@ -465,6 +472,7 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
                           sourceId={cfg.sourceId}
                           tagsState={tagsState}
                           setTagsState={setTagsState}
+                          cfg={cfg}
                         />
                       ) : null
                     }

@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { homeDir } from "@tauri-apps/api/path";
 import { openPath } from "@tauri-apps/plugin-opener";
-import { ChartScatter, ListFilter, Settings } from "lucide-react";
+import { ChartScatter, ListChecks, ListFilter, Settings } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { Spinner } from "../components/ui/spinner";
 import { ScrollArea } from "../components/ui/scroll-area";
@@ -32,7 +32,7 @@ import {
 import type { LocalConfig } from "../lib/localConfig";
 import { formatIndexedPathForDisplay } from "../lib/pathDisplay";
 import { isPathSelected } from "../lib/pathSelection";
-import { loadTagsState, tagsForPath, type TagsState } from "../lib/tags";
+import { loadTagsState, tagIdsForPath, tagsForPath, type TagsState } from "../lib/tags";
 import { EmbeddingStatusPanel } from "../components/EmbeddingStatusPanel";
 import { PageHeader } from "../components/PageHeader";
 import { FileSearchResultCard } from "../components/FileSearchResultCard";
@@ -65,6 +65,25 @@ type MatchTypeFilter = {
 };
 
 const MATCH_TYPE_FILTER_KEY = "manifold:search:matchTypeFilter:v1";
+const TAG_FILTER_IDS_KEY = "manifold:search:tagFilterIds:v1";
+
+function loadTagFilterIds(): string[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(TAG_FILTER_IDS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((id): id is string => typeof id === "string");
+  } catch {
+    return [];
+  }
+}
+
+function saveTagFilterIds(ids: string[]): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(TAG_FILTER_IDS_KEY, JSON.stringify(ids));
+}
 
 function defaultMatchTypeFilter(): MatchTypeFilter {
   return { textMatch: true, semantic: true };
@@ -169,6 +188,33 @@ export function SearchPage({
   const thumbFailedRef = useRef<Record<string, true>>({});
   const fullTextCacheRef = useRef<Record<string, string>>({});
   const [tagsState, setTagsState] = useState<TagsState>(() => loadTagsState());
+  const [tagFilterIds, setTagFilterIds] = useState<string[]>(loadTagFilterIds);
+
+  useEffect(() => {
+    const onTagsUpdated = () => setTagsState(loadTagsState());
+    window.addEventListener("manifold:tags-updated", onTagsUpdated);
+    return () => window.removeEventListener("manifold:tags-updated", onTagsUpdated);
+  }, []);
+
+  useEffect(() => {
+    saveTagFilterIds(tagFilterIds);
+  }, [tagFilterIds]);
+
+  useEffect(() => {
+    const valid = new Set(tagsState.tags.map((t) => t.id));
+    setTagFilterIds((prev) => {
+      const next = prev.filter((id) => valid.has(id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [tagsState.tags]);
+
+  const pendingReviewCount = useMemo(() => {
+    let n = 0;
+    for (const ids of Object.values(tagsState.pendingAutoTags ?? {})) {
+      if (ids?.length) n += ids.length;
+    }
+    return n;
+  }, [tagsState.pendingAutoTags]);
 
   const liveIndexedCount =
     embedding || hasPendingEmbeds
@@ -459,13 +505,51 @@ export function SearchPage({
   }, [results, thumbByPath]);
 
   const typeFilteredResults = results.filter((result) => matchTypeFilter[result.matchType]);
-  const groupedResults = groupResultsByContentHash(typeFilteredResults);
+  const tagFilterSet = new Set(tagFilterIds);
+  const tagFilteredResults =
+    tagFilterSet.size === 0
+      ? typeFilteredResults
+      : typeFilteredResults.filter((r) => {
+          const ids = tagIdsForPath(tagsState, r.file.path);
+          return ids.some((id) => tagFilterSet.has(id));
+        });
+  const groupedResults = groupResultsByContentHash(tagFilteredResults);
   const hasMatchTypeEnabled = matchTypeFilter.textMatch || matchTypeFilter.semantic;
+  const hasTagFilterButNoMatches =
+    hasSearched &&
+    tagFilterSet.size > 0 &&
+    typeFilteredResults.length > 0 &&
+    tagFilteredResults.length === 0;
+
+  function toggleTagFilter(id: string) {
+    setTagFilterIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  }
 
   return (
     <section className="flex h-full min-h-0 flex-col">
       <div className="relative flex flex-col items-center justify-center text-center gap-2 mb-6">
         <div className="absolute right-0 top-0 flex items-center gap-0.5">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Link
+                to="/review-tags"
+                className="relative inline-flex h-9 w-9 items-center justify-center rounded-md text-black/70 hover:bg-black/5 hover:text-black"
+                aria-label={
+                  pendingReviewCount > 0
+                    ? `Review ${pendingReviewCount} suggested tag${pendingReviewCount === 1 ? "" : "s"}`
+                    : "Review suggested tags"
+                }
+              >
+                <ListChecks className="h-5 w-5" aria-hidden="true" />
+                {pendingReviewCount > 0 ? (
+                  <span className="absolute -right-0.5 -top-0.5 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-orange-500 px-1 text-[10px] font-semibold leading-none text-white">
+                    {pendingReviewCount > 99 ? "99+" : pendingReviewCount}
+                  </span>
+                ) : null}
+              </Link>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">Review suggested tags</TooltipContent>
+          </Tooltip>
           <Tooltip>
             <TooltipTrigger asChild>
               <Link
@@ -495,8 +579,8 @@ export function SearchPage({
         <PageHeader heading="manifold" subtitle="native indexed file search" />
       </div>
 
-      <div className="flex">
-        <InputGroup>
+      <div className="flex w-full flex-col">
+        <InputGroup className="w-full">
           <InputGroupInput
             value={query}
             onChange={(e) => setQuery(e.target.value)}
@@ -560,6 +644,33 @@ export function SearchPage({
             {isSearching ? <Spinner className="size-3.5" /> : null}
           </InputGroupAddon>
         </InputGroup>
+        {tagsState.tags.length > 0 ? (
+          <div className="mt-2 flex w-full flex-wrap items-center justify-center gap-2">
+            {tagsState.tags.map((t) => {
+              const on = tagFilterIds.includes(t.id);
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => toggleTagFilter(t.id)}
+                  className="rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors"
+                  style={
+                    on
+                      ? {
+                          backgroundColor: `${t.color}20`,
+                          borderColor: t.color,
+                        }
+                      : { borderColor: "rgba(0,0,0,0.12)" }
+                  }
+                  aria-pressed={on}
+                  aria-label={`Filter by tag ${t.name}`}
+                >
+                  {t.name}
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
       </div>
 
       <div className="mt-5 min-h-0 flex-1">
@@ -581,6 +692,10 @@ export function SearchPage({
             ) : !hasMatchTypeEnabled ? (
               <div className="app-muted text-center">
                 Enable at least one search type (Text or Semantic).
+              </div>
+            ) : hasTagFilterButNoMatches ? (
+              <div className="app-muted text-center">
+                No files match the selected tags. Try turning some off.
               </div>
             ) : (
               <div className="app-muted text-center">No results for “{query.trim()}”.</div>
@@ -664,6 +779,7 @@ export function SearchPage({
                           sourceId={cfg.sourceId}
                           tagsState={tagsState}
                           setTagsState={setTagsState}
+                          cfg={cfg}
                         />
                       ) : null
                     }

@@ -458,10 +458,6 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
         </p>
       ) : null}
 
-      {error ? (
-        <div className="mb-2 text-center text-sm font-medium text-rose-700">{error}</div>
-      ) : null}
-
       <div
         ref={wrapRef}
         className="relative min-h-0 flex-1 overflow-hidden rounded-lg border border-black/10 bg-[#eceef2]"
@@ -469,6 +465,12 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
         {loading || layoutBusy ? (
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-4">
             <Spinner className="size-8 text-muted-foreground" />
+          </div>
+        ) : error ? (
+          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-4">
+            <p className="max-w-md text-center text-sm text-muted-foreground" role="alert">
+              {error}
+            </p>
           </div>
         ) : noResults ? (
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-4">

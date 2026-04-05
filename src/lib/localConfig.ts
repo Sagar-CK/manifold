@@ -11,6 +11,7 @@ export type LocalConfig = {
   searchMode: "topK" | "scoreThreshold";
   topK: number;
   showSimilarityOnHover: boolean;
+  autoTaggingEnabled: boolean;
 };
 
 const KEY = "manifold:config:v1";
@@ -67,6 +68,7 @@ function defaultConfig(): LocalConfig {
     searchMode: "topK",
     topK: 24,
     showSimilarityOnHover: true,
+    autoTaggingEnabled: true,
   };
 }
 
@@ -106,6 +108,10 @@ export function loadConfig(): LocalConfig {
         typeof parsed.showSimilarityOnHover === "boolean"
           ? parsed.showSimilarityOnHover
           : defaultConfig().showSimilarityOnHover,
+      autoTaggingEnabled:
+        typeof parsed.autoTaggingEnabled === "boolean"
+          ? parsed.autoTaggingEnabled
+          : defaultConfig().autoTaggingEnabled,
     };
     saveConfig(cfg);
     return cfg;

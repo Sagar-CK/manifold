@@ -681,28 +681,43 @@ export function SettingsPage({
                     <TagDefBadge
                       key={t.id}
                       tag={t}
-                      onRemove={() =>
-                        setTagsState((prev) => {
-                          const next = removeTagEverywhere(prev, t.id);
-                          saveTagsState(next);
-                          const affected = Object.entries(prev.pathToTagIds)
-                            .filter(([, ids]) => ids.includes(t.id))
-                            .map(([p]) => p);
-                          for (const p of affected) {
-                            void syncPathTagsToQdrant(
-                              cfg.sourceId,
-                              p,
-                              tagIdsForPath(next, p),
-                            ).catch(() => {
-                              /* ignore */
-                            });
-                          }
-                          return next;
-                        })
-                      }
+                      onRemove={() => {
+                        const next = removeTagEverywhere(tagsState, t.id);
+                        setTagsState(next);
+                        saveTagsState(next);
+                        const affected = Object.entries(tagsState.pathToTagIds)
+                          .filter(([, ids]) => ids.includes(t.id))
+                          .map(([p]) => p);
+                        for (const p of affected) {
+                          void syncPathTagsToQdrant(
+                            cfg.sourceId,
+                            p,
+                            tagIdsForPath(next, p),
+                          ).catch(() => {
+                            /* ignore */
+                          });
+                        }
+                      }}
                     />
                   ))
                 )}
+              </div>
+
+              <Separator />
+
+              <div className="flex items-center justify-between gap-4">
+                <Label htmlFor="auto-tagging" className="min-w-0">
+                  Automatic Tagging
+                </Label>
+                <Switch
+                  id="auto-tagging"
+                  checked={cfg.autoTaggingEnabled}
+                  onCheckedChange={(checked) => {
+                    updateConfig({ ...cfg, autoTaggingEnabled: checked });
+                  }}
+                  aria-label="Toggle automatic tagging"
+                  className="shrink-0"
+                />
               </div>
             </CardContent>
           </Card>

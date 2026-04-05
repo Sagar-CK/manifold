@@ -1,4 +1,4 @@
-import type { Dispatch, SetStateAction } from "react";
+import { runAutoTagOrchestration } from "@/lib/autoTagging";
 import { Tags } from "lucide-react";
 import {
   DropdownMenu,
@@ -8,6 +8,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { TagDefLabel } from "@/components/TagDefBadge";
+import type { LocalConfig } from "@/lib/localConfig";
 import { saveTagsState, tagIdsForPath, togglePathTag, type TagsState } from "@/lib/tags";
 import { syncPathTagsToQdrant } from "@/lib/qdrantTags";
 
@@ -16,11 +17,13 @@ export function TagsPathDropdown({
   sourceId,
   tagsState,
   setTagsState,
+  cfg,
 }: {
   path: string;
   sourceId: string;
   tagsState: TagsState;
-  setTagsState: Dispatch<SetStateAction<TagsState>>;
+  setTagsState: React.Dispatch<React.SetStateAction<TagsState>>;
+  cfg?: LocalConfig;
 }) {
   if (tagsState.tags.length === 0) return null;
 
@@ -45,14 +48,19 @@ export function TagsPathDropdown({
               checked={tagsState.pathToTagIds[path]?.includes(t.id) ?? false}
               onSelect={(e) => e.preventDefault()}
               onCheckedChange={() => {
-                setTagsState((prev) => {
-                  const next = togglePathTag(prev, path, t.id);
-                  saveTagsState(next);
-                  void syncPathTagsToQdrant(sourceId, path, tagIdsForPath(next, path)).catch(() => {
-                    /* ignore offline qdrant errors */
-                  });
-                  return next;
+                const next = togglePathTag(tagsState, path, t.id);
+                setTagsState(next);
+                saveTagsState(next);
+                void syncPathTagsToQdrant(sourceId, path, tagIdsForPath(next, path)).catch(() => {
+                  /* ignore offline qdrant errors */
                 });
+                
+                if (cfg?.autoTaggingEnabled && tagIdsForPath(next, path).includes(t.id)) {
+                  console.log(`[TagsPathDropdown] Auto-tagging triggered for path=${path}, tag=${t.name}`);
+                  void runAutoTagOrchestration(cfg, path, t.id, next, setTagsState);
+                } else {
+                  console.log(`[TagsPathDropdown] Auto-tagging not triggered. cfg?.autoTaggingEnabled=${cfg?.autoTaggingEnabled}, hasTag=${tagIdsForPath(next, path).includes(t.id)}`);
+                }
               }}
             >
               <span className="min-w-0 flex-1">
