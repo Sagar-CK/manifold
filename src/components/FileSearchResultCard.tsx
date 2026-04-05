@@ -1,4 +1,5 @@
 import type { MouseEvent, ReactNode } from "react";
+import { Button } from "./ui/button";
 import { Skeleton } from "./ui/skeleton";
 
 function fileTypeLabel(ext: string) {
@@ -36,14 +37,15 @@ export function FileSearchResultCard({
   const showChip = hoverChip != null && hoverChip !== "";
 
   return (
-    <button
+    <Button
       type="button"
+      variant="ghost"
       onClick={(e) => onClick(e)}
       onMouseEnter={onMouseEnter}
-      className="group relative flex min-w-0 flex-col items-center gap-2 rounded-lg p-1 transition-opacity hover:opacity-90"
+      className="group relative h-auto min-h-0 w-full min-w-0 flex-col gap-2 rounded-lg p-1 font-normal transition-opacity hover:bg-transparent hover:opacity-90"
     >
       {showChip ? (
-        <div className="pointer-events-none absolute left-1/2 top-2 z-[2] w-max -translate-x-1/2 rounded bg-black/75 px-2 py-1 text-[10px] font-medium leading-none tracking-wide text-white opacity-0 transition-opacity group-hover:opacity-100">
+        <div className="pointer-events-none absolute left-1/2 top-2 z-[2] w-max -translate-x-1/2 rounded bg-popover px-2 py-1 text-[10px] font-medium leading-none tracking-wide text-popover-foreground shadow-md ring-1 ring-border opacity-0 transition-opacity group-hover:opacity-100">
           {hoverChip}
         </div>
       ) : null}
@@ -64,7 +66,7 @@ export function FileSearchResultCard({
                 key={t.id}
                 role="img"
                 aria-label={t.name}
-                className="h-2 w-2 shrink-0 cursor-default rounded-full ring-1 ring-white/80"
+                className="h-2 w-2 shrink-0 cursor-default rounded-full ring-1 ring-background"
                 style={{ backgroundColor: t.color }}
               />
             ))}
@@ -83,18 +85,16 @@ export function FileSearchResultCard({
             {thumbExpectLoading && !thumbFailed ? (
               <Skeleton className="h-16 w-28 rounded-md" />
             ) : (
-              <div className="flex h-11 w-11 items-center justify-center rounded-md border border-black/10 bg-black/4">
-                <span className="text-[10px] leading-none font-semibold uppercase tracking-wide text-black/60">
-                  {fileTypeLabel(ext)}
-                </span>
+              <div className="flex h-11 w-11 items-center justify-center rounded-md border border-border bg-muted">
+                <span className="app-label leading-none">{fileTypeLabel(ext)}</span>
               </div>
             )}
           </div>
         )}
       </div>
-      <div className="w-full min-w-0 truncate text-center text-xs font-normal leading-tight text-black/80">
+      <div className="w-full min-w-0 truncate text-center text-xs font-normal leading-tight text-foreground">
         {path.split("/").pop() ?? path}
       </div>
-    </button>
+    </Button>
   );
 }

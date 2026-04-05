@@ -264,7 +264,7 @@ export default function RouterApp() {
   }, [navigate]);
 
   return (
-    <main className="h-screen w-full overflow-hidden bg-[#f6f7fb] text-black">
+    <main className="h-screen w-full overflow-hidden bg-background text-foreground">
       <div
         className={cn(
           "mx-auto flex h-full min-h-0 flex-col px-6 py-8",

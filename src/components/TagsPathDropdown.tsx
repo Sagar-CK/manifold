@@ -1,6 +1,7 @@
 import type { Dispatch, SetStateAction } from "react";
 import { runAutoTagOrchestration } from "@/lib/autoTagging";
 import { Tags } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -32,13 +33,15 @@ export function TagsPathDropdown({
     <DropdownMenu>
       <span className="inline-flex">
         <DropdownMenuTrigger asChild>
-          <button
+          <Button
             type="button"
-            className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-white/95 text-black/55 shadow-sm ring-1 ring-black/10 hover:bg-white hover:text-black"
+            variant="outline"
+            size="icon-xs"
+            className="size-5 shrink-0 border-border bg-card p-0 text-muted-foreground shadow-sm hover:bg-muted hover:text-foreground"
             aria-label="Tags"
           >
             <Tags className="size-2.5" aria-hidden="true" />
-          </button>
+          </Button>
         </DropdownMenuTrigger>
       </span>
       <DropdownMenuContent align="end" className="w-52" onClick={(e) => e.stopPropagation()}>

@@ -44,10 +44,10 @@ export function KeyboardShortcutsHelp() {
               type="button"
               variant="outline"
               size="icon"
-              className="h-11 w-11 rounded-full border-black/15 bg-white/90 shadow-md backdrop-blur-sm hover:bg-white"
+              className="h-11 w-11 rounded-full border-border bg-card/90 shadow-md backdrop-blur-sm hover:bg-muted"
               aria-label="Keyboard shortcuts"
             >
-              <CircleHelp className="h-5 w-5 text-black/70" aria-hidden />
+              <CircleHelp className="h-5 w-5 text-muted-foreground" aria-hidden />
             </Button>
           </PopoverTrigger>
           <PopoverContent

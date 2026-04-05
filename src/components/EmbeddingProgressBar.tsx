@@ -100,7 +100,7 @@ export function EmbeddingProgressBar({
         compact ? "w-full max-w-sm" : "w-full",
       ].join(" ")}
     >
-      <div className="mb-1 text-center text-xs text-black/50">
+      <div className="mb-1 text-center text-xs text-muted-foreground">
         {isScanning ? "Scanning files..." : `Indexing ${Math.max(0, processed)} / ${total > 0 ? total : "..."} files`}
       </div>
       <div className="flex items-center gap-2">
@@ -111,10 +111,10 @@ export function EmbeddingProgressBar({
         ) : (
           <Progress
             className="h-1.5 flex-1 transition-all duration-500"
-            trackClassName={isComplete ? "bg-emerald-100" : "bg-black/10"}
+            trackClassName={isComplete ? "bg-emerald-100 dark:bg-emerald-950/50" : "bg-muted"}
             indicatorClassName={[
               "transition-all duration-500",
-              isComplete ? "bg-emerald-500" : "bg-black",
+              isComplete ? "bg-emerald-500" : "bg-primary",
             ].join(" ")}
             value={isComplete ? 100 : progressValue}
           />

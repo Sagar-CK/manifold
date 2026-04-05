@@ -9,6 +9,7 @@ import { FileSearchResultCard } from "../components/FileSearchResultCard";
 import { TagsPathDropdown } from "../components/TagsPathDropdown";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
+import { Label } from "../components/ui/label";
 import { Skeleton } from "../components/ui/skeleton";
 import { ScrollArea } from "../components/ui/scroll-area";
 import {
@@ -237,11 +238,9 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
 
   function leaveFileView() {
     const dest = locState?.returnTo;
-    if (dest) {
-      navigate(dest);
-      return;
-    }
-    navigateBackOrFallback(navigate, "/");
+    // Pop one history entry when possible — navigate(returnTo) would push a duplicate
+    // parent (graph / search / review) and trap Back between file ↔ that route.
+    navigateBackOrFallback(navigate, dest ?? "/");
   }
 
   function goBackFromFileResult() {
@@ -268,7 +267,7 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
               type="button"
               variant="ghost"
               size="sm"
-              className="w-fit gap-1 px-2 text-black/60"
+              className="w-fit gap-1 px-2 text-muted-foreground"
               aria-label="Back"
               onClick={leaveFileView}
             >
@@ -291,7 +290,7 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
               type="button"
               variant="ghost"
               size="sm"
-              className="w-fit gap-1 px-2 text-black/60"
+              className="w-fit gap-1 px-2 text-muted-foreground"
               aria-label={trail.length > 1 ? "Back to previous file" : "Back"}
               onClick={goBackFromFileResult}
             >
@@ -305,7 +304,7 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
         </Tooltip>
 
       <div className="flex flex-row gap-4 sm:gap-5">
-        <div className="flex h-24 w-28 shrink-0 items-center justify-center rounded-lg border border-black/10 bg-white/60 shadow-xs">
+        <div className="flex h-24 w-28 shrink-0 items-center justify-center rounded-lg border border-border bg-card/80 shadow-xs">
           {canThumb ? (
             thumbDataUrl ? (
               <img
@@ -316,14 +315,10 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
             ) : thumbLoading ? (
               <Skeleton className="h-16 w-24 rounded-md" />
             ) : (
-              <span className="text-[10px] font-semibold uppercase tracking-wide text-black/45">
-                {fileTypeLabel(filePath)}
-              </span>
+              <span className="app-label">{fileTypeLabel(filePath)}</span>
             )
           ) : (
-            <span className="text-[10px] font-semibold uppercase tracking-wide text-black/45">
-              {fileTypeLabel(filePath)}
-            </span>
+            <span className="app-label">{fileTypeLabel(filePath)}</span>
           )}
         </div>
 
@@ -332,7 +327,7 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
             <div key={p} className="flex max-w-full items-center gap-2 text-sm">
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <div className="min-w-0 w-fit max-w-full cursor-default truncate rounded-md bg-black/5 px-2 py-1 font-mono text-[12px] text-black/70 sm:max-w-lg">
+                  <div className="min-w-0 w-fit max-w-full cursor-default truncate rounded-md bg-muted px-2 py-1 font-mono text-[12px] text-muted-foreground sm:max-w-lg">
                     {formatIndexedPathForDisplay(p, homePath, cfg.include)}
                   </div>
                 </TooltipTrigger>
@@ -346,7 +341,7 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
                     type="button"
                     variant="ghost"
                     size="icon-sm"
-                    className="shrink-0 text-black/60 hover:text-black"
+                    className="shrink-0 text-muted-foreground hover:text-foreground"
                     aria-label={`Open ${p}`}
                     onClick={async () => {
                       setOpenError(null);
@@ -367,17 +362,21 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
           <ErrorMessage variant="inline" className="text-xs" message={openError} />
 
           <div className="mt-3 flex flex-col gap-2">
-            <div className="text-xs font-medium uppercase tracking-wide text-black/45">Tags</div>
+            <Label className="app-label">Tags</Label>
             {tagsState.tags.length === 0 ? (
-              <p className="text-xs text-black/45">Create tags in Settings, then toggle them here.</p>
+              <p className="text-xs text-muted-foreground">
+                Create tags in Settings, then toggle them here.
+              </p>
             ) : (
               <div className="flex flex-wrap gap-1.5">
                 {tagsState.tags.map((t) => {
                   const active = tagIdsForPath(tagsState, filePath).includes(t.id);
                   return (
-                    <button
+                    <Button
                       key={t.id}
                       type="button"
+                      variant="ghost"
+                      className="h-auto p-0 font-normal hover:bg-transparent"
                       aria-label={active ? `Remove tag ${t.name}` : `Add tag ${t.name}`}
                       onClick={() => {
                         const next = togglePathTag(tagsState, filePath, t.id);
@@ -410,7 +409,7 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
                       >
                         {t.name}
                       </Badge>
-                    </button>
+                    </Button>
                   );
                 })}
               </div>
@@ -420,7 +419,7 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col">
-        <h2 className="app-muted mb-3 text-xs font-medium uppercase tracking-wide">Similar</h2>
+        <h2 className="app-label mb-3">Similar</h2>
         <ScrollArea className="min-h-0 flex-1 pr-3">
           {similarLoading ? (
             <p className="app-muted text-sm">Loading…</p>

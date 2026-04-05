@@ -121,14 +121,16 @@ export function ReviewTagsPage({
       <div className="relative mb-6 shrink-0 flex flex-col items-center gap-2 text-center">
         <Tooltip>
           <TooltipTrigger asChild>
-            <button
+            <Button
               type="button"
-              className="absolute left-0 top-0 inline-flex h-9 w-9 items-center justify-center rounded-md text-black/70 hover:bg-black/5 hover:text-black"
+              variant="ghost"
+              size="icon"
+              className="absolute left-0 top-0 text-muted-foreground"
               aria-label="Back"
               onClick={() => navigateBackOrFallback(navigate)}
             >
               <ArrowLeft className="h-4 w-4" aria-hidden="true" />
-            </button>
+            </Button>
           </TooltipTrigger>
           <TooltipContent side="bottom">Back</TooltipContent>
         </Tooltip>
@@ -147,7 +149,7 @@ export function ReviewTagsPage({
             <div className="flex flex-col gap-8 pb-8">
               {sections.map(({ tagId, tagDef, rows }) => (
                 <section key={tagId} className="flex flex-col gap-3">
-                  <div className="flex flex-col gap-2 border-b border-black/10 pb-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex flex-col gap-2 border-b border-border pb-3 sm:flex-row sm:items-center sm:justify-between">
                     <div className="min-w-0">
                       <TagDefLabel tag={tagDef} className="text-sm" />
                     </div>

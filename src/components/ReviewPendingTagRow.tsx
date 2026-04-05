@@ -61,16 +61,14 @@ export function ReviewPendingTagRow({
             {thumbExpectLoading && !thumbFailed ? (
               <Skeleton className="h-16 w-28 rounded-md" />
             ) : (
-              <div className="flex h-11 w-11 items-center justify-center rounded-md border border-black/10 bg-black/4">
-                <span className="text-[10px] leading-none font-semibold uppercase tracking-wide text-black/60">
-                  {fileTypeLabel(ext)}
-                </span>
+              <div className="flex h-11 w-11 items-center justify-center rounded-md border border-border bg-muted">
+                <span className="app-label leading-none">{fileTypeLabel(ext)}</span>
               </div>
             )}
           </div>
         )}
       </div>
-      <div className="w-full min-w-0 truncate text-center text-xs font-normal leading-tight text-black/80" title={path}>
+      <div className="w-full min-w-0 truncate text-center text-xs font-normal leading-tight text-foreground" title={path}>
         {fileName}
       </div>
     </>
@@ -79,15 +77,16 @@ export function ReviewPendingTagRow({
   return (
     <div className="group relative flex min-w-0 flex-col items-center gap-2 rounded-lg p-1">
       {onInspectFile ? (
-        <button
+        <Button
           type="button"
-          className="flex w-full cursor-pointer flex-col items-center gap-2 rounded-md p-0 text-left outline-none hover:bg-black/5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          variant="ghost"
+          className="h-auto w-full flex-col gap-2 rounded-md p-0 text-left font-normal hover:bg-muted"
           onClick={(e) => onInspectFile(e)}
           title="Click to view · ⌘ or Ctrl-click to open in default app"
           aria-label={`View file ${fileName}. Command or control click opens in default app.`}
         >
           {previewBlock}
-        </button>
+        </Button>
       ) : (
         previewBlock
       )}

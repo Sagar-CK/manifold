@@ -9,7 +9,10 @@ import {
   ComboboxItem,
   ComboboxList,
 } from "@/components/ui/combobox";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { TagFilterPill } from "@/components/TagFilterPill";
 import { ErrorMessage } from "@/components/ErrorMessage";
 import { PageHeader } from "@/components/PageHeader";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -407,28 +410,33 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
       <div className="relative mb-8 shrink-0">
         <Tooltip>
           <TooltipTrigger asChild>
-            <button
+            <Button
               type="button"
-              className="absolute left-0 top-0 inline-flex h-9 w-9 items-center justify-center rounded-md text-black/70 hover:bg-black/5 hover:text-black"
+              variant="ghost"
+              size="icon"
+              className="absolute left-0 top-0 text-muted-foreground"
               aria-label="Back"
               onClick={() => navigateBackOrFallback(navigate)}
             >
               <ArrowLeft className="h-4 w-4" aria-hidden="true" />
-            </button>
+            </Button>
           </TooltipTrigger>
           <TooltipContent side="bottom">Back</TooltipContent>
         </Tooltip>
         <PageHeader
           heading="Graph explorer"
-          subtitle="Content embeddings · content_embeddings"
+          subtitle="visualize your network of files"
         />
       </div>
 
       <div className="mb-3 flex flex-col gap-3">
         <div className="flex flex-wrap items-start gap-x-4 gap-y-3">
-          <label className="flex flex-col gap-1 text-left">
-            <span className="app-label text-xs">Limit</span>
+          <div className="flex flex-col gap-1 text-left">
+            <Label htmlFor="graph-limit-input" className="app-label">
+              Limit
+            </Label>
             <Input
+              id="graph-limit-input"
               type="text"
               inputMode="numeric"
               autoComplete="off"
@@ -441,9 +449,11 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
               className="h-9 w-24"
               aria-label="Point limit"
             />
-          </label>
-          <label className="flex flex-col gap-1 text-left">
-            <span className="app-label text-xs">Algorithm</span>
+          </div>
+          <div className="flex flex-col gap-1 text-left">
+            <Label htmlFor="graph-algorithm-combobox" className="app-label">
+              Algorithm
+            </Label>
             <Combobox<AlgorithmOption>
               value={selectedAlgorithmOption}
               onValueChange={(value) => {
@@ -451,7 +461,13 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
                 setAlgorithm(value.value);
               }}
             >
-              <ComboboxInput readOnly showClear={false} aria-label="Layout algorithm" className="w-40" />
+              <ComboboxInput
+                id="graph-algorithm-combobox"
+                readOnly
+                showClear={false}
+                aria-label="Layout algorithm"
+                className="w-40"
+              />
               <ComboboxContent>
                 <ComboboxList>
                   {ALGORITHM_OPTIONS.map((option) => (
@@ -462,32 +478,25 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
                 </ComboboxList>
               </ComboboxContent>
             </Combobox>
-          </label>
+          </div>
           <div className="flex min-w-[12rem] max-w-full flex-1 flex-col gap-1 text-left">
-            <span className="app-label text-xs">Filter by tags (OR)</span>
+            <span className="app-label">Filter by tags (OR)</span>
             {tagsState.tags.length === 0 ? (
-              <p className="text-xs leading-9 text-black/45">Define tags in Settings to filter this view.</p>
+              <p className="text-xs leading-9 text-muted-foreground">
+                Define tags in Settings to filter this view.
+              </p>
             ) : (
               <div className="flex flex-wrap gap-2">
                 {tagsState.tags.map((t) => {
                   const on = tagFilterIds.includes(t.id);
                   return (
-                    <button
+                    <TagFilterPill
                       key={t.id}
-                      type="button"
-                      onClick={() => toggleTagFilter(t.id)}
-                      className="rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors"
-                      style={
-                        on
-                          ? {
-                              backgroundColor: `${t.color}20`,
-                              borderColor: t.color,
-                            }
-                          : { borderColor: "rgba(0,0,0,0.12)" }
-                      }
-                    >
-                      {t.name}
-                    </button>
+                      tag={t}
+                      pressed={on}
+                      onPressedChange={() => toggleTagFilter(t.id)}
+                      ariaLabel={`Filter by tag ${t.name}`}
+                    />
                   );
                 })}
               </div>
@@ -496,7 +505,7 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
         </div>
 
         {tagsState.tags.length > 0 ? (
-          <div className="flex flex-wrap items-center gap-2 text-[10px] text-black/55">
+          <div className="flex flex-wrap items-center gap-2 text-[10px] text-muted-foreground">
             <span>Legend:</span>
             {tagsState.tags.map((t) => (
               <span key={t.id} className="inline-flex items-center gap-1">
@@ -526,7 +535,7 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
 
       <div
         ref={wrapRef}
-        className="relative min-h-0 flex-1 overflow-hidden rounded-lg border border-black/10 bg-[#eceef2]"
+        className="relative min-h-0 flex-1 overflow-hidden rounded-lg border border-border bg-muted"
       >
         {loading || layoutBusy ? (
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-4">
@@ -621,12 +630,12 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
           }}
         />
         {points.length > 0 ? (
-          <div className="pointer-events-none absolute bottom-2 left-2 rounded bg-white/90 px-2 py-1 text-[10px] text-black/60">
+          <div className="pointer-events-none absolute bottom-2 left-2 rounded-md border border-border bg-card/95 px-2 py-1 text-[10px] text-muted-foreground shadow-sm backdrop-blur-sm">
             Drag to pan · wheel to zoom · click select · double-click open
           </div>
         ) : null}
         {pointCount !== null && !error ? (
-          <div className="pointer-events-none absolute bottom-2 right-2 rounded bg-white/90 px-2 py-1 text-[10px] text-black/60">
+          <div className="pointer-events-none absolute bottom-2 right-2 rounded-md border border-border bg-card/95 px-2 py-1 text-[10px] text-muted-foreground shadow-sm backdrop-blur-sm">
             {pointCount} point{pointCount === 1 ? "" : "s"}
           </div>
         ) : null}

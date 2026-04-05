@@ -43,6 +43,8 @@ import { ErrorMessage } from "../components/ErrorMessage";
 import { EmbeddingStatusPanel } from "../components/EmbeddingStatusPanel";
 import { PageHeader } from "../components/PageHeader";
 import { FileSearchResultCard } from "../components/FileSearchResultCard";
+import { SearchNoResults } from "../components/SearchNoResults";
+import { TagFilterPill } from "../components/TagFilterPill";
 import { TagsPathDropdown } from "../components/TagsPathDropdown";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip";
 import type { FileResultLocationState } from "./FileResultPage";
@@ -609,46 +611,48 @@ export function SearchPage({
         <div className="absolute right-0 top-0 flex items-center gap-0.5">
           <Tooltip>
             <TooltipTrigger asChild>
-              <Link
-                to="/review-tags"
-                className="relative inline-flex h-9 w-9 items-center justify-center rounded-md text-black/70 hover:bg-black/5 hover:text-black"
-                aria-label={
-                  pendingReviewCount > 0
-                    ? `Review ${pendingReviewCount} suggested tag${pendingReviewCount === 1 ? "" : "s"}`
-                    : "Review suggested tags"
-                }
+              <Button
+                variant="ghost"
+                size="icon"
+                className="relative text-muted-foreground"
+                asChild
               >
-                <ListChecks className="h-5 w-5" aria-hidden="true" />
-                {pendingReviewCount > 0 ? (
-                  <span className="absolute -right-0.5 -top-0.5 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-orange-500 px-1 text-[10px] font-semibold leading-none text-white">
-                    {pendingReviewCount > 99 ? "99+" : pendingReviewCount}
-                  </span>
-                ) : null}
-              </Link>
+                <Link
+                  to="/review-tags"
+                  aria-label={
+                    pendingReviewCount > 0
+                      ? `Review ${pendingReviewCount} suggested tag${pendingReviewCount === 1 ? "" : "s"}`
+                      : "Review suggested tags"
+                  }
+                >
+                  <ListChecks className="h-5 w-5" aria-hidden="true" />
+                  {pendingReviewCount > 0 ? (
+                    <span className="absolute -right-0.5 -top-0.5 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-orange-500 px-1 text-[10px] font-semibold leading-none text-white">
+                      {pendingReviewCount > 99 ? "99+" : pendingReviewCount}
+                    </span>
+                  ) : null}
+                </Link>
+              </Button>
             </TooltipTrigger>
             <TooltipContent side="bottom">Review suggested tags</TooltipContent>
           </Tooltip>
           <Tooltip>
             <TooltipTrigger asChild>
-              <Link
-                to="/graph"
-                className="inline-flex h-9 w-9 items-center justify-center rounded-md text-black/70 hover:bg-black/5 hover:text-black"
-                aria-label="Open graph explorer"
-              >
-                <ChartScatter className="h-5 w-5" aria-hidden="true" />
-              </Link>
+              <Button variant="ghost" size="icon" className="text-muted-foreground" asChild>
+                <Link to="/graph" aria-label="Open graph explorer">
+                  <ChartScatter className="h-5 w-5" aria-hidden="true" />
+                </Link>
+              </Button>
             </TooltipTrigger>
             <TooltipContent side="bottom">Graph explorer</TooltipContent>
           </Tooltip>
           <Tooltip>
             <TooltipTrigger asChild>
-              <Link
-                to="/settings"
-                className="inline-flex h-9 w-9 items-center justify-center rounded-md text-black/70 hover:bg-black/5 hover:text-black"
-                aria-label="Open settings"
-              >
-                <Settings className="h-5 w-5" aria-hidden="true" />
-              </Link>
+              <Button variant="ghost" size="icon" className="text-muted-foreground" asChild>
+                <Link to="/settings" aria-label="Open settings">
+                  <Settings className="h-5 w-5" aria-hidden="true" />
+                </Link>
+              </Button>
             </TooltipTrigger>
             <TooltipContent side="bottom">Settings</TooltipContent>
           </Tooltip>
@@ -723,30 +727,21 @@ export function SearchPage({
           </InputGroupAddon>
         </InputGroup>
         {tagsState.tags.length > 0 ? (
-          <div className="mt-2 flex w-full flex-wrap items-center justify-center gap-2">
+          <div className="mt-2 w-full text-center">
+            <div className="inline-flex max-w-full flex-wrap items-center justify-center gap-2">
             {tagsState.tags.map((t) => {
               const on = tagFilterIds.includes(t.id);
               return (
-                <button
+                <TagFilterPill
                   key={t.id}
-                  type="button"
-                  onClick={() => toggleTagFilter(t.id)}
-                  className="rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors"
-                  style={
-                    on
-                      ? {
-                          backgroundColor: `${t.color}20`,
-                          borderColor: t.color,
-                        }
-                      : { borderColor: "rgba(0,0,0,0.12)" }
-                  }
-                  aria-pressed={on}
-                  aria-label={`Filter by tag ${t.name}`}
-                >
-                  {t.name}
-                </button>
+                  tag={t}
+                  pressed={on}
+                  onPressedChange={() => toggleTagFilter(t.id)}
+                  ariaLabel={`Filter by tag ${t.name}`}
+                />
               );
             })}
+            </div>
           </div>
         ) : null}
       </div>
@@ -755,17 +750,16 @@ export function SearchPage({
         <ScrollArea className="h-full pr-3">
           {groupedResults.length === 0 ? (
             showingTagBrowse ? (
-              <div className="app-muted text-center">
-                No files match the selected tags. Try turning some off.
-              </div>
+              <SearchNoResults variant="tag-filters" />
             ) : !hasSearched ? (
               liveIndexedCount === 0 ? (
-                <Link
-                  to="/settings"
-                  className="app-muted mx-auto block w-fit underline underline-offset-4 hover:text-black"
-                >
-                  No files indexed yet. Open Settings to add folders.
-                </Link>
+                <div className="flex w-full justify-center">
+                  <Button variant="link" className="app-muted h-auto p-0" asChild>
+                    <Link to="/settings" className="underline underline-offset-4 hover:text-foreground">
+                      No files indexed yet. Open Settings to add folders.
+                    </Link>
+                  </Button>
+                </div>
               ) : null
             ) : searchError ? (
               <ErrorMessage variant="centered" title="Search error" message={searchError} />
@@ -774,11 +768,9 @@ export function SearchPage({
                 Enable at least one search type (Text or Semantic).
               </div>
             ) : hasTagFilterButNoMatches ? (
-              <div className="app-muted text-center">
-                No files match the selected tags. Try turning some off.
-              </div>
+              <SearchNoResults variant="tag-filters" />
             ) : (
-              <div className="app-muted text-center">No results for “{query.trim()}”.</div>
+              <SearchNoResults variant="query" query={query} />
             )
           ) : (
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
@@ -848,11 +840,13 @@ export function SearchPage({
                     thumbFailed={!!thumbFailedByPath[r.file.path]}
                     thumbExpectLoading={isPreviewFile && !thumbFailedByPath[r.file.path]}
                     hoverChip={
-                      cfg.showSimilarityOnHover
-                        ? r.matchType === "textMatch"
-                          ? "Text match"
-                          : `Similarity ${formatSimilarityScore(r.score)}`
-                        : null
+                      showingTagBrowse
+                        ? null
+                        : cfg.showSimilarityOnHover
+                          ? r.matchType === "textMatch"
+                            ? "Text match"
+                            : `Similarity ${formatSimilarityScore(r.score)}`
+                          : null
                     }
                     tagDots={tagsForPath(tagsState, r.file.path)}
                     tagMenuSlot={

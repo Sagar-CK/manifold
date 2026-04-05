@@ -50,7 +50,9 @@ export function EmbeddingStatusPanel({
         total={total}
       />
       {showIndexedCount ? (
-        <div className="mt-2 text-center text-xs text-black/50">{indexedCount} file(s) indexed.</div>
+        <div className="mt-2 text-center text-xs text-muted-foreground">
+          {indexedCount} file(s) indexed.
+        </div>
       ) : null}
       {embedFailures.length > 0 ? (
         <div className="mt-2">

@@ -19,11 +19,11 @@ export function Progress({
 
   return (
     <div
-      className={cn("relative h-2 w-full overflow-hidden rounded-full bg-black/10", trackClassName, className)}
+      className={cn("relative h-2 w-full overflow-hidden rounded-full bg-muted", trackClassName, className)}
       {...props}
     >
       <div
-        className={cn("h-full bg-black transition-all", indicatorClassName)}
+        className={cn("h-full bg-primary transition-all", indicatorClassName)}
         style={{ width: `${safeValue}%` }}
         aria-valuemin={0}
         aria-valuemax={100}

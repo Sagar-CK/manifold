@@ -13,7 +13,6 @@ body,
 
 body {
   margin: 0;
-  background: #f6f7fb;
 }
 
 @theme inline {
@@ -146,7 +145,7 @@ body {
   }
 
   .app-subtitle {
-    @apply text-sm text-black/60;
+    @apply text-sm text-muted-foreground;
   }
 
   .app-section-title {
@@ -154,15 +153,15 @@ body {
   }
 
   .app-label {
-    @apply text-xs font-medium uppercase tracking-wide text-black/50;
+    @apply text-xs font-medium uppercase tracking-wide text-muted-foreground;
   }
 
   .app-body {
-    @apply text-sm text-black/80;
+    @apply text-sm text-foreground;
   }
 
   .app-muted {
-    @apply text-sm text-black/60;
+    @apply text-sm text-muted-foreground;
   }
 
   .embedding-scan-indicator {

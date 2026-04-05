@@ -1,5 +1,6 @@
 import { X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { TagDef } from "@/lib/tags";
 
@@ -47,14 +48,11 @@ export function TagDefBadge({
     >
       <div>
         <span className="min-w-0 flex-1 truncate">{tag.name}</span>
-        <button
+        <Button
           type="button"
-          className={cn(
-            "inline-flex size-5 shrink-0 items-center justify-center rounded-full p-0",
-            "text-foreground/45 transition-colors",
-            "hover:text-foreground/90 active:text-foreground/70",
-            "focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none",
-          )}
+          variant="ghost"
+          size="icon-xs"
+          className="size-5 shrink-0 rounded-full p-0 text-foreground/45 hover:text-foreground/90"
           aria-label={`Remove tag ${tag.name}`}
           onClick={(e) => {
             e.preventDefault();
@@ -63,7 +61,7 @@ export function TagDefBadge({
           }}
         >
           <X data-icon="inline-end" className="size-3" aria-hidden="true" />
-        </button>
+        </Button>
       </div>
     </Badge>
   );
