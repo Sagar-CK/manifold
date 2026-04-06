@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="src-tauri/icons/128x128.png" alt="Manifold logo" width="128" height="128" />
+</p>
+
 # Manifold
 
 **Desktop search for your folders** — keyword + semantic (hybrid) over what you index locally. Tauri shell, React UI, Rust does indexing and search; Gemini powers embeddings and text extraction; Qdrant stores vectors and a local index handles substring-style matches.
