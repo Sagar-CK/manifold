@@ -139,7 +139,7 @@ export function SettingsGeminiApiKeyCard({
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   e.preventDefault();
-                  (e.target as HTMLInputElement).blur();
+                  e.currentTarget.blur();
                 }
                 if (e.key === "Escape") {
                   e.preventDefault();

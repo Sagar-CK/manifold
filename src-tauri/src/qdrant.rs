@@ -1275,7 +1275,6 @@ pub struct ScrollContentVectorsResult {
     pub points: Vec<ContentEmbeddingPoint>,
 }
 
-/// Graph explorer: same semantics as [qdrant-web-ui requestData scroll](https://github.com/qdrant/qdrant-web-ui/blob/master/src/components/VisualizeChart/requestData.js) — **one** scroll request, no full-index reservoir pass.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScrollGraphArgs {
@@ -1295,7 +1294,6 @@ pub struct ScrollGraphPointMeta {
     pub tag_ids: Vec<String>,
 }
 
-/// Embeddings are concatenated little-endian `f32` values, shape `n * d`, encoded as standard base64 (avoids huge JSON float arrays over Tauri IPC).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScrollGraphResult {
@@ -1652,7 +1650,6 @@ fn content_point_from_scrolled(
     })
 }
 
-/// One scroll page (qdrant-web-ui style): at most `limit` points, Qdrant’s natural order.
 async fn scroll_graph_first_page_grpc(
     app: &AppHandle,
     state: &QdrantState,
@@ -1780,7 +1777,6 @@ async fn scroll_graph_first_page_http(
     Ok(out)
 }
 
-/// Pack embeddings for compact Tauri IPC (base64 `f32` LE, no per-point JSON arrays).
 fn pack_graph_embeddings(points: &[ContentEmbeddingPoint]) -> (String, usize, usize) {
     let n = points.len();
     if n == 0 {
@@ -1796,7 +1792,6 @@ fn pack_graph_embeddings(points: &[ContentEmbeddingPoint]) -> (String, usize, us
     (B64_ENGINE.encode(&packed), n, d)
 }
 
-/// Graph data: single scroll (web-ui parity) + compact embedding payload.
 pub async fn scroll_graph(
     app: &AppHandle,
     state: &QdrantState,

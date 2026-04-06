@@ -39,7 +39,6 @@ type LayoutPoint = ContentPoint & {
   ny: number;
 };
 
-/** On-canvas node diameter in CSS px (thumbnails use GRAPH_THUMB_MAX_EDGE). */
 const THUMB = 22;
 const MARGIN = 28;
 const GRAPH_THUMB_MAX_EDGE = 28;
@@ -207,7 +206,6 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
   const pointsRef = useRef<LayoutPoint[]>([]);
   const gridRef = useRef<number[][]>([]);
   const loadGenerationRef = useRef(0);
-  /** Bumps each graph `useEffect` run so React Strict Mode’s double effect abandons stale work (avoids duplicate Qdrant invoke + duplicate perf logs). */
   const graphEffectIdRef = useRef(0);
 
   const [limitInput, setLimitInput] = useState(String(DEFAULT_LIMIT));
@@ -241,7 +239,6 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
   const dragActiveRef = useRef(false);
   const drawRafRef = useRef<number | null>(null);
   const wheelScaleRafRef = useRef<number | null>(null);
-  /** Throttle redraws while many thumbnails finish decoding (avoids main-thread jank). */
   const thumbDrawTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastThumbPaintAtRef = useRef(0);
   const dragRef = useRef<{ active: boolean; sx: number; sy: number; px: number; py: number } | null>(

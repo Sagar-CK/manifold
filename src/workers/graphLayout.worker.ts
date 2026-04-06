@@ -44,11 +44,6 @@ function xyFrom2D(transformed: number[][]): { x: number[]; y: number[] } {
   return { x, y };
 }
 
-/**
- * PCA/UMAP/t-SNE all use [@saehrimnir/druidjs](https://github.com/saehm/druidjs), matching
- * [qdrant-web-ui VisualizeChart worker](https://github.com/qdrant/qdrant-web-ui/blob/master/src/components/VisualizeChart/worker.js)
- * (`new druid.PCA(data, {})` then `D.transform()` for PCA).
- */
 function runPca(rows: number[][]): { x: number[]; y: number[] } {
   if (rows.length < 2) {
     throw new Error("Need at least 2 points for PCA.");

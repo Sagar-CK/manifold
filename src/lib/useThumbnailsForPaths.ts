@@ -30,11 +30,8 @@ export type UseThumbnailsForPathsOptions = {
   onThumbError?: (path: string, error: unknown) => void;
   maxEdge?: number;
   batchUpdates?: boolean;
-  /** Max parallel `thumbnail_image_base64_png` invokes (default 4). Graph uses 2 to reduce IPC load. */
   concurrency?: number;
-  /** Reorder preview paths (e.g. viewport-first for graph). Called once per pathsKey change. */
   reorderPreviewPaths?: (previewPaths: string[]) => string[];
-  /** When true, defer starting fetches until the browser is idle (helps first paint on heavy graphs). */
   deferStartUntilIdle?: boolean;
 };
 

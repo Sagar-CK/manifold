@@ -40,16 +40,13 @@ function getWorker(): Worker {
       pendingById.clear();
       try {
         worker?.terminate();
-      } catch {
-        /* noop */
-      }
+      } catch {}
       worker = null;
     });
   }
   return worker;
 }
 
-/** For tests or teardown; next runGraphLayout creates a fresh worker. */
 export function terminateGraphLayoutWorker(): void {
   for (const [, p] of pendingById) {
     p.reject(new Error("Graph layout worker terminated"));
@@ -57,9 +54,7 @@ export function terminateGraphLayoutWorker(): void {
   pendingById.clear();
   try {
     worker?.terminate();
-  } catch {
-    /* noop */
-  }
+  } catch {}
   worker = null;
 }
 

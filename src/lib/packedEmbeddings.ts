@@ -1,4 +1,3 @@
-/** Decodes standard base64 of concatenated little-endian `f32` values (from Rust `scroll_graph`). */
 export function decodePackedF32Base64(b64: string, n: number, d: number): Float32Array {
   if (n === 0 || d === 0) {
     return new Float32Array();
