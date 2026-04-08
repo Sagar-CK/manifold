@@ -1,9 +1,9 @@
+import { ThemeProvider } from "next-themes";
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { ThemeProvider } from "next-themes";
 import { HashRouter } from "react-router-dom";
-import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { reportFatalError } from "@/lib/log";
 import RouterApp from "./RouterApp";
 
@@ -64,7 +64,12 @@ installGlobalErrorHandlers();
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <HashRouter>
-      <ThemeProvider attribute="class" defaultTheme="light" enableSystem storageKey="manifold-theme">
+      <ThemeProvider
+        attribute="class"
+        defaultTheme="light"
+        enableSystem
+        storageKey="manifold-theme"
+      >
         <TooltipProvider delayDuration={300}>
           <RouterApp />
           <Toaster />

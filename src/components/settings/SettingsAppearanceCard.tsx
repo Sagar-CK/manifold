@@ -1,10 +1,6 @@
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
 
 export function SettingsAppearanceCard({
   themeMounted,
@@ -18,7 +14,7 @@ export function SettingsAppearanceCard({
   return (
     <Card size="sm" className="shadow-xs">
       <CardHeader>
-        <CardTitle>Appearance</CardTitle>
+        <CardTitle className="app-section-title">Appearance</CardTitle>
       </CardHeader>
       <CardContent className="flex flex-wrap gap-2">
         {themeMounted ? (
@@ -34,10 +30,7 @@ export function SettingsAppearanceCard({
             </Button>
           ))
         ) : (
-          <div
-            className="h-9 w-full max-w-xs animate-pulse rounded-md bg-muted"
-            aria-hidden
-          />
+          <Skeleton className="h-9 w-full max-w-xs" aria-hidden />
         )}
       </CardContent>
     </Card>

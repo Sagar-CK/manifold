@@ -1,12 +1,5 @@
 import { Trash2 } from "lucide-react";
 import { ErrorMessage } from "@/components/ErrorMessage";
-import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardTitle,
-} from "@/components/ui/card";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -18,6 +11,13 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardTitle,
+} from "@/components/ui/card";
 import { Spinner } from "@/components/ui/spinner";
 import {
   Tooltip,
@@ -41,23 +41,23 @@ export function SettingsClearIndexCard({
   deleteAllVectors: () => Promise<void>;
 }) {
   return (
-    <Card
-      size="sm"
-      className="overflow-visible border-destructive/30 bg-destructive/5 shadow-xs ring-1 ring-destructive/20"
-    >
+    <Card size="sm" className="overflow-visible">
       <CardContent className="flex min-w-0 flex-col gap-4 text-left sm:flex-row sm:items-start sm:justify-between sm:gap-8">
         <div className="min-w-0 flex-1 flex flex-col gap-1.5 text-pretty">
-          <CardTitle className="text-left text-base leading-snug">
+          <CardTitle className="app-section-title text-left leading-snug">
             Clear index
           </CardTitle>
           <CardDescription className="text-left">
-            Drops embeddings in the local index ({liveIndexedCount ?? "—"} files).
-            Files on disk are unchanged.
+            Drops embeddings in the local index ({liveIndexedCount ?? "—"}{" "}
+            files). Files on disk are unchanged.
           </CardDescription>
           <ErrorMessage variant="inline" message={clearIndexError} />
         </div>
         <div className="flex shrink-0 items-start sm:pt-0.5">
-          <AlertDialog open={confirmClearOpen} onOpenChange={setConfirmClearOpen}>
+          <AlertDialog
+            open={confirmClearOpen}
+            onOpenChange={setConfirmClearOpen}
+          >
             <Tooltip>
               <TooltipTrigger asChild>
                 <span className="inline-flex shrink-0">
@@ -75,7 +75,10 @@ export function SettingsClearIndexCard({
                           aria-hidden="true"
                         />
                       ) : (
-                        <Trash2 className="h-4 w-4 shrink-0" aria-hidden="true" />
+                        <Trash2
+                          className="h-4 w-4 shrink-0"
+                          aria-hidden="true"
+                        />
                       )}
                     </Button>
                   </AlertDialogTrigger>

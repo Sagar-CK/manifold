@@ -1,5 +1,5 @@
-import { ErrorMessage } from "./ErrorMessage";
 import { EmbeddingProgressBar } from "./EmbeddingProgressBar";
+import { ErrorMessage } from "./ErrorMessage";
 
 type EmbeddingPhase =
   | "idle"

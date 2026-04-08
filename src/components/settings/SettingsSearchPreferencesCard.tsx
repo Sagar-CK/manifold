@@ -1,3 +1,4 @@
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Combobox,
   ComboboxContent,
@@ -5,12 +6,6 @@ import {
   ComboboxItem,
   ComboboxList,
 } from "@/components/ui/combobox";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
@@ -41,7 +36,7 @@ export function SettingsSearchPreferencesCard({
   return (
     <Card size="sm" className="shadow-xs">
       <CardHeader>
-        <CardTitle>Search</CardTitle>
+        <CardTitle className="app-section-title">Search</CardTitle>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
         <div className="flex flex-col gap-2">
@@ -60,7 +55,7 @@ export function SettingsSearchPreferencesCard({
                 }}
                 variant="outline"
                 size="sm"
-                className="h-auto min-w-0 px-3 py-1.5 font-medium data-[state=on]:border-emerald-200 data-[state=on]:bg-emerald-100 data-[state=on]:text-emerald-950 data-[state=off]:text-muted-foreground"
+                className="h-auto min-w-0 border-border/70 px-3 py-1.5 font-normal data-[state=on]:border-border data-[state=on]:bg-muted data-[state=on]:text-foreground data-[state=off]:text-muted-foreground"
               >
                 {ext}
               </Toggle>

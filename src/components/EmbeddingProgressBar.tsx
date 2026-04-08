@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, Pause, Play, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "./ui/button";
 import { Progress } from "./ui/progress";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
@@ -49,7 +49,8 @@ export function EmbeddingProgressBar({
   }, [processed, total]);
   const isScanning = embeddingPhase === "scanning";
   const hasKnownWork = total > 0 || processed > 0;
-  const active = (embedding || hasPendingEmbeds) && (isScanning || hasKnownWork);
+  const active =
+    (embedding || hasPendingEmbeds) && (isScanning || hasKnownWork);
 
   useEffect(() => {
     const prevPhase = prevPhaseRef.current;
@@ -101,7 +102,9 @@ export function EmbeddingProgressBar({
       ].join(" ")}
     >
       <div className="mb-1 text-center text-xs text-muted-foreground">
-        {isScanning ? "Scanning files..." : `Indexing ${Math.max(0, processed)} / ${total > 0 ? total : "..."} files`}
+        {isScanning
+          ? "Scanning files..."
+          : `Indexing ${Math.max(0, processed)} / ${total > 0 ? total : "..."} files`}
       </div>
       <div className="flex items-center gap-2">
         {isScanning ? (
@@ -111,15 +114,20 @@ export function EmbeddingProgressBar({
         ) : (
           <Progress
             className="h-1.5 flex-1 transition-all duration-500"
-            trackClassName={isComplete ? "bg-emerald-100 dark:bg-emerald-950/50" : "bg-muted"}
+            trackClassName="bg-muted"
             indicatorClassName={[
               "transition-all duration-500",
-              isComplete ? "bg-emerald-500" : "bg-primary",
+              isComplete ? "bg-foreground/65" : "bg-primary",
             ].join(" ")}
             value={isComplete ? 100 : progressValue}
           />
         )}
-        {isComplete ? <Check className="h-3.5 w-3.5 text-emerald-600" aria-hidden="true" /> : null}
+        {isComplete ? (
+          <Check
+            className="h-3.5 w-3.5 text-muted-foreground"
+            aria-hidden="true"
+          />
+        ) : null}
         {showControls && embedding ? (
           <div className="flex items-center gap-1">
             {embeddingPhase === "paused" ? (
@@ -143,7 +151,11 @@ export function EmbeddingProgressBar({
                   <Button
                     variant="ghost"
                     size="icon-sm"
-                    disabled={controlsDisabled || !onPause || embeddingPhase === "cancelling"}
+                    disabled={
+                      controlsDisabled ||
+                      !onPause ||
+                      embeddingPhase === "cancelling"
+                    }
                     aria-label="Pause indexing"
                     onClick={() => void onPause?.()}
                   >
@@ -158,7 +170,11 @@ export function EmbeddingProgressBar({
                 <Button
                   variant="ghost"
                   size="icon-sm"
-                  disabled={controlsDisabled || !onCancel || embeddingPhase === "cancelling"}
+                  disabled={
+                    controlsDisabled ||
+                    !onCancel ||
+                    embeddingPhase === "cancelling"
+                  }
                   aria-label="Cancel indexing"
                   onClick={() => void onCancel?.()}
                 >

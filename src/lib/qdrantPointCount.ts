@@ -1,13 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { qdrantCountPoints } from "@/lib/api/tauri";
 
-export async function fetchQdrantPointCount(
-  sourceId: string,
-): Promise<number | null> {
+async function fetchQdrantPointCount(sourceId: string): Promise<number | null> {
   try {
-    const res = (await invoke("qdrant_count_points", {
-      args: { sourceId },
-    })) as { count: number } | { count: string };
+    const res = await qdrantCountPoints(sourceId);
     const count =
       typeof res.count === "string"
         ? Number.parseInt(res.count, 10)
@@ -18,7 +14,7 @@ export async function fetchQdrantPointCount(
   }
 }
 
-export type IndexedPointCountEmbedSettle = {
+type IndexedPointCountEmbedSettle = {
   embedding: boolean;
   hasPendingEmbeds: boolean;
   embeddingPhase:
@@ -42,9 +38,12 @@ export function useIndexedPointCount(
   const refetchKey = options?.refetchKey;
   const settle = options?.refetchAfterEmbedSettles;
 
-  const refetch = useCallback(async (overrideSourceId?: string) => {
-    setCount(await fetchQdrantPointCount(overrideSourceId ?? sourceId));
-  }, [sourceId]);
+  const refetch = useCallback(
+    async (overrideSourceId?: string) => {
+      setCount(await fetchQdrantPointCount(overrideSourceId ?? sourceId));
+    },
+    [sourceId],
+  );
 
   useEffect(() => {
     let cancelled = false;

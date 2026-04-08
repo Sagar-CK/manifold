@@ -21,44 +21,35 @@ import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import type { LocalConfig } from "@/lib/localConfig";
-import { syncPathTagsToQdrant } from "@/lib/qdrantTags";
-import {
-  removeTagEverywhere,
-  saveTagsState,
-  tagIdsForPath,
-  type TagsState,
-} from "@/lib/tags";
+import { createTagDefinition, removeTagDefinition } from "@/lib/tagActions";
+import type { TagsState } from "@/lib/tags";
 
 export function SettingsTagsCard({
   cfg,
   updateConfig,
   tagsState,
-  setTagsState,
   tagCreateOpen,
   setTagCreateOpen,
   tagNameDraft,
   setTagNameDraft,
   tagColorDraft,
   setTagColorDraft,
-  addTagFromDraft,
 }: {
   cfg: LocalConfig;
   updateConfig: (next: LocalConfig) => void;
   tagsState: TagsState;
-  setTagsState: (next: TagsState | ((prev: TagsState) => TagsState)) => void;
   tagCreateOpen: boolean;
   setTagCreateOpen: (open: boolean) => void;
   tagNameDraft: string;
   setTagNameDraft: (v: string) => void;
   tagColorDraft: string;
   setTagColorDraft: (v: string) => void;
-  addTagFromDraft: () => boolean;
 }) {
   return (
     <>
       <Card size="sm" className="shadow-xs">
         <CardHeader className="items-center">
-          <CardTitle>Tags</CardTitle>
+          <CardTitle className="app-section-title">Tags</CardTitle>
           <CardAction className="self-center">
             <Button
               type="button"
@@ -85,21 +76,7 @@ export function SettingsTagsCard({
                   key={t.id}
                   tag={t}
                   onRemove={() => {
-                    const next = removeTagEverywhere(tagsState, t.id);
-                    setTagsState(next);
-                    saveTagsState(next);
-                    const affected = Object.entries(tagsState.pathToTagIds)
-                      .filter(([, ids]) => ids.includes(t.id))
-                      .map(([p]) => p);
-                    for (const p of affected) {
-                      void syncPathTagsToQdrant(
-                        cfg.sourceId,
-                        p,
-                        tagIdsForPath(next, p),
-                      ).catch(() => {
-                        /* ignore */
-                      });
-                    }
+                    removeTagDefinition(t.id, cfg.sourceId);
                   }}
                 />
               ))
@@ -153,7 +130,10 @@ export function SettingsTagsCard({
                 onKeyDown={(e) => {
                   if (e.key === "Enter") {
                     e.preventDefault();
-                    if (addTagFromDraft()) setTagCreateOpen(false);
+                    if (tagNameDraft.trim()) {
+                      createTagDefinition(tagNameDraft, tagColorDraft);
+                      setTagCreateOpen(false);
+                    }
                   }
                 }}
                 placeholder="Review"
@@ -164,14 +144,19 @@ export function SettingsTagsCard({
             </div>
             <div className="flex flex-col gap-2">
               <Label htmlFor="tag-create-color">Color</Label>
-              <input
-                id="tag-create-color"
-                type="color"
-                value={tagColorDraft}
-                onChange={(e) => setTagColorDraft(e.target.value)}
-                className="size-9 shrink-0 cursor-pointer rounded-md border border-input bg-background p-0.5 shadow-xs"
-                aria-label="Tag color"
-              />
+              <div className="flex items-center gap-3">
+                <input
+                  id="tag-create-color"
+                  type="color"
+                  value={tagColorDraft}
+                  onChange={(e) => setTagColorDraft(e.target.value)}
+                  className="size-10 shrink-0 cursor-pointer rounded-xl border border-input bg-background p-1 shadow-xs"
+                  aria-label="Tag color"
+                />
+                <div className="min-w-0 text-sm text-muted-foreground">
+                  Used as a small accent dot and tag marker.
+                </div>
+              </div>
             </div>
           </div>
           <DialogFooter>
@@ -186,7 +171,9 @@ export function SettingsTagsCard({
               type="button"
               disabled={!tagNameDraft.trim()}
               onClick={() => {
-                if (addTagFromDraft()) setTagCreateOpen(false);
+                if (!tagNameDraft.trim()) return;
+                createTagDefinition(tagNameDraft, tagColorDraft);
+                setTagCreateOpen(false);
               }}
             >
               Add tag

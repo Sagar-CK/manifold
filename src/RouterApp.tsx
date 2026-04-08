@@ -1,307 +1,120 @@
 import "./App.css";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Route, Routes, useLocation, useNavigate } from "react-router-dom";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-
-import {
-  embeddingImageRasterOptions,
-  loadConfig,
-  type LocalConfig,
-  type SupportedExt,
-} from "./lib/localConfig";
-import { syncTagsBackfill } from "./lib/qdrantTags";
-import { loadTagsState } from "./lib/tags";
 import { EnvIssuesBanner } from "./components/EnvIssuesBanner";
 import { KeyboardShortcutsHelp } from "./components/KeyboardShortcutsHelp";
+import { EmbeddingStatusProvider } from "./context/EmbeddingStatusContext";
+import { useAppHealth } from "./hooks/useAppHealth";
+import { useEmbeddingController } from "./hooks/useEmbeddingController";
+import { subscribeAppShortcut } from "./lib/api/tauri";
+import {
+  type AppShortcutAction,
+  SEARCH_QUERY_INPUT_ID,
+} from "./lib/appShortcuts";
+import type { SupportedExt } from "./lib/localConfig";
+import { useConfigStore } from "./lib/stores/configStore";
+import { cn } from "./lib/utils";
 import { FileResultPage } from "./pages/FileResultPage";
-import { GraphExplorerPage } from "./pages/GraphExplorerPage";
+import { ReviewTagsPage } from "./pages/ReviewTagsPage";
 import { SearchPage } from "./pages/SearchPage";
 import { SettingsPage } from "./pages/SettingsPage";
-import { ReviewTagsPage } from "./pages/ReviewTagsPage";
-import { setNavigateToReviewTagsCallback } from "./lib/autoTagging";
-import { invokeErrorText } from "./lib/errors";
-import { cn } from "./lib/utils";
-import {
-  EmbeddingStatusProvider,
-  type EmbeddingJobPhase,
-} from "./context/EmbeddingStatusContext";
 
-type EmbeddingJobStatus = {
-  phase: EmbeddingJobPhase;
-  processed: number;
-  total: number;
-  message: string;
-};
+const GraphExplorerPage = lazy(async () => {
+  const mod = await import("./pages/GraphExplorerPage");
+  return { default: mod.GraphExplorerPage };
+});
 
-type EmbeddingFileFailure = {
-  path: string;
-  reason: string;
-};
+const EXT_OPTIONS: SupportedExt[] = [
+  "png",
+  "jpg",
+  "jpeg",
+  "pdf",
+  "mp3",
+  "wav",
+  "mp4",
+  "mov",
+];
 
-/** Stable fingerprint of scan-related config; must match `autoEmbedKey` useMemo below. */
-function embedAutoKeyFromCfg(cfg: LocalConfig): string {
-  return JSON.stringify({
-    include: [...cfg.include].sort(),
-    exclude: [...cfg.exclude].sort(),
-    extensions: [...cfg.extensions].sort(),
-    useDefaultFolderExcludes: cfg.useDefaultFolderExcludes,
-    sourceId: cfg.sourceId,
-  });
-}
-
-/** Second start while a job is active — not a failure for the user; job is already in progress. */
-function isBenignConcurrentEmbedStartError(msg: string): boolean {
-  return /embedding job already running/i.test(msg);
+function focusSearchInput(attempt: number = 0) {
+  const input = document.getElementById(SEARCH_QUERY_INPUT_ID);
+  if (input instanceof HTMLInputElement) {
+    input.focus();
+    input.select();
+    return;
+  }
+  if (attempt >= 10) return;
+  window.setTimeout(() => focusSearchInput(attempt + 1), 50);
 }
 
 export default function RouterApp() {
-  const navigate = useNavigate();
   const { pathname } = useLocation();
+  const navigate = useNavigate();
+  const pathnameRef = useRef(pathname);
   const graphLayout = pathname === "/graph";
-  const [cfg, setCfg] = useState<LocalConfig>(() => loadConfig());
-  const [embeddingPhase, setEmbeddingPhase] = useState<EmbeddingJobPhase>("idle");
-  const [envIssues, setEnvIssues] = useState<string[]>([]);
-  const [embedProgress, setEmbedProgress] = useState({
-    processed: 0,
-    total: 0,
-    status: "All files indexed.",
-  });
-  const [lastEmbedError, setLastEmbedError] = useState<string | null>(null);
-  const [embedFailures, setEmbedFailures] = useState<EmbeddingFileFailure[]>([]);
-  const lastAutoEmbedKeyRef = useRef<string>("");
-  const embedStartInFlightRef = useRef(false);
-  const lastReportedEmbedErrorRef = useRef<string | null>(null);
-
-  const geminiApiKey =
-    (import.meta.env.VITE_GOOGLE_GENERATIVE_AI_API_KEY as string | undefined) ?? "";
-
-  const extOptions: SupportedExt[] = useMemo(
-    () => ["png", "jpg", "jpeg", "pdf", "mp3", "wav", "mp4", "mov"],
-    [],
-  );
-
-  const autoEmbedKey = useMemo(
-    () => embedAutoKeyFromCfg(cfg),
-    [cfg.exclude, cfg.extensions, cfg.include, cfg.sourceId, cfg.useDefaultFolderExcludes],
-  );
-  const embedding =
-    embeddingPhase === "scanning" ||
-    embeddingPhase === "embedding" ||
-    embeddingPhase === "paused" ||
-    embeddingPhase === "cancelling";
-  const hasPendingEmbeds = embedding;
-
-  const cancelEmbedding = useCallback(async () => {
-    await invoke("cancel_embedding_job");
-  }, []);
+  const [cfg, setCfg] = useConfigStore();
+  const [shortcutsHelpOpen, setShortcutsHelpOpen] = useState(false);
+  const { envIssues } = useAppHealth();
+  const {
+    embedding,
+    hasPendingEmbeds,
+    embeddingPhase,
+    embedProgress,
+    lastEmbedError,
+    embedFailures,
+    cancelEmbedding,
+    clearGeminiEmbedError,
+    onGeminiApiKeySaved,
+  } = useEmbeddingController(cfg);
 
   useEffect(() => {
-    let cancelled = false;
-    async function checkConfig() {
-      const issues: string[] = [];
-      try {
-        await invoke("qdrant_status");
-      } catch (e) {
-        issues.push(`Qdrant is not configured or reachable: ${invokeErrorText(e)}`);
-      }
-      if (!cancelled) setEnvIssues(issues);
-    }
-    void checkConfig();
-    return () => {
-      cancelled = true;
-    };
-  }, [geminiApiKey]);
+    pathnameRef.current = pathname;
+  }, [pathname]);
 
-  /** One-time per source: push local tag membership into Qdrant payloads for paths that already exist in the index. */
   useEffect(() => {
-    const key = `manifold:tagsQdrantBackfill:v1:${cfg.sourceId}`;
-    if (typeof window === "undefined" || localStorage.getItem(key)) return;
-    let cancelled = false;
-    async function run() {
-      const state = loadTagsState();
-      const entries = Object.entries(state.pathToTagIds).map(([path, tagIds]) => ({
-        path,
-        tagIds,
-      }));
-      if (entries.length === 0) {
-        localStorage.setItem(key, "1");
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+
+    void subscribeAppShortcut((action: AppShortcutAction) => {
+      if (action === "show-shortcuts") {
+        setShortcutsHelpOpen(true);
         return;
       }
-      const BATCH = 64;
-      try {
-        for (let i = 0; i < entries.length; i += BATCH) {
-          if (cancelled) return;
-          const chunk = entries.slice(i, i + BATCH);
-          await syncTagsBackfill(cfg.sourceId, chunk);
+
+      setShortcutsHelpOpen(false);
+
+      if (action === "search") {
+        if (pathnameRef.current !== "/") {
+          navigate("/");
         }
-        if (!cancelled) localStorage.setItem(key, "1");
-      } catch {
-        /* Qdrant down or offline; retry on next launch */
-      }
-    }
-    void run();
-    return () => {
-      cancelled = true;
-    };
-  }, [cfg.sourceId]);
-
-  const runEmbed = useCallback(async () => {
-    if (cfg.include.length === 0) {
-      return;
-    }
-    if (embedStartInFlightRef.current) {
-      return;
-    }
-    embedStartInFlightRef.current = true;
-    try {
-      // Preflight Qdrant once to avoid a laggy first upsert when Qdrant is down.
-      try {
-        await invoke("qdrant_status");
-      } catch (e) {
-        const msg = `Qdrant is not configured or reachable: ${invokeErrorText(e)}`;
-        lastReportedEmbedErrorRef.current = msg;
-        setLastEmbedError(msg);
-        setEnvIssues((prev) => (prev.includes(msg) ? prev : [...prev, msg]));
+        focusSearchInput();
         return;
       }
 
-      setLastEmbedError(null);
-      lastReportedEmbedErrorRef.current = null;
-      setEmbedFailures([]);
-      const visionRaster = embeddingImageRasterOptions(cfg.embeddingImagePreset);
-      await invoke("start_embedding_job", {
-        args: {
-          scan: {
-            include: cfg.include,
-            exclude: cfg.exclude,
-            extensions: cfg.extensions,
-            useDefaultFolderExcludes: cfg.useDefaultFolderExcludes,
-          },
-          sourceId: cfg.sourceId,
-          visionRaster: {
-            maxEdgePx: visionRaster.maxEdgePx,
-            jpegQuality: visionRaster.jpegQuality,
-          },
-        },
-      });
-      lastAutoEmbedKeyRef.current = embedAutoKeyFromCfg(cfg);
-    } catch (e) {
-      const msg = invokeErrorText(e);
-      if (isBenignConcurrentEmbedStartError(msg)) {
+      if (action === "graph" && pathnameRef.current !== "/graph") {
+        navigate("/graph");
         return;
       }
-      if (lastReportedEmbedErrorRef.current === msg) {
+
+      if (action === "review-tags" && pathnameRef.current !== "/review-tags") {
+        navigate("/review-tags");
         return;
       }
-      lastReportedEmbedErrorRef.current = msg;
-      setLastEmbedError(msg);
-    } finally {
-      embedStartInFlightRef.current = false;
-    }
-  }, [
-    cfg.embeddingImagePreset,
-    cfg.exclude,
-    cfg.extensions,
-    cfg.include,
-    cfg.sourceId,
-    cfg.useDefaultFolderExcludes,
-    geminiApiKey,
-  ]);
 
-  const clearGeminiEmbedError = useCallback(() => {
-    setLastEmbedError(null);
-    lastReportedEmbedErrorRef.current = null;
-    setEmbedFailures([]);
-  }, []);
-
-  const onGeminiApiKeySaved = useCallback(() => {
-    clearGeminiEmbedError();
-    const active =
-      embeddingPhase === "scanning" ||
-      embeddingPhase === "embedding" ||
-      embeddingPhase === "paused" ||
-      embeddingPhase === "cancelling";
-    if (cfg.include.length > 0 && !active) {
-      void runEmbed();
-    }
-  }, [cfg.include.length, clearGeminiEmbedError, embeddingPhase, runEmbed]);
-
-  useEffect(() => {
-    if (cfg.include.length === 0) {
-      setEmbeddingPhase("idle");
-      setEmbedProgress({ processed: 0, total: 0, status: "All files indexed." });
-      // So re-adding the same folder (or swapping paths) is not mistaken for "already embedded".
-      lastAutoEmbedKeyRef.current = autoEmbedKey;
-      return;
-    }
-    if (embedding) return;
-    if (lastAutoEmbedKeyRef.current === autoEmbedKey) return;
-    void runEmbed();
-  }, [autoEmbedKey, cfg.include.length, embedding, runEmbed]);
-
-  useEffect(() => {
-    let unlistenStatus: (() => void) | null = null;
-    let unlistenDone: (() => void) | null = null;
-    let unlistenError: (() => void) | null = null;
-    let unlistenFileFailed: (() => void) | null = null;
-    let cancelled = false;
-
-    async function subscribe() {
-      unlistenStatus = await listen<EmbeddingJobStatus>("embedding://status", (event) => {
-        const s = event.payload;
-        setEmbeddingPhase(s.phase);
-        setEmbedProgress({ processed: s.processed, total: s.total, status: s.message });
-      });
-      unlistenDone = await listen("embedding://done", () => {
-        setEmbeddingPhase("done");
-      });
-      unlistenError = await listen<{ message: string }>("embedding://error", (event) => {
-        const msg = event.payload.message;
-        if (isBenignConcurrentEmbedStartError(msg)) {
-          return;
-        }
-        if (lastReportedEmbedErrorRef.current === msg) {
-          return;
-        }
-        lastReportedEmbedErrorRef.current = msg;
-        setLastEmbedError(msg);
-      });
-      unlistenFileFailed = await listen<EmbeddingFileFailure>("embedding://file-failed", (event) => {
-        setEmbedFailures((prev) => {
-          const next = [event.payload, ...prev];
-          return next.slice(0, 8);
-        });
-      });
-
-      try {
-        const status = (await invoke("embedding_job_status")) as EmbeddingJobStatus;
-        if (cancelled) return;
-        setEmbeddingPhase(status.phase);
-        setEmbedProgress({
-          processed: status.processed,
-          total: status.total,
-          status: status.message,
-        });
-      } catch {
-        // ignore
+      if (action === "settings" && pathnameRef.current !== "/settings") {
+        navigate("/settings");
       }
-    }
-
-    void subscribe();
-    return () => {
-      cancelled = true;
-      unlistenStatus?.();
-      unlistenDone?.();
-      unlistenError?.();
-      unlistenFileFailed?.();
-    };
-  }, []);
-
-  useEffect(() => {
-    setNavigateToReviewTagsCallback(() => {
-      navigate("/review-tags");
+    }).then((nextUnlisten) => {
+      if (disposed) {
+        nextUnlisten();
+        return;
+      }
+      unlisten = nextUnlisten;
     });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, [navigate]);
 
   return (
@@ -326,14 +139,27 @@ export default function RouterApp() {
             <Routes>
               <Route path="/" element={<SearchPage cfg={cfg} />} />
               <Route path="/file" element={<FileResultPage cfg={cfg} />} />
-              <Route path="/graph" element={<GraphExplorerPage cfg={cfg} />} />
+              <Route
+                path="/graph"
+                element={
+                  <Suspense
+                    fallback={
+                      <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+                        Loading graph…
+                      </div>
+                    }
+                  >
+                    <GraphExplorerPage cfg={cfg} />
+                  </Suspense>
+                }
+              />
               <Route
                 path="/settings"
                 element={
                   <SettingsPage
                     cfg={cfg}
                     setCfg={setCfg}
-                    extOptions={extOptions}
+                    extOptions={EXT_OPTIONS}
                     onGeminiApiKeySaved={onGeminiApiKeySaved}
                     onGeminiStoredKeyCleared={clearGeminiEmbedError}
                   />
@@ -347,8 +173,10 @@ export default function RouterApp() {
           </div>
         </EmbeddingStatusProvider>
       </div>
-      <KeyboardShortcutsHelp />
+      <KeyboardShortcutsHelp
+        open={shortcutsHelpOpen}
+        onOpenChange={setShortcutsHelpOpen}
+      />
     </main>
   );
 }
-

@@ -1,15 +1,19 @@
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { ArrowLeft } from "lucide-react";
 import { useTheme } from "next-themes";
-import { useNavigate } from "react-router-dom";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { useEmbeddingStatus } from "@/context/EmbeddingStatusContext";
+import { useTagsState } from "@/lib/useTagsState";
+import { cn } from "@/lib/utils";
+import { EmbeddingStatusPanel } from "../components/EmbeddingStatusPanel";
+import { PageHeader } from "../components/PageHeader";
 import { SettingsAppearanceCard } from "../components/settings/SettingsAppearanceCard";
-import { SettingsGeminiApiKeyCard } from "../components/settings/SettingsGeminiApiKeyCard";
-import { SettingsEmbeddingImageCard } from "../components/settings/SettingsEmbeddingImageCard";
 import { SettingsClearIndexCard } from "../components/settings/SettingsClearIndexCard";
+import { SettingsEmbeddingImageCard } from "../components/settings/SettingsEmbeddingImageCard";
 import type { IncludeFolderBreakdown } from "../components/settings/SettingsFolderDialogs";
 import { SettingsFolderDialogs } from "../components/settings/SettingsFolderDialogs";
+import { SettingsGeminiApiKeyCard } from "../components/settings/SettingsGeminiApiKeyCard";
 import { SettingsPathsCard } from "../components/settings/SettingsPathsCard";
 import { SettingsSearchPreferencesCard } from "../components/settings/SettingsSearchPreferencesCard";
 import { SettingsTagsCard } from "../components/settings/SettingsTagsCard";
@@ -17,34 +21,28 @@ import {
   SEARCH_MODE_OPTIONS,
   type SearchModeOption,
 } from "../components/settings/searchModeOptions";
-import { invokeErrorText } from "../lib/errors";
-import { navigateBackOrFallback } from "../lib/navigateBack";
-import {
-  collapseIncludeFolders,
-  type LocalConfig,
-  type SupportedExt,
-} from "../lib/localConfig";
-import { saveConfig } from "../lib/localConfig";
-import { useIndexedPointCount } from "../lib/qdrantPointCount";
-import { useHomeDir } from "../lib/useHomeDir";
-import { useTagsState } from "@/lib/useTagsState";
-import {
-  createTagDef,
-  removePathMappingsUnderRoot,
-  saveTagsState,
-  type TagsState,
-} from "../lib/tags";
-import { useEmbeddingStatus } from "@/context/EmbeddingStatusContext";
-import { PageHeader } from "../components/PageHeader";
-import { EmbeddingStatusPanel } from "../components/EmbeddingStatusPanel";
 import { Button } from "../components/ui/button";
 import { ScrollArea } from "../components/ui/scroll-area";
-import { cn } from "@/lib/utils";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from "../components/ui/tooltip";
+import {
+  qdrantDeleteAllPoints,
+  qdrantDeletePointsForIncludePath,
+  scanFilesEstimate,
+} from "../lib/api/tauri";
+import { invokeErrorText } from "../lib/errors";
+import {
+  collapseIncludeFolders,
+  type LocalConfig,
+  type SupportedExt,
+} from "../lib/localConfig";
+import { navigateBackOrFallback } from "../lib/navigateBack";
+import { useIndexedPointCount } from "../lib/qdrantPointCount";
+import { removePathMappingsUnderRoot } from "../lib/tags";
+import { useHomeDir } from "../lib/useHomeDir";
 
 function parseScanCount(value: number | string): number {
   const n = typeof value === "string" ? Number.parseInt(value, 10) : value;
@@ -122,20 +120,6 @@ export function SettingsPage({
 
   function updateConfig(next: LocalConfig) {
     setCfg(next);
-    saveConfig(next);
-  }
-
-  function updateTags(next: TagsState) {
-    saveTagsState(next);
-    setTagsState(next);
-  }
-
-  function addTagFromDraft(): boolean {
-    if (!tagNameDraft.trim()) return false;
-    const t = createTagDef(tagNameDraft, tagColorDraft);
-    updateTags({ ...tagsState, tags: [...tagsState.tags, t] });
-    setTagNameDraft("");
-    return true;
   }
 
   async function refreshEmbeddedCount(sourceId: string) {
@@ -153,17 +137,15 @@ export function SettingsPage({
       } catch {
         // Job may have finished between render and invoke; still clear Qdrant.
       }
-      await invoke("qdrant_delete_all_points", {
-        args: { sourceId: cfg.sourceId },
-      });
+      await qdrantDeleteAllPoints(cfg.sourceId);
       // Bump sourceId to force a clean re-index cycle + avoid any stale per-source caches.
       const nextSourceId = crypto.randomUUID();
       updateConfig({ ...cfg, sourceId: nextSourceId, include: [] });
-      setTagsState((prev) => {
-        const next = { ...prev, pathToTagIds: {}, pendingAutoTags: {} };
-        saveTagsState(next);
-        return next;
-      });
+      setTagsState((prev) => ({
+        ...prev,
+        pathToTagIds: {},
+        pendingAutoTags: {},
+      }));
       await refreshEmbeddedCount(nextSourceId);
       setConfirmClearOpen(false);
     } catch (e) {
@@ -191,19 +173,12 @@ export function SettingsPage({
       } catch {
         // Job may have finished between render and invoke.
       }
-      await invoke("qdrant_delete_points_for_include_path", {
-        args: {
-          sourceId: cfg.sourceId,
-          includePath: includeToRemove,
-        },
-      });
+      await qdrantDeletePointsForIncludePath(cfg.sourceId, includeToRemove);
       const nextInclude = cfg.include.filter((x) => x !== includeToRemove);
       updateConfig({ ...cfg, include: nextInclude });
-      setTagsState((prev) => {
-        const next = removePathMappingsUnderRoot(prev, includeToRemove);
-        saveTagsState(next);
-        return next;
-      });
+      setTagsState((prev) =>
+        removePathMappingsUnderRoot(prev, includeToRemove),
+      );
       if (nextInclude.length === 0 && (embedding || hasPendingEmbeds)) {
         try {
           await cancelEmbedding();
@@ -228,20 +203,12 @@ export function SettingsPage({
     setConfirmAddIncludeOpen(true);
     setAddIncludeLoading(true);
     try {
-      const res = (await invoke("scan_files_estimate", {
-        args: {
-          include: [path],
-          exclude: cfg.exclude,
-          extensions: cfg.extensions,
-          useDefaultFolderExcludes: cfg.useDefaultFolderExcludes,
-        },
-      })) as {
-        total: number | string;
-        imageFiles: number | string;
-        audioFiles: number | string;
-        videoFiles: number | string;
-        textLikeFiles: number | string;
-      };
+      const res = await scanFilesEstimate({
+        include: [path],
+        exclude: cfg.exclude,
+        extensions: cfg.extensions,
+        useDefaultFolderExcludes: cfg.useDefaultFolderExcludes,
+      });
       setIncludeAddBreakdown({
         total: parseScanCount(res.total),
         textLike: parseScanCount(res.textLikeFiles),
@@ -343,14 +310,12 @@ export function SettingsPage({
                 cfg={cfg}
                 updateConfig={updateConfig}
                 tagsState={tagsState}
-                setTagsState={setTagsState}
                 tagCreateOpen={tagCreateOpen}
                 setTagCreateOpen={setTagCreateOpen}
                 tagNameDraft={tagNameDraft}
                 setTagNameDraft={setTagNameDraft}
                 tagColorDraft={tagColorDraft}
                 setTagColorDraft={setTagColorDraft}
-                addTagFromDraft={addTagFromDraft}
               />
             </div>
 

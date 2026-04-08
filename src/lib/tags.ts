@@ -15,8 +15,6 @@ export type TagsState = {
   pendingAutoTags: Record<string, string[]>;
 };
 
-const KEY = "manifold:tags:v1";
-
 export function normalizePathKey(path: string): string {
   return path.replace(/\\/g, "/").replace(/\/+$/, "");
 }
@@ -25,40 +23,27 @@ function defaultState(): TagsState {
   return { tags: [], pathToTagIds: {}, pendingAutoTags: {} };
 }
 
-export function loadTagsState(): TagsState {
-  if (typeof window === "undefined") return defaultState();
-  try {
-    const raw = window.localStorage.getItem(KEY);
-    if (!raw) return defaultState();
-    const parsed = JSON.parse(raw) as Partial<TagsState>;
-    const tags = Array.isArray(parsed.tags)
-      ? parsed.tags.filter(
-          (t): t is TagDef =>
-            typeof t === "object" &&
-            t !== null &&
-            typeof (t as TagDef).id === "string" &&
-            typeof (t as TagDef).name === "string" &&
-            typeof (t as TagDef).color === "string",
-        )
-      : [];
-    const pathToTagIds =
-      typeof parsed.pathToTagIds === "object" && parsed.pathToTagIds !== null
-        ? parsed.pathToTagIds
-        : {};
-    const pendingAutoTags =
-      typeof parsed.pendingAutoTags === "object" && parsed.pendingAutoTags !== null
-        ? parsed.pendingAutoTags
-        : {};
-    return { tags, pathToTagIds, pendingAutoTags };
-  } catch {
-    return defaultState();
-  }
-}
-
-export function saveTagsState(state: TagsState): void {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(KEY, JSON.stringify(state));
-  window.dispatchEvent(new Event("manifold:tags-updated"));
+export function normalizeTagsState(parsed?: Partial<TagsState>): TagsState {
+  const tags = Array.isArray(parsed?.tags)
+    ? parsed.tags.filter(
+        (t): t is TagDef =>
+          typeof t === "object" &&
+          t !== null &&
+          typeof (t as TagDef).id === "string" &&
+          typeof (t as TagDef).name === "string" &&
+          typeof (t as TagDef).color === "string",
+      )
+    : [];
+  const pathToTagIds =
+    typeof parsed?.pathToTagIds === "object" && parsed.pathToTagIds !== null
+      ? parsed.pathToTagIds
+      : {};
+  const pendingAutoTags =
+    typeof parsed?.pendingAutoTags === "object" &&
+    parsed.pendingAutoTags !== null
+      ? parsed.pendingAutoTags
+      : {};
+  return { ...defaultState(), tags, pathToTagIds, pendingAutoTags };
 }
 
 export function createTagDef(name: string, color: string): TagDef {
@@ -94,7 +79,11 @@ export function tagsForPath(state: TagsState, path: string): TagDef[] {
   return state.tags.filter((t) => ids.has(t.id));
 }
 
-export function setPathTags(state: TagsState, path: string, tagIds: string[]): TagsState {
+function setPathTags(
+  state: TagsState,
+  path: string,
+  tagIds: string[],
+): TagsState {
   const k = normalizePathKey(path);
   const next = { ...state.pathToTagIds };
   for (const p of Object.keys(next)) {
@@ -107,7 +96,11 @@ export function setPathTags(state: TagsState, path: string, tagIds: string[]): T
   return { ...state, pathToTagIds: next };
 }
 
-export function togglePathTag(state: TagsState, path: string, tagId: string): TagsState {
+export function togglePathTag(
+  state: TagsState,
+  path: string,
+  tagId: string,
+): TagsState {
   const cur = new Set(tagIdsForPath(state, path));
 
   if (cur.has(tagId)) cur.delete(tagId);
@@ -132,7 +125,10 @@ export function togglePathTag(state: TagsState, path: string, tagId: string): Ta
   return nextState;
 }
 
-export function removeTagEverywhere(state: TagsState, tagId: string): TagsState {
+export function removeTagEverywhere(
+  state: TagsState,
+  tagId: string,
+): TagsState {
   const tags = state.tags.filter((t) => t.id !== tagId);
   const pathToTagIds: Record<string, string[]> = {};
   for (const [p, ids] of Object.entries(state.pathToTagIds)) {
@@ -147,8 +143,35 @@ export function removeTagEverywhere(state: TagsState, tagId: string): TagsState 
   return { tags, pathToTagIds, pendingAutoTags };
 }
 
+export function removePathEverywhere(
+  state: TagsState,
+  path: string,
+): TagsState {
+  const key = normalizePathKey(path);
+  const pathToTagIds: Record<string, string[]> = { ...state.pathToTagIds };
+  for (const existingPath of Object.keys(pathToTagIds)) {
+    if (normalizePathKey(existingPath) === key) {
+      delete pathToTagIds[existingPath];
+    }
+  }
+
+  const pendingAutoTags: Record<string, string[]> = {
+    ...state.pendingAutoTags,
+  };
+  for (const existingPath of Object.keys(pendingAutoTags)) {
+    if (normalizePathKey(existingPath) === key) {
+      delete pendingAutoTags[existingPath];
+    }
+  }
+
+  return { ...state, pathToTagIds, pendingAutoTags };
+}
+
 /** Remove stored tag mappings for paths under an include root (vectors were deleted for those files). */
-export function removePathMappingsUnderRoot(state: TagsState, includeRoot: string): TagsState {
+export function removePathMappingsUnderRoot(
+  state: TagsState,
+  includeRoot: string,
+): TagsState {
   const root = normalizePathForMatch(includeRoot);
   if (!root) return state;
 
@@ -162,7 +185,9 @@ export function removePathMappingsUnderRoot(state: TagsState, includeRoot: strin
     if (under(p)) delete pathToTagIds[p];
   }
 
-  const pendingAutoTags: Record<string, string[]> = { ...state.pendingAutoTags };
+  const pendingAutoTags: Record<string, string[]> = {
+    ...state.pendingAutoTags,
+  };
   for (const p of Object.keys(pendingAutoTags)) {
     if (under(p)) delete pendingAutoTags[p];
   }
@@ -170,7 +195,11 @@ export function removePathMappingsUnderRoot(state: TagsState, includeRoot: strin
   return { ...state, pathToTagIds, pendingAutoTags };
 }
 
-export function mergePendingAutoTag(state: TagsState, path: string, tagId: string): TagsState {
+function mergePendingAutoTag(
+  state: TagsState,
+  path: string,
+  tagId: string,
+): TagsState {
   const k = normalizePathKey(path);
   const cur = new Set(pendingTagIdsForPath(state, path));
   cur.add(tagId);
@@ -180,12 +209,6 @@ export function mergePendingAutoTag(state: TagsState, path: string, tagId: strin
   }
   next[k] = [...cur];
   return { ...state, pendingAutoTags: next };
-}
-
-export function addPendingAutoTag(state: TagsState, path: string, tagId: string): TagsState {
-  const newState = mergePendingAutoTag(state, path, tagId);
-  saveTagsState(newState);
-  return newState;
 }
 
 export function mergePendingAutoTagBatch(
@@ -208,7 +231,11 @@ export function countPendingSuggestionPairs(state: TagsState): number {
   return n;
 }
 
-export function acceptPendingAutoTag(state: TagsState, path: string, tagId: string): TagsState {
+export function acceptPendingAutoTag(
+  state: TagsState,
+  path: string,
+  tagId: string,
+): TagsState {
   const k = normalizePathKey(path);
   const curPending = new Set(pendingTagIdsForPath(state, path));
   curPending.delete(tagId);
@@ -231,7 +258,11 @@ export function acceptPendingAutoTag(state: TagsState, path: string, tagId: stri
   return { ...state, pendingAutoTags: nextPending, pathToTagIds: nextIds };
 }
 
-export function rejectPendingAutoTag(state: TagsState, path: string, tagId: string): TagsState {
+export function rejectPendingAutoTag(
+  state: TagsState,
+  path: string,
+  tagId: string,
+): TagsState {
   const k = normalizePathKey(path);
   const curPending = new Set(pendingTagIdsForPath(state, path));
   curPending.delete(tagId);
@@ -246,21 +277,10 @@ export function rejectPendingAutoTag(state: TagsState, path: string, tagId: stri
   return { ...state, pendingAutoTags: nextPending };
 }
 
-export function acceptAllPendingAutoTags(state: TagsState): TagsState {
-  let nextState = state;
-  for (const [path, tagIds] of Object.entries(state.pendingAutoTags)) {
-    for (const tagId of tagIds) {
-      nextState = acceptPendingAutoTag(nextState, path, tagId);
-    }
-  }
-  return nextState;
-}
-
-export function rejectAllPendingAutoTags(state: TagsState): TagsState {
-  return { ...state, pendingAutoTags: {} };
-}
-
-export function acceptAllPendingForTag(state: TagsState, tagId: string): TagsState {
+export function acceptAllPendingForTag(
+  state: TagsState,
+  tagId: string,
+): TagsState {
   let nextState = state;
   const paths = Object.keys(state.pendingAutoTags).filter((p) =>
     state.pendingAutoTags[p]?.includes(tagId),
@@ -271,7 +291,10 @@ export function acceptAllPendingForTag(state: TagsState, tagId: string): TagsSta
   return nextState;
 }
 
-export function rejectAllPendingForTag(state: TagsState, tagId: string): TagsState {
+export function rejectAllPendingForTag(
+  state: TagsState,
+  tagId: string,
+): TagsState {
   const nextPending = { ...state.pendingAutoTags };
   for (const path of Object.keys(nextPending)) {
     const ids = nextPending[path];

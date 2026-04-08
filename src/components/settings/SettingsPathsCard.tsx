@@ -1,11 +1,6 @@
 import { FolderPlus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
@@ -14,8 +9,8 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { formatPathForDisplay } from "@/lib/pathDisplay";
 import { collapseIncludeFolders, type LocalConfig } from "@/lib/localConfig";
+import { formatPathForDisplay } from "@/lib/pathDisplay";
 
 export function SettingsPathsCard({
   cfg,
@@ -37,7 +32,7 @@ export function SettingsPathsCard({
   return (
     <Card size="sm" className="shadow-xs">
       <CardHeader>
-        <CardTitle>Paths</CardTitle>
+        <CardTitle className="app-section-title">Paths</CardTitle>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
         <div className="flex flex-col gap-2">
@@ -75,7 +70,7 @@ export function SettingsPathsCard({
                   key={p}
                   className="flex items-center justify-between gap-2 text-sm"
                 >
-                  <div className="min-w-0 flex-1 truncate rounded-md bg-muted px-2 py-1.5 font-mono text-xs text-foreground">
+                  <div className="min-w-0 flex-1 truncate rounded-lg border border-border/70 bg-muted/15 px-2.5 py-1.5 font-mono text-xs text-muted-foreground">
                     {formatPathForDisplay(p, homePath)}
                   </div>
                   <Tooltip>
@@ -83,7 +78,7 @@ export function SettingsPathsCard({
                       <Button
                         variant="ghost"
                         size="icon-sm"
-                        className="shrink-0 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                        className="shrink-0 text-muted-foreground hover:bg-muted hover:text-foreground"
                         aria-label={`Remove include folder ${formatPathForDisplay(p, homePath)}`}
                         onClick={() => {
                           prepareRemoveIncludeFolder(p);
@@ -136,7 +131,7 @@ export function SettingsPathsCard({
                   key={p}
                   className="flex items-center justify-between gap-2 text-sm"
                 >
-                  <div className="min-w-0 flex-1 truncate rounded-md bg-muted px-2 py-1.5 font-mono text-xs text-foreground">
+                  <div className="min-w-0 flex-1 truncate rounded-lg border border-border/70 bg-muted/15 px-2.5 py-1.5 font-mono text-xs text-muted-foreground">
                     {formatPathForDisplay(p, homePath)}
                   </div>
                   <Tooltip>
@@ -144,7 +139,7 @@ export function SettingsPathsCard({
                       <Button
                         variant="ghost"
                         size="icon-sm"
-                        className="shrink-0 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                        className="shrink-0 text-muted-foreground hover:bg-muted hover:text-foreground"
                         aria-label={`Remove exclude folder ${formatPathForDisplay(p, homePath)}`}
                         onClick={() =>
                           updateConfig({

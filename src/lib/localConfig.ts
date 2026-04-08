@@ -3,7 +3,7 @@ export type SupportedExt = string;
 /** Maps to max JPEG edge + quality sent to Gemini for images (embed + OCR). */
 export type EmbeddingImagePreset = "fast" | "balanced" | "highQuality";
 
-export type VisionRasterOptionsPayload = {
+type VisionRasterOptionsPayload = {
   maxEdgePx: number;
   jpegQuality: number;
 };
@@ -24,13 +24,14 @@ export type LocalConfig = {
   embeddingImagePreset: EmbeddingImagePreset;
 };
 
-const KEY = "manifold:config:v1";
-
 function normalizeFolderPath(value: string): string {
   return value.trim().replace(/\\/g, "/").replace(/\/+$/, "");
 }
 
-function isSameOrParentPath(candidateParent: string, candidateChild: string): boolean {
+function isSameOrParentPath(
+  candidateParent: string,
+  candidateChild: string,
+): boolean {
   const parent = normalizeFolderPath(candidateParent).toLowerCase();
   const child = normalizeFolderPath(candidateChild).toLowerCase();
   if (!parent || !child) return false;
@@ -82,7 +83,7 @@ export function embeddingImageRasterOptions(
   return EMBEDDING_IMAGE_PRESETS[preset];
 }
 
-function defaultConfig(): LocalConfig {
+export function createDefaultLocalConfig(): LocalConfig {
   return {
     sourceId: crypto.randomUUID(),
     include: [],
@@ -94,73 +95,51 @@ function defaultConfig(): LocalConfig {
     topK: 10,
     showSimilarityOnHover: true,
     autoTaggingEnabled: true,
-    embeddingImagePreset: "balanced",
+    embeddingImagePreset: "fast",
   };
 }
 
-export function loadConfig(): LocalConfig {
-  const raw = localStorage.getItem(KEY);
-  if (!raw) {
-    const cfg = defaultConfig();
-    saveConfig(cfg);
-    return cfg;
-  }
-  try {
-    const parsed = JSON.parse(raw) as Partial<LocalConfig>;
-    const cfg: LocalConfig = {
-      ...defaultConfig(),
-      ...parsed,
-      sourceId: parsed.sourceId ?? crypto.randomUUID(),
-      include: collapseIncludeFolders(parsed.include ?? []),
-      exclude: parsed.exclude ?? [],
-      useDefaultFolderExcludes:
-        typeof parsed.useDefaultFolderExcludes === "boolean"
-          ? parsed.useDefaultFolderExcludes
-          : defaultConfig().useDefaultFolderExcludes,
-      extensions: (parsed.extensions as SupportedExt[] | undefined) ?? defaultConfig().extensions,
-      scoreThreshold:
-        typeof parsed.scoreThreshold === "number"
-          ? Math.max(0, Math.min(1, parsed.scoreThreshold))
-          : defaultConfig().scoreThreshold,
-      searchMode:
-        parsed.searchMode === "scoreThreshold" || parsed.searchMode === "topK"
-          ? parsed.searchMode
-          : defaultConfig().searchMode,
-      topK:
-        typeof parsed.topK === "number"
-          ? Math.max(1, Math.min(256, Math.floor(parsed.topK)))
-          : defaultConfig().topK,
-      showSimilarityOnHover:
-        typeof parsed.showSimilarityOnHover === "boolean"
-          ? parsed.showSimilarityOnHover
-          : defaultConfig().showSimilarityOnHover,
-      autoTaggingEnabled:
-        typeof parsed.autoTaggingEnabled === "boolean"
-          ? parsed.autoTaggingEnabled
-          : defaultConfig().autoTaggingEnabled,
-      embeddingImagePreset:
-        parsed.embeddingImagePreset === "fast" ||
-        parsed.embeddingImagePreset === "balanced" ||
-        parsed.embeddingImagePreset === "highQuality"
-          ? parsed.embeddingImagePreset
-          : defaultConfig().embeddingImagePreset,
-    };
-    saveConfig(cfg);
-    return cfg;
-  } catch {
-    const cfg = defaultConfig();
-    saveConfig(cfg);
-    return cfg;
-  }
+export function normalizeLocalConfig(
+  parsed?: Partial<LocalConfig>,
+): LocalConfig {
+  const defaults = createDefaultLocalConfig();
+  return {
+    ...defaults,
+    ...parsed,
+    sourceId: parsed?.sourceId ?? crypto.randomUUID(),
+    include: collapseIncludeFolders(parsed?.include ?? []),
+    exclude: parsed?.exclude ?? [],
+    useDefaultFolderExcludes:
+      typeof parsed?.useDefaultFolderExcludes === "boolean"
+        ? parsed.useDefaultFolderExcludes
+        : defaults.useDefaultFolderExcludes,
+    extensions:
+      (parsed?.extensions as SupportedExt[] | undefined) ?? defaults.extensions,
+    scoreThreshold:
+      typeof parsed?.scoreThreshold === "number"
+        ? Math.max(0, Math.min(1, parsed.scoreThreshold))
+        : defaults.scoreThreshold,
+    searchMode:
+      parsed?.searchMode === "scoreThreshold" || parsed?.searchMode === "topK"
+        ? parsed.searchMode
+        : defaults.searchMode,
+    topK:
+      typeof parsed?.topK === "number"
+        ? Math.max(1, Math.min(256, Math.floor(parsed.topK)))
+        : defaults.topK,
+    showSimilarityOnHover:
+      typeof parsed?.showSimilarityOnHover === "boolean"
+        ? parsed.showSimilarityOnHover
+        : defaults.showSimilarityOnHover,
+    autoTaggingEnabled:
+      typeof parsed?.autoTaggingEnabled === "boolean"
+        ? parsed.autoTaggingEnabled
+        : defaults.autoTaggingEnabled,
+    embeddingImagePreset:
+      parsed?.embeddingImagePreset === "fast" ||
+      parsed?.embeddingImagePreset === "balanced" ||
+      parsed?.embeddingImagePreset === "highQuality"
+        ? parsed.embeddingImagePreset
+        : defaults.embeddingImagePreset,
+  };
 }
-
-export function saveConfig(cfg: LocalConfig) {
-  localStorage.setItem(
-    KEY,
-    JSON.stringify({
-      ...cfg,
-      include: collapseIncludeFolders(cfg.include),
-    }),
-  );
-}
-

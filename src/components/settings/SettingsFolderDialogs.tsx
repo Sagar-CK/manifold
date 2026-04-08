@@ -69,7 +69,7 @@ export function SettingsFolderDialogs({
               Add folder
             </AlertDialogTitle>
             <AlertDialogDescription asChild>
-              <div className="space-y-3 text-muted-foreground">
+              <div className="flex flex-col gap-3 text-muted-foreground">
                 <p className="tabular-nums">
                   {addIncludeLoading
                     ? "Counting files…"
@@ -115,8 +115,9 @@ export function SettingsFolderDialogs({
                     ) : null}
                   </div>
                 ) : null}
-                <p className="text-sm text-amber-900/80">
-                  Bigger folders take longer and tend to use more provider quota.
+                <p className="text-sm text-muted-foreground">
+                  Bigger folders take longer and tend to use more provider
+                  quota.
                 </p>
               </div>
             </AlertDialogDescription>
@@ -166,9 +167,9 @@ export function SettingsFolderDialogs({
               Remove this include folder and its vectors?
             </AlertDialogTitle>
             <AlertDialogDescription>
-              This removes the folder from your include paths and deletes indexed
-              vectors for files in that folder. Your files on disk are not
-              deleted.
+              This removes the folder from your include paths and deletes
+              indexed vectors for files in that folder. Your files on disk are
+              not deleted.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <ErrorMessage

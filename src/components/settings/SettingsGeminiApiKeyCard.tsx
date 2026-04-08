@@ -1,27 +1,21 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { Pencil, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ErrorMessage } from "@/components/ErrorMessage";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import {
+  clearStoredGeminiApiKey,
+  type GeminiApiKeyStatus,
+  geminiApiKeyStatus,
+  saveGeminiApiKey,
+} from "@/lib/api/tauri";
 import { invokeErrorText } from "@/lib/errors";
-
-type GeminiApiKeySource = "environment" | "appStorage" | "none";
-
-type GeminiApiKeyStatus = {
-  configured: boolean;
-  source: GeminiApiKeySource;
-};
 
 export function SettingsGeminiApiKeyCard({
   onSaved,
@@ -39,8 +33,7 @@ export function SettingsGeminiApiKeyCard({
 
   const refreshStatus = useCallback(async () => {
     try {
-      const s = await invoke<GeminiApiKeyStatus>("gemini_api_key_status");
-      setStatus(s);
+      setStatus(await geminiApiKeyStatus());
     } catch (e) {
       setError(invokeErrorText(e));
     }
@@ -53,16 +46,13 @@ export function SettingsGeminiApiKeyCard({
   useEffect(() => {
     if (status === null || bootstrappedEditing.current) return;
     bootstrappedEditing.current = true;
-    const hasKey =
-      status.configured && status.source !== "none";
+    const hasKey = status.configured && status.source !== "none";
     setEditing(!hasKey);
   }, [status]);
 
   useEffect(() => {
     if (editing) {
-      queueMicrotask(() =>
-        document.getElementById("gemini-api-key")?.focus()
-      );
+      queueMicrotask(() => document.getElementById("gemini-api-key")?.focus());
     }
   }, [editing]);
 
@@ -72,9 +62,7 @@ export function SettingsGeminiApiKeyCard({
     setError(null);
     setBusy(true);
     try {
-      await invoke("save_gemini_api_key", {
-        args: { apiKey: key },
-      });
+      await saveGeminiApiKey(key);
       setDraft("");
       setEditing(false);
       await refreshStatus();
@@ -89,8 +77,7 @@ export function SettingsGeminiApiKeyCard({
   function handleCancelEdit() {
     setDraft("");
     setError(null);
-    const hasKey =
-      status?.configured && status.source !== "none";
+    const hasKey = status?.configured && status.source !== "none";
     setEditing(!hasKey);
   }
 
@@ -98,7 +85,7 @@ export function SettingsGeminiApiKeyCard({
     setError(null);
     setBusy(true);
     try {
-      await invoke("clear_stored_gemini_api_key");
+      await clearStoredGeminiApiKey();
       setDraft("");
       setEditing(true);
       await refreshStatus();
@@ -110,14 +97,13 @@ export function SettingsGeminiApiKeyCard({
     }
   }
 
-  const hasConfiguredKey =
-    status?.configured && status.source !== "none";
+  const hasConfiguredKey = status?.configured && status.source !== "none";
   const canRemoveStored = status?.source === "appStorage";
 
   return (
     <Card size="sm" className="shadow-xs">
       <CardHeader className="pb-2">
-        <CardTitle className="text-base leading-none">Gemini API Key</CardTitle>
+        <CardTitle className="app-section-title">Gemini API Key</CardTitle>
       </CardHeader>
       <CardContent className="flex flex-col gap-3 pt-0">
         {editing ? (
@@ -167,7 +153,7 @@ export function SettingsGeminiApiKeyCard({
           </div>
         ) : hasConfiguredKey ? (
           <div className="flex min-w-0 items-center gap-1">
-            <div className="min-w-0 flex-1 truncate rounded-md bg-muted px-2 py-1.5 font-mono text-xs text-foreground">
+            <div className="min-w-0 flex-1 truncate rounded-lg border border-border/70 bg-muted/15 px-2.5 py-1.5 font-mono text-xs text-muted-foreground">
               {status?.source === "environment"
                 ? "Using key from environment"
                 : "••••••••••••••••"}
@@ -230,11 +216,7 @@ export function SettingsGeminiApiKeyCard({
             </Tooltip>
           </div>
         )}
-        {error ? (
-          <p className="text-sm text-destructive" role="alert">
-            {error}
-          </p>
-        ) : null}
+        <ErrorMessage message={error} />
       </CardContent>
     </Card>
   );

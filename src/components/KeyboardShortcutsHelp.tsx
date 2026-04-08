@@ -1,8 +1,7 @@
-import { useMemo, type ReactNode } from "react";
 import { CircleHelp } from "lucide-react";
+import { Fragment, type ReactNode, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { Kbd, KbdGroup } from "@/components/ui/kbd";
-import { cn } from "@/lib/utils";
 import {
   Popover,
   PopoverContent,
@@ -10,20 +9,34 @@ import {
   PopoverTitle,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import {
+  CONTEXT_SHORTCUTS,
+  GLOBAL_SHORTCUTS,
+  type ShortcutDefinition,
+} from "@/lib/appShortcuts";
+import { cn } from "@/lib/utils";
 
 function modKeyLabel() {
   if (typeof navigator === "undefined") return "Ctrl";
   return /Mac|iPhone|iPad|iPod/.test(navigator.platform) ? "⌘" : "Ctrl";
 }
 
-function ShortcutLine({ shortcut, explanation }: { shortcut: ReactNode; explanation: string }) {
+function ShortcutLine({
+  shortcut,
+  explanation,
+}: {
+  shortcut: ReactNode;
+  explanation: string;
+}) {
   return (
     <div className="flex items-start justify-between gap-3 text-sm">
-      <span className="min-w-0 flex-1 leading-snug text-foreground">{explanation}</span>
+      <span className="min-w-0 flex-1 leading-snug text-foreground">
+        {explanation}
+      </span>
       <div
         className={cn(
-          "mt-0.5 inline-flex shrink-0 items-center gap-1 rounded-md border border-border/60 bg-muted/60 px-2 py-1",
-          "[&_kbd[data-slot=kbd]]:bg-transparent"
+          "mt-0.5 inline-flex shrink-0 items-center gap-1 rounded-md border border-border/60 bg-muted/35 px-2 py-1",
+          "[&_kbd[data-slot=kbd]]:bg-transparent",
         )}
       >
         {shortcut}
@@ -32,22 +45,51 @@ function ShortcutLine({ shortcut, explanation }: { shortcut: ReactNode; explanat
   );
 }
 
-export function KeyboardShortcutsHelp() {
+function renderShortcut(
+  definition: ShortcutDefinition,
+  modLabel: string,
+): ReactNode {
+  return (
+    <KbdGroup>
+      {definition.keys.map((key, index) => (
+        <Fragment key={`${definition.explanation}-${key}-${index}`}>
+          {index > 0 ? (
+            <span className="text-muted-foreground" aria-hidden>
+              +
+            </span>
+          ) : null}
+          <Kbd>{key === "mod" ? modLabel : key}</Kbd>
+        </Fragment>
+      ))}
+    </KbdGroup>
+  );
+}
+
+export function KeyboardShortcutsHelp({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
   const mod = useMemo(() => modKeyLabel(), []);
 
   return (
     <div className="pointer-events-none fixed bottom-6 right-6 z-40">
       <div className="pointer-events-auto">
-        <Popover>
+        <Popover open={open} onOpenChange={onOpenChange}>
           <PopoverTrigger asChild>
             <Button
               type="button"
               variant="outline"
               size="icon"
-              className="h-11 w-11 rounded-full border-border bg-card/90 shadow-md backdrop-blur-sm hover:bg-muted"
+              className="h-11 w-11 rounded-full border-border/70 bg-background/85 shadow-xs backdrop-blur-sm hover:bg-muted/50"
               aria-label="Keyboard shortcuts"
             >
-              <CircleHelp className="h-5 w-5 text-muted-foreground" aria-hidden />
+              <CircleHelp
+                className="h-5 w-5 text-muted-foreground"
+                aria-hidden
+              />
             </Button>
           </PopoverTrigger>
           <PopoverContent
@@ -59,23 +101,32 @@ export function KeyboardShortcutsHelp() {
             <PopoverHeader className="gap-0">
               <PopoverTitle>Shortcuts</PopoverTitle>
             </PopoverHeader>
-            <div className="flex flex-col gap-2.5">
-              <ShortcutLine
-                shortcut={
-                  <KbdGroup>
-                    <Kbd>{mod}</Kbd>
-                    <span className="text-muted-foreground" aria-hidden>
-                      +
-                    </span>
-                    <Kbd>Click</Kbd>
-                  </KbdGroup>
-                }
-                explanation="Open file in default app"
-              />
-              <ShortcutLine shortcut={<Kbd>Esc</Kbd>} explanation="Close dialog" />
-              <ShortcutLine shortcut={<Kbd>Double-click</Kbd>} explanation="Open file detail" />
-              <ShortcutLine shortcut={<Kbd>Scroll wheel</Kbd>} explanation="Zoom" />
-              <ShortcutLine shortcut={<Kbd>Drag</Kbd>} explanation="Pan" />
+            <div className="flex flex-col gap-3">
+              <div className="flex flex-col gap-2.5">
+                <div className="text-[11px] font-medium tracking-[0.18em] text-muted-foreground uppercase">
+                  Global
+                </div>
+                {GLOBAL_SHORTCUTS.map((definition) => (
+                  <ShortcutLine
+                    key={definition.explanation}
+                    shortcut={renderShortcut(definition, mod)}
+                    explanation={definition.explanation}
+                  />
+                ))}
+              </div>
+              <div className="h-px bg-border/70" />
+              <div className="flex flex-col gap-2.5">
+                <div className="text-[11px] font-medium tracking-[0.18em] text-muted-foreground uppercase">
+                  In context
+                </div>
+                {CONTEXT_SHORTCUTS.map((definition) => (
+                  <ShortcutLine
+                    key={definition.explanation}
+                    shortcut={renderShortcut(definition, mod)}
+                    explanation={definition.explanation}
+                  />
+                ))}
+              </div>
             </div>
           </PopoverContent>
         </Popover>
