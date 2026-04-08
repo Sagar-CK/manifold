@@ -150,4 +150,4 @@ Artifacts: `src-tauri/target/release/bundle/`. GitHub Actions (`.github/workflow
 
 - Clearing the index removes **vectors and index data**, not files on disk.
 - Binary provenance and licensing: `**docs/runtime-binaries.md`**.
-- Current macOS FFmpeg upstream artifacts are `x86_64`; Apple Silicon users can override them with `MANIFOLD_FFMPEG_BIN_DIR` if they need a native build.
+- Apple Silicon builds bundle native arm64 FFmpeg artifacts. `MANIFOLD_FFMPEG_BIN_DIR` still works as an override when you want to supply your own binaries.

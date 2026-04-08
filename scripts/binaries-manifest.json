@@ -21,8 +21,8 @@
       "ffmpeg": {
         "artifacts": [
           {
-            "archiveUrl": "https://deolaha.ca/ffmpeg/ffmpeg-8.1.zip",
-            "archiveSha256": "d67db25908eff64b7d0eaa73784f0c55728d9e036a96931095fcf8e8968eefab",
+            "archiveUrl": "https://ffmpeg.martin-riedl.de/download/macos/arm64/1774549676_8.1/ffmpeg.zip",
+            "archiveSha256": "cc3a7e0cce36c5eca6c17eeb93830984c657637a8e710dc98f19c8051201fa3a",
             "archiveType": "zip",
             "outputs": [
               {
@@ -32,8 +32,8 @@
             ]
           },
           {
-            "archiveUrl": "https://deolaha.ca/ffmpeg/ffprobe-8.1.zip",
-            "archiveSha256": "b6e9bf4f4ab2992dace205498d99d9e2ede684e3e8ae89485cadd3b91711ea04",
+            "archiveUrl": "https://ffmpeg.martin-riedl.de/download/macos/arm64/1774549676_8.1/ffprobe.zip",
+            "archiveSha256": "fd2e6b7fad9c9aa2bec17c0d7211b5afcc00b4b5c9b63c120985e80c3c198af6",
             "archiveType": "zip",
             "outputs": [
               {

@@ -20,12 +20,11 @@ The manifest pins versioned release URLs by platform:
 - `linux-x64`
 - `win32-x64`
 
-FFmpeg providers are pinned from sources linked from the official FFmpeg download page:
+FFmpeg providers are pinned per macOS architecture and platform:
 
-- macOS: Evermeet (`ffmpeg` and `ffprobe` zip artifacts)
+- macOS arm64: Martin Riedl FFmpeg Build Server (`ffmpeg` and `ffprobe` zip artifacts)
+- macOS x64: Evermeet (`ffmpeg` and `ffprobe` zip artifacts)
 - Linux / Windows: BtbN FFmpeg Builds (LGPL archives)
-
-Current macOS upstream artifacts are `x86_64`; the manifest uses those for both macOS targets until an officially linked arm64 build source is available. On Apple Silicon, `MANIFOLD_FFMPEG_BIN_DIR` can override the bundled binaries if needed.
 
 ## Verification model
 
