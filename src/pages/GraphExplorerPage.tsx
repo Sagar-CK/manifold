@@ -1,7 +1,10 @@
+import { ArrowLeft, CircleHelp } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { invoke } from "@tauri-apps/api/core";
-import { ArrowLeft } from "lucide-react";
+import { ErrorMessage } from "@/components/ErrorMessage";
+import { PageHeader } from "@/components/PageHeader";
+import { TagFilterPill } from "@/components/TagFilterPill";
+import { Button } from "@/components/ui/button";
 import {
   Combobox,
   ComboboxContent,
@@ -9,29 +12,48 @@ import {
   ComboboxItem,
   ComboboxList,
 } from "@/components/ui/combobox";
-import { Button } from "@/components/ui/button";
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyTitle,
+} from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { TagFilterPill } from "@/components/TagFilterPill";
-import { ErrorMessage } from "@/components/ErrorMessage";
-import { PageHeader } from "@/components/PageHeader";
 import { Spinner } from "@/components/ui/spinner";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { qdrantScrollGraph } from "@/lib/api/tauri";
 import { invokeErrorText } from "@/lib/errors";
-import { navigateBackOrFallback } from "@/lib/navigateBack";
-import type { LocalConfig } from "@/lib/localConfig";
-import { runGraphLayout, type GraphLayoutAlgorithm } from "@/lib/graphLayout";
+import {
+  adjustPanForZoomAtScreenPoint,
+  buildSpatialGrid,
+  buildThumbnailDemand,
+  buildViewportMetrics,
+  chooseGraphLodMode,
+  collectVisibleGraphPoints,
+  type GraphLodMode,
+} from "@/lib/graphExplorerRendering";
+import { type GraphLayoutAlgorithm, runGraphLayout } from "@/lib/graphLayout";
 import { graphPerfMark, graphPerfSessionStart } from "@/lib/graphPerfDebug";
-import { decodePackedF32Base64 } from "@/lib/packedEmbeddings";
-import { loadTagsState } from "@/lib/tags";
+import type { LocalConfig } from "@/lib/localConfig";
+import { navigateBackOrFallback } from "@/lib/navigateBack";
+import { pruneIndexedPathIfMissing } from "@/lib/staleIndexedPaths";
 import { useTagsState } from "@/lib/useTagsState";
-import { isPreviewablePath, useThumbnailsForPaths } from "@/lib/useThumbnailsForPaths";
+import {
+  isPreviewablePath,
+  useThumbnailsForPaths,
+} from "@/lib/useThumbnailsForPaths";
 
 type ContentPoint = {
   path: string;
   contentHash: string;
-  embedding: number[];
   tagIds: string[];
+  previewable: boolean;
+  fallbackLabel: string;
 };
 
 type LayoutPoint = ContentPoint & {
@@ -39,25 +61,37 @@ type LayoutPoint = ContentPoint & {
   ny: number;
 };
 
+type ThumbnailDemandState = {
+  requestedPaths: string[];
+  priorityPaths: string[];
+  lodMode: GraphLodMode;
+  visiblePointCount: number;
+};
+
 const THUMB = 22;
 const MARGIN = 28;
-const GRAPH_THUMB_MAX_EDGE = 28;
+const GRAPH_THUMB_MAX_EDGE = 64;
 const GRID_DIM = 32;
 const MAX_CANVAS_DPR = 2;
 const GRAPH_THUMB_CONCURRENCY = 2;
 const DEFAULT_LIMIT = 500;
-/** Debounce limit input so typing does not refetch on every keystroke. */
 const LIMIT_DEBOUNCE_MS = 350;
 const HARD_WARN = 2000;
-/** Ring color when point has no tag ids or no matching TagDef */
 const UNTAGGED_RING = "#94a3b8";
-/** Max visible slices on the tag ring; beyond this, last slice is `RING_OVERFLOW_COLOR`. */
 const RING_MAX_SEGMENTS = 4;
-/** Muted slice when a point has more tagged colors than `RING_MAX_SEGMENTS - 1`. */
 const RING_OVERFLOW_COLOR = "#78716c";
-/** Radians of gap between ring segments (readability at small thumbnails). */
+const SELECTED_RING = "#71717a";
 const RING_GAP_RAD = 0.1;
 const LOADING_FILL = "#e4e4e7";
+const PLACEHOLDER_FILL = "#f4f4f5";
+const FAILED_FILL = "#d4d4d8";
+const MARKER_FILL = "#94a3b8";
+const GRAPH_SPRITE_EDGE = 64;
+const THUMB_DRAW_MIN_MS = 100;
+const THUMBNAIL_DEMAND_REFRESH_MS = 120;
+const MIN_GRAPH_SCALE = 0.25;
+const MAX_GRAPH_SCALE = 12;
+const GRAPH_NODE_GROWTH_EXPONENT = 0.5;
 
 const ALGORITHM_OPTIONS = [
   { value: "pca" as const, label: "PCA" },
@@ -72,84 +106,8 @@ function parseLimitInput(raw: string): number {
   return Math.max(1, Math.min(5000, n));
 }
 
-function normalizeCoords(x: ArrayLike<number>, y: ArrayLike<number>): { nx: number[]; ny: number[] } {
-  const len = x.length;
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-  for (let i = 0; i < len; i++) {
-    minX = Math.min(minX, x[i]!);
-    minY = Math.min(minY, y[i]!);
-    maxX = Math.max(maxX, x[i]!);
-    maxY = Math.max(maxY, y[i]!);
-  }
-  const w = maxX - minX || 1;
-  const h = maxY - minY || 1;
-  const pad = 0.06;
-  const nx: number[] = new Array(len);
-  const ny: number[] = new Array(len);
-  for (let i = 0; i < len; i++) {
-    nx[i] = pad + (1 - 2 * pad) * ((x[i]! - minX) / w);
-    ny[i] = pad + (1 - 2 * pad) * ((y[i]! - minY) / h);
-  }
-  return { nx, ny };
-}
-
-function buildSpatialGrid(points: LayoutPoint[], dim: number): number[][] {
-  const cells: number[][] = Array.from({ length: dim * dim }, () => []);
-  for (let i = 0; i < points.length; i++) {
-    const p = points[i]!;
-    const gx = Math.min(dim - 1, Math.max(0, Math.floor(p.nx * dim)));
-    const gy = Math.min(dim - 1, Math.max(0, Math.floor(p.ny * dim)));
-    cells[gx + gy * dim]!.push(i);
-  }
-  return cells;
-}
-
-function normalizedVisibleBounds(
-  cw: number,
-  ch: number,
-  innerW: number,
-  innerH: number,
-  cx: number,
-  cy: number,
-  panX: number,
-  panY: number,
-  sc: number,
-  padPx: number,
-): { nx0: number; nx1: number; ny0: number; ny1: number } {
-  const nxAt = (tsx: number) => ((tsx - cx - panX) / sc + cx - MARGIN) / innerW;
-  const nyAt = (tsy: number) => ((tsy - cy - panY) / sc + cy - MARGIN) / innerH;
-  const nxLo = Math.min(nxAt(-padPx), nxAt(cw + padPx));
-  const nxHi = Math.max(nxAt(-padPx), nxAt(cw + padPx));
-  const nyLo = Math.min(nyAt(-padPx), nyAt(ch + padPx));
-  const nyHi = Math.max(nyAt(-padPx), nyAt(ch + padPx));
-  const padN = 0.04;
-  return {
-    nx0: Math.max(0, nxLo - padN),
-    nx1: Math.min(1, nxHi + padN),
-    ny0: Math.max(0, nyLo - padN),
-    ny1: Math.min(1, nyHi + padN),
-  };
-}
-
-function collectVisibleIndices(
-  bounds: { nx0: number; nx1: number; ny0: number; ny1: number },
-  gridIndex: number[][],
-  dim: number,
-): number[] {
-  const gx0 = Math.max(0, Math.floor(bounds.nx0 * dim));
-  const gx1 = Math.min(dim - 1, Math.floor(bounds.nx1 * dim));
-  const gy0 = Math.max(0, Math.floor(bounds.ny0 * dim));
-  const gy1 = Math.min(dim - 1, Math.floor(bounds.ny1 * dim));
-  const out: number[] = [];
-  for (let gy = gy0; gy <= gy1; gy++) {
-    for (let gx = gx0; gx <= gx1; gx++) {
-      out.push(...gridIndex[gx + gy * dim]!);
-    }
-  }
-  return out;
+function fallbackLabelForPath(path: string): string {
+  return path.split(".").pop()?.slice(0, 4).toUpperCase() ?? "";
 }
 
 function strokeSegmentedTagRing(
@@ -199,31 +157,126 @@ function strokeSegmentedTagRing(
   }
 }
 
+function createSpriteCanvas(
+  draw: (ctx: CanvasRenderingContext2D, size: number) => void,
+): HTMLCanvasElement {
+  const canvas = document.createElement("canvas");
+  canvas.width = GRAPH_SPRITE_EDGE;
+  canvas.height = GRAPH_SPRITE_EDGE;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return canvas;
+  draw(ctx, GRAPH_SPRITE_EDGE);
+  return canvas;
+}
+
+function createThumbnailSprite(img: CanvasImageSource): HTMLCanvasElement {
+  return createSpriteCanvas((ctx, size) => {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(size / 2, size / 2, size / 2, 0, Math.PI * 2);
+    ctx.closePath();
+    ctx.clip();
+    ctx.drawImage(img, 0, 0, size, size);
+    ctx.restore();
+  });
+}
+
+function createTextSprite(
+  fill: string,
+  label: string,
+  textColor: string,
+): HTMLCanvasElement {
+  return createSpriteCanvas((ctx, size) => {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(size / 2, size / 2, size / 2, 0, Math.PI * 2);
+    ctx.closePath();
+    ctx.clip();
+    ctx.fillStyle = fill;
+    ctx.fillRect(0, 0, size, size);
+    ctx.restore();
+    if (label.length === 0) return;
+    ctx.fillStyle = textColor;
+    ctx.font = `${Math.round(size * 0.36)}px system-ui, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(label, size / 2, size / 2);
+  });
+}
+
+function defaultThumbnailDemand(): ThumbnailDemandState {
+  return {
+    requestedPaths: [],
+    priorityPaths: [],
+    lodMode: "markers",
+    visiblePointCount: 0,
+  };
+}
+
+function graphNodeZoomFactor(scale: number): number {
+  // Grow previews more slowly than the graph itself so zoom increases separability.
+  return scale ** GRAPH_NODE_GROWTH_EXPONENT;
+}
+
+function graphNodeScreenRadius(scale: number): number {
+  return (THUMB * graphNodeZoomFactor(scale)) / 2;
+}
+
+function graphVisibilityPad(scale: number): number {
+  return graphNodeScreenRadius(scale) + 10;
+}
+
 export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
   const navigate = useNavigate();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const pointsRef = useRef<LayoutPoint[]>([]);
   const gridRef = useRef<number[][]>([]);
+  const pathSetRef = useRef<Set<string>>(new Set());
+  const viewportRef = useRef(buildViewportMetrics(0, 0, MARGIN));
   const loadGenerationRef = useRef(0);
   const graphEffectIdRef = useRef(0);
+  const drawRef = useRef<() => void>(() => {});
+  const selectedPathRef = useRef<string | null>(null);
+  const thumbnailDemandRef = useRef<ThumbnailDemandState>(
+    defaultThumbnailDemand(),
+  );
+  const lastThumbnailDemandKeyRef = useRef("");
+  const thumbnailDemandTimeoutRef = useRef<ReturnType<
+    typeof setTimeout
+  > | null>(null);
+  const spriteGenerationRef = useRef(0);
+  const drawRafRef = useRef<number | null>(null);
+  const wheelScaleRafRef = useRef<number | null>(null);
+  const thumbDrawTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const lastThumbPaintAtRef = useRef(0);
+  const firstMarkersMarkRef = useRef(false);
+  const firstThumbnailsMarkRef = useRef(false);
+  const dragActiveRef = useRef(false);
+  const dragRef = useRef<{
+    active: boolean;
+    sx: number;
+    sy: number;
+    px: number;
+    py: number;
+  } | null>(null);
+  const spriteCacheRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
+  const fallbackSpriteCacheRef = useRef<Map<string, HTMLCanvasElement>>(
+    new Map(),
+  );
 
   const [limitInput, setLimitInput] = useState(String(DEFAULT_LIMIT));
-  const [debouncedLimitInput, setDebouncedLimitInput] = useState(String(DEFAULT_LIMIT));
-  const [algorithm, setAlgorithm] = useState<GraphLayoutAlgorithm>("pca");
+  const [debouncedLimitInput, setDebouncedLimitInput] = useState(
+    String(DEFAULT_LIMIT),
+  );
+  const [selectedAlgorithm, setSelectedAlgorithm] =
+    useState<GraphLayoutAlgorithm>("pca");
+  const [activeAlgorithm, setActiveAlgorithm] =
+    useState<GraphLayoutAlgorithm>("pca");
   const [tagFilterIds, setTagFilterIds] = useState<string[]>([]);
-  const [tagsState, setTagsState] = useTagsState();
-
-  useEffect(() => {
-    function refreshTags() {
-      if (document.visibilityState === "visible") {
-        setTagsState(loadTagsState());
-      }
-    }
-    document.addEventListener("visibilitychange", refreshTags);
-    return () => document.removeEventListener("visibilitychange", refreshTags);
-  }, []);
-
+  const [tagsState] = useTagsState();
   const [points, setPoints] = useState<LayoutPoint[]>([]);
   const [pointCount, setPointCount] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
@@ -231,86 +284,183 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
   const [error, setError] = useState<string | null>(null);
   const [noResults, setNoResults] = useState(false);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
-
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [scale, setScale] = useState(1);
+  const [thumbnailDemand, setThumbnailDemand] = useState<ThumbnailDemandState>(
+    defaultThumbnailDemand(),
+  );
+  const [loadRequest, setLoadRequest] = useState<{
+    limit: number;
+    algo: GraphLayoutAlgorithm;
+    tagFilters: string[];
+  } | null>(null);
+
   const panRef = useRef(pan);
   const scaleRef = useRef(scale);
-  const dragActiveRef = useRef(false);
-  const drawRafRef = useRef<number | null>(null);
-  const wheelScaleRafRef = useRef<number | null>(null);
-  const thumbDrawTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastThumbPaintAtRef = useRef(0);
-  const dragRef = useRef<{ active: boolean; sx: number; sy: number; px: number; py: number } | null>(
-    null,
-  );
 
   pointsRef.current = points;
+  selectedPathRef.current = selectedPath;
+  thumbnailDemandRef.current = thumbnailDemand;
 
-  const pathsKey = useMemo(
-    () => points.map((p) => p.path).sort().join("\0"),
-    [points],
-  );
   const paths = useMemo(() => points.map((p) => p.path), [points]);
+  const pathsKey = useMemo(() => paths.slice().sort().join("\0"), [paths]);
+  pathSetRef.current = new Set(paths);
 
   const gridIndex = useMemo(() => buildSpatialGrid(points, GRID_DIM), [points]);
   gridRef.current = gridIndex;
 
-  const ringColorsByPath = useMemo(() => {
-    const map = new Map<string, string[]>();
-    const tagMap = new Map(tagsState.tags.map((t) => [t.id, t.color] as const));
-    for (const pt of points) {
-      const out: string[] = [];
-      for (const id of pt.tagIds) {
-        const c = tagMap.get(id);
-        if (c) out.push(c);
+  const ringColorsByIndex = useMemo(() => {
+    const tagMap = new Map(tagsState.tags.map((tag) => [tag.id, tag.color]));
+    return points.map((point) => {
+      const colors: string[] = [];
+      for (const tagId of point.tagIds) {
+        const color = tagMap.get(tagId);
+        if (color) colors.push(color);
       }
-      map.set(pt.path, out);
-    }
-    return map;
-  }, [points, tagsState]);
+      return colors;
+    });
+  }, [points, tagsState.tags]);
 
-  const legendShowsRingOverflow = useMemo(() => {
-    for (const colors of ringColorsByPath.values()) {
-      if (colors.length > RING_MAX_SEGMENTS) return true;
-    }
-    return false;
-  }, [ringColorsByPath]);
+  const requestedThumbnailPathSet = useMemo(
+    () => new Set(thumbnailDemand.requestedPaths),
+    [thumbnailDemand.requestedPaths],
+  );
 
-  const reorderPreviewPaths = useCallback((previewPaths: string[]) => {
-    const pts = pointsRef.current;
-    const grid = gridRef.current;
-    const wrap = wrapRef.current;
-    if (!wrap || pts.length === 0) return previewPaths;
-    const r = wrap.getBoundingClientRect();
-    const cw = r.width;
-    const ch = r.height;
-    const innerW = cw - 2 * MARGIN;
-    const innerH = ch - 2 * MARGIN;
-    const cx = cw / 2;
-    const cy = ch / 2;
-    const panX = panRef.current.x;
-    const panY = panRef.current.y;
-    const sc = scaleRef.current;
-    const pad = THUMB / 2 + 12;
-    const bounds = normalizedVisibleBounds(cw, ch, innerW, innerH, cx, cy, panX, panY, sc, pad);
-    const visIdx = collectVisibleIndices(bounds, grid, GRID_DIM);
-    const visible = new Set(visIdx.map((i) => pts[i]!.path));
-    const pri = previewPaths.filter((p) => visible.has(p));
-    const rest = previewPaths.filter((p) => !visible.has(p));
-    return [...pri, ...rest];
+  const { thumbByPath, thumbFailedByPath } = useThumbnailsForPaths(
+    pathsKey,
+    paths,
+    {
+      maxEdge: GRAPH_THUMB_MAX_EDGE,
+      batchUpdates: true,
+      concurrency: GRAPH_THUMB_CONCURRENCY,
+      deferStartUntilIdle: true,
+      requestedPaths: thumbnailDemand.requestedPaths,
+      priorityPaths: thumbnailDemand.priorityPaths,
+      onThumbError: (path, error) => {
+        void pruneIndexedPathIfMissing(cfg.sourceId, path, error).catch(
+          () => {},
+        );
+      },
+    },
+  );
+
+  const requestGraphLoad = useCallback(
+    (limit: number, algo: GraphLayoutAlgorithm, tagFilters: string[]) => {
+      setActiveAlgorithm(algo);
+      setLoadRequest({
+        limit,
+        algo,
+        tagFilters: [...tagFilters],
+      });
+    },
+    [],
+  );
+
+  const getFallbackSprite = useCallback(
+    (key: string, fill: string, label: string, textColor: string) => {
+      const cached = fallbackSpriteCacheRef.current.get(key);
+      if (cached) return cached;
+      const sprite = createTextSprite(fill, label, textColor);
+      fallbackSpriteCacheRef.current.set(key, sprite);
+      return sprite;
+    },
+    [],
+  );
+
+  const resolvePointSprite = useCallback(
+    (
+      point: LayoutPoint,
+      fullDetail: boolean,
+      failed: boolean,
+    ): HTMLCanvasElement => {
+      if (fullDetail) {
+        const sprite = spriteCacheRef.current.get(point.path);
+        if (sprite) return sprite;
+        if (failed) {
+          return getFallbackSprite(
+            `failed:${point.fallbackLabel}`,
+            FAILED_FILL,
+            point.fallbackLabel || "·",
+            "#71717a",
+          );
+        }
+        if (!point.previewable) {
+          return getFallbackSprite(
+            `static:${point.fallbackLabel}`,
+            PLACEHOLDER_FILL,
+            point.fallbackLabel || "·",
+            "#71717a",
+          );
+        }
+        return getFallbackSprite("loading", LOADING_FILL, "…", "#a1a1aa");
+      }
+
+      return getFallbackSprite("placeholder-neutral", PLACEHOLDER_FILL, "", "");
+    },
+    [getFallbackSprite],
+  );
+
+  const computeThumbnailDemand = useCallback((): ThumbnailDemandState => {
+    const visible = collectVisibleGraphPoints(
+      pointsRef.current,
+      gridRef.current,
+      GRID_DIM,
+      viewportRef.current,
+      panRef.current.x,
+      panRef.current.y,
+      scaleRef.current,
+      graphVisibilityPad(scaleRef.current),
+    );
+    const lodMode = chooseGraphLodMode(visible.length);
+    const demand = buildThumbnailDemand(
+      visible,
+      lodMode,
+      selectedPathRef.current,
+    );
+    return {
+      requestedPaths: demand.requestedPaths,
+      priorityPaths: demand.priorityPaths,
+      lodMode,
+      visiblePointCount: visible.length,
+    };
   }, []);
 
-  const { thumbByPath, thumbFailedByPath } = useThumbnailsForPaths(pathsKey, paths, {
-    maxEdge: GRAPH_THUMB_MAX_EDGE,
-    batchUpdates: true,
-    concurrency: GRAPH_THUMB_CONCURRENCY,
-    reorderPreviewPaths,
-    deferStartUntilIdle: true,
-  });
+  const applyThumbnailDemand = useCallback(() => {
+    const next = computeThumbnailDemand();
+    const key = [
+      next.lodMode,
+      String(next.visiblePointCount),
+      next.priorityPaths.join("\0"),
+      next.requestedPaths.join("\0"),
+    ].join("\u0001");
+    if (key === lastThumbnailDemandKeyRef.current) return;
+    lastThumbnailDemandKeyRef.current = key;
+    setThumbnailDemand(next);
+    graphPerfMark("visible_snapshot", {
+      visible_point_count: next.visiblePointCount,
+      requested_thumbnail_count: next.requestedPaths.length,
+      lod_mode: next.lodMode,
+    });
+  }, [computeThumbnailDemand]);
 
-  const imgCacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
-  const drawRef = useRef<() => void>(() => {});
+  const refreshThumbnailDemand = useCallback(
+    (immediate: boolean = false) => {
+      if (immediate) {
+        if (thumbnailDemandTimeoutRef.current != null) {
+          clearTimeout(thumbnailDemandTimeoutRef.current);
+          thumbnailDemandTimeoutRef.current = null;
+        }
+        applyThumbnailDemand();
+        return;
+      }
+      if (thumbnailDemandTimeoutRef.current != null) return;
+      thumbnailDemandTimeoutRef.current = setTimeout(() => {
+        thumbnailDemandTimeoutRef.current = null;
+        applyThumbnailDemand();
+      }, THUMBNAIL_DEMAND_REFRESH_MS);
+    },
+    [applyThumbnailDemand],
+  );
 
   useEffect(() => {
     if (!dragActiveRef.current) {
@@ -323,98 +473,140 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
   }, [scale]);
 
   useEffect(() => {
-    const set = new Set(paths);
-    for (const k of [...imgCacheRef.current.keys()]) {
-      if (!set.has(k)) imgCacheRef.current.delete(k);
+    const activePaths = new Set(paths);
+    for (const key of [...spriteCacheRef.current.keys()]) {
+      if (!activePaths.has(key)) spriteCacheRef.current.delete(key);
     }
-  }, [pathsKey, paths]);
+  }, [paths]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
-    const wrap = wrapRef.current;
-    if (!canvas || !wrap) return;
-    const r = wrap.getBoundingClientRect();
-    const cw = r.width;
-    const ch = r.height;
+    if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    const viewport = viewportRef.current;
+    if (viewport.width <= 0 || viewport.height <= 0) return;
 
-    ctx.clearRect(0, 0, cw, ch);
+    ctx.clearRect(0, 0, viewport.width, viewport.height);
 
-    const innerW = cw - 2 * MARGIN;
-    const innerH = ch - 2 * MARGIN;
-    const cx = cw / 2;
-    const cy = ch / 2;
     const panX = panRef.current.x;
     const panY = panRef.current.y;
     const sc = scaleRef.current;
-
-    const cullPad = THUMB / 2 + 10;
-    const bounds = normalizedVisibleBounds(cw, ch, innerW, innerH, cx, cy, panX, panY, sc, cullPad);
-    const vis = collectVisibleIndices(bounds, gridIndex, GRID_DIM);
+    const visible = collectVisibleGraphPoints(
+      points,
+      gridIndex,
+      GRID_DIM,
+      viewport,
+      panX,
+      panY,
+      sc,
+      graphVisibilityPad(sc),
+    );
+    const lodMode = chooseGraphLodMode(visible.length);
 
     ctx.save();
-    ctx.translate(cx + panX, cy + panY);
+    ctx.translate(viewport.cx + panX, viewport.cy + panY);
     ctx.scale(sc, sc);
-    ctx.translate(-cx, -cy);
+    ctx.translate(-viewport.cx, -viewport.cy);
 
-    const radius = THUMB / 2 / sc;
-    const size = THUMB / sc;
-    const labelPx = 8 / sc;
+    const radius = graphNodeScreenRadius(sc) / sc;
+    const size = radius * 2;
+    const markerRadius = 3 / sc;
     const tagRingExtra = 2.5 / sc;
-    for (const i of vis) {
-      const pt = points[i];
-      if (!pt) continue;
-      const px = MARGIN + pt.nx * innerW;
-      const py = MARGIN + pt.ny * innerH;
-      const tsx = (px - cx) * sc + cx + panX;
-      const tsy = (py - cy) * sc + cy + panY;
-      if (tsx < -cullPad || tsx > cw + cullPad || tsy < -cullPad || tsy > ch + cullPad) {
+    let drewAnyPoint = false;
+    let drewActualThumbnail = false;
+
+    for (const visiblePoint of visible) {
+      const point = points[visiblePoint.index];
+      if (!point) continue;
+      drewAnyPoint = true;
+      const isSelected = point.path === selectedPath;
+
+      if (lodMode === "markers" && !isSelected) {
+        ctx.fillStyle = MARKER_FILL;
+        ctx.beginPath();
+        ctx.arc(visiblePoint.px, visiblePoint.py, markerRadius, 0, Math.PI * 2);
+        ctx.fill();
         continue;
       }
 
-      const isSel = pt.path === selectedPath;
-      const img = imgCacheRef.current.get(pt.path);
-      const ringColors = ringColorsByPath.get(pt.path) ?? [];
-      strokeSegmentedTagRing(ctx, px, py, radius + tagRingExtra, sc, ringColors);
+      strokeSegmentedTagRing(
+        ctx,
+        visiblePoint.px,
+        visiblePoint.py,
+        radius + tagRingExtra,
+        sc,
+        ringColorsByIndex[visiblePoint.index] ?? [],
+      );
 
-      ctx.save();
-      ctx.beginPath();
-      ctx.arc(px, py, radius, 0, Math.PI * 2);
-      ctx.closePath();
-      ctx.clip();
-      if (img?.complete && img.naturalWidth > 0) {
-        ctx.drawImage(img, px - radius, py - radius, size, size);
-      } else if (thumbFailedByPath[pt.path] || !isPreviewablePath(pt.path)) {
-        ctx.fillStyle = thumbFailedByPath[pt.path] ? "#d4d4d8" : "#f4f4f5";
-        ctx.fillRect(px - radius, py - radius, size, size);
-        const ext = pt.path.split(".").pop()?.slice(0, 4).toUpperCase() ?? "";
-        ctx.fillStyle = "#71717a";
-        ctx.font = `${labelPx}px system-ui, sans-serif`;
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText(ext || "·", px, py);
-      } else {
-        ctx.fillStyle = LOADING_FILL;
-        ctx.fillRect(px - radius, py - radius, size, size);
-        ctx.fillStyle = "#a1a1aa";
-        ctx.font = `${labelPx}px system-ui, sans-serif`;
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText("…", px, py);
+      const hasLoadedSprite = spriteCacheRef.current.has(point.path);
+      const fullDetail =
+        hasLoadedSprite ||
+        isSelected ||
+        lodMode === "thumbnails" ||
+        (lodMode === "placeholders" &&
+          requestedThumbnailPathSet.has(point.path));
+      const sprite = resolvePointSprite(
+        point,
+        fullDetail,
+        !!thumbFailedByPath[point.path],
+      );
+      ctx.drawImage(
+        sprite,
+        visiblePoint.px - radius,
+        visiblePoint.py - radius,
+        size,
+        size,
+      );
+
+      if (hasLoadedSprite) {
+        drewActualThumbnail = true;
       }
-      ctx.restore();
-      if (isSel) {
-        ctx.strokeStyle = "rgba(239, 68, 68, 0.85)";
+
+      if (isSelected) {
+        ctx.strokeStyle = SELECTED_RING;
         ctx.lineWidth = 2.5 / sc;
         ctx.beginPath();
-        ctx.arc(px, py, radius + tagRingExtra + 2 / sc, 0, Math.PI * 2);
+        ctx.arc(
+          visiblePoint.px,
+          visiblePoint.py,
+          radius + tagRingExtra + 2 / sc,
+          0,
+          Math.PI * 2,
+        );
         ctx.stroke();
       }
     }
 
     ctx.restore();
-  }, [points, selectedPath, thumbFailedByPath, ringColorsByPath, gridIndex]);
+
+    if (!firstMarkersMarkRef.current && drewAnyPoint) {
+      firstMarkersMarkRef.current = true;
+      graphPerfMark("time_to_first_markers", {
+        visible_point_count: visible.length,
+        requested_thumbnail_count:
+          thumbnailDemandRef.current.requestedPaths.length,
+        lod_mode: lodMode,
+      });
+    }
+    if (!firstThumbnailsMarkRef.current && drewActualThumbnail) {
+      firstThumbnailsMarkRef.current = true;
+      graphPerfMark("time_to_first_thumbnails", {
+        visible_point_count: visible.length,
+        requested_thumbnail_count:
+          thumbnailDemandRef.current.requestedPaths.length,
+        lod_mode: lodMode,
+      });
+    }
+  }, [
+    gridIndex,
+    points,
+    resolvePointSprite,
+    ringColorsByIndex,
+    requestedThumbnailPathSet,
+    selectedPath,
+    thumbFailedByPath,
+  ]);
 
   drawRef.current = draw;
 
@@ -426,7 +618,6 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
     });
   }, []);
 
-  const THUMB_DRAW_MIN_MS = 100;
   const scheduleDrawAfterThumb = useCallback(() => {
     const now = performance.now();
     if (now - lastThumbPaintAtRef.current >= THUMB_DRAW_MIN_MS) {
@@ -435,13 +626,33 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
       return;
     }
     if (thumbDrawTimeoutRef.current != null) return;
-    const delay = Math.max(8, THUMB_DRAW_MIN_MS - (now - lastThumbPaintAtRef.current));
+    const delay = Math.max(
+      8,
+      THUMB_DRAW_MIN_MS - (now - lastThumbPaintAtRef.current),
+    );
     thumbDrawTimeoutRef.current = setTimeout(() => {
       thumbDrawTimeoutRef.current = null;
       lastThumbPaintAtRef.current = performance.now();
       scheduleDraw();
     }, delay);
   }, [scheduleDraw]);
+
+  const syncViewport = useCallback(() => {
+    const canvas = canvasRef.current;
+    const wrap = wrapRef.current;
+    if (!canvas || !wrap) return;
+    const rect = wrap.getBoundingClientRect();
+    viewportRef.current = buildViewportMetrics(rect.width, rect.height, MARGIN);
+    const dpr = Math.min(window.devicePixelRatio || 1, MAX_CANVAS_DPR);
+    canvas.width = Math.floor(rect.width * dpr);
+    canvas.height = Math.floor(rect.height * dpr);
+    canvas.style.width = `${rect.width}px`;
+    canvas.style.height = `${rect.height}px`;
+    const ctx = canvas.getContext("2d");
+    if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    scheduleDraw();
+    refreshThumbnailDemand(true);
+  }, [refreshThumbnailDemand, scheduleDraw]);
 
   useEffect(() => {
     draw();
@@ -461,88 +672,93 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
         clearTimeout(thumbDrawTimeoutRef.current);
         thumbDrawTimeoutRef.current = null;
       }
+      if (thumbnailDemandTimeoutRef.current != null) {
+        clearTimeout(thumbnailDemandTimeoutRef.current);
+        thumbnailDemandTimeoutRef.current = null;
+      }
     };
   }, []);
 
   useEffect(() => {
-    const cache = imgCacheRef.current;
-    let cancelled = false;
-    for (const p of paths) {
-      const url = thumbByPath[p];
-      if (!url || cache.has(p)) continue;
+    const generation = ++spriteGenerationRef.current;
+    for (const path of thumbnailDemand.requestedPaths) {
+      const url = thumbByPath[path];
+      if (!url || spriteCacheRef.current.has(path)) continue;
       const img = new Image();
+      img.decoding = "async";
       img.src = url;
       img.onload = () => {
-        if (cancelled) return;
-        cache.set(p, img);
+        if (generation !== spriteGenerationRef.current) return;
+        if (!pathSetRef.current.has(path)) return;
+        spriteCacheRef.current.set(path, createThumbnailSprite(img));
         scheduleDrawAfterThumb();
       };
     }
-    return () => {
-      cancelled = true;
-    };
-  }, [pathsKey, thumbByPath, paths, scheduleDrawAfterThumb]);
+  }, [scheduleDrawAfterThumb, thumbByPath, thumbnailDemand.requestedPaths]);
 
   useEffect(() => {
     const ro = new ResizeObserver(() => {
-      const canvas = canvasRef.current;
-      const wrap = wrapRef.current;
-      if (!canvas || !wrap) return;
-      const r = wrap.getBoundingClientRect();
-      const dpr = Math.min(window.devicePixelRatio || 1, MAX_CANVAS_DPR);
-      canvas.width = Math.floor(r.width * dpr);
-      canvas.height = Math.floor(r.height * dpr);
-      canvas.style.width = `${r.width}px`;
-      canvas.style.height = `${r.height}px`;
-      const ctx = canvas.getContext("2d");
-      if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      drawRef.current();
+      syncViewport();
     });
-    if (wrapRef.current) ro.observe(wrapRef.current);
+    if (wrapRef.current) {
+      ro.observe(wrapRef.current);
+      syncViewport();
+    }
     return () => ro.disconnect();
-  }, []);
+  }, [syncViewport]);
 
-  const selectedAlgorithmOption: AlgorithmOption | null =
-    ALGORITHM_OPTIONS.find((o) => o.value === algorithm) ?? ALGORITHM_OPTIONS[0];
+  useEffect(() => {
+    refreshThumbnailDemand(true);
+  }, [points, gridIndex, selectedPath, refreshThumbnailDemand]);
 
   const runLoad = useCallback(
-    async (limit: number, algo: GraphLayoutAlgorithm, tagFilters: string[], effectId: number) => {
+    async (
+      limit: number,
+      algo: GraphLayoutAlgorithm,
+      tagFilters: string[],
+      effectId: number,
+    ) => {
       const gen = ++loadGenerationRef.current;
+      graphPerfSessionStart();
+      graphPerfMark("load_start", {
+        limit,
+        algo,
+        tag_filter_count: tagFilters.length,
+      });
       setLimitInput(String(limit));
-      setAlgorithm(algo);
       setError(null);
       setNoResults(false);
       setLoading(true);
       setLayoutBusy(false);
       setPoints([]);
       setPointCount(null);
+      selectedPathRef.current = null;
+      setSelectedPath(null);
+      setThumbnailDemand(defaultThumbnailDemand());
+      lastThumbnailDemandKeyRef.current = "";
+      firstMarkersMarkRef.current = false;
+      firstThumbnailsMarkRef.current = false;
       lastThumbPaintAtRef.current = 0;
+      spriteGenerationRef.current += 1;
       if (thumbDrawTimeoutRef.current != null) {
         clearTimeout(thumbDrawTimeoutRef.current);
         thumbDrawTimeoutRef.current = null;
       }
+
       try {
-        const res = (await invoke("qdrant_scroll_graph", {
-          args: {
-            sourceId: cfg.sourceId,
-            limit,
-            tagFilterIds: tagFilters.length > 0 ? tagFilters : undefined,
-          },
-        })) as {
-          points: { path: string; contentHash: string; tagIds: string[] }[];
-          packedEmbeddingsF32Base64: string;
-          n: number;
-          d: number;
-        };
+        const res = await qdrantScrollGraph({
+          sourceId: cfg.sourceId,
+          limit,
+          tagFilterIds: tagFilters.length > 0 ? tagFilters : undefined,
+        });
 
         if (gen !== loadGenerationRef.current) return;
         if (effectId !== graphEffectIdRef.current) return;
 
-        graphPerfSessionStart();
         graphPerfMark("invoke_qdrant_scroll_graph_done", {
           n: res.n,
           d: res.d,
-          packedBase64Chars: res.packedEmbeddingsF32Base64.length,
+          packed_base64_chars: res.packedEmbeddingsF32Base64.length,
           limit,
           algo,
         });
@@ -553,37 +769,43 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
           return;
         }
 
-        const n = res.n;
-        setPointCount(n);
-        const d = res.d;
-        graphPerfMark("decode_packed_embeddings_start");
-        const flat = decodePackedF32Base64(res.packedEmbeddingsF32Base64, n, d);
-        if (effectId !== graphEffectIdRef.current) return;
-        graphPerfMark("decode_packed_embeddings_done", { float32Length: flat.length });
-        const contentPoints: ContentPoint[] = res.points.map((p) => ({
-          path: p.path,
-          contentHash: p.contentHash,
-          tagIds: p.tagIds,
-          embedding: [],
-        }));
-
+        setPointCount(res.n);
         setLayoutBusy(true);
-        graphPerfMark("runGraphLayout_worker_start", { algo, n, d });
-        const { x, y } = await runGraphLayout(flat, n, d, algo);
-        graphPerfMark("runGraphLayout_worker_done");
+        graphPerfMark("worker_decode_start", { algo, n: res.n, d: res.d });
+        graphPerfMark("runGraphLayout_worker_start", {
+          algo,
+          n: res.n,
+          d: res.d,
+        });
+        const layout = await runGraphLayout(
+          res.packedEmbeddingsF32Base64,
+          res.n,
+          res.d,
+          algo,
+        );
         if (gen !== loadGenerationRef.current) return;
         if (effectId !== graphEffectIdRef.current) return;
 
-        graphPerfMark("normalize_coords_start");
-        const { nx, ny } = normalizeCoords(x, y);
-        graphPerfMark("normalize_coords_done");
-        const next: LayoutPoint[] = contentPoints.map((p, i) => ({
-          ...p,
-          nx: nx[i] ?? 0,
-          ny: ny[i] ?? 0,
+        graphPerfMark("worker_decode_done", {
+          decode_ms: Number(layout.metrics.decodeMs.toFixed(2)),
+          row_conversion_ms: Number(layout.metrics.rowConversionMs.toFixed(2)),
+        });
+        graphPerfMark("runGraphLayout_worker_done", {
+          layout_ms: Number(layout.metrics.layoutMs.toFixed(2)),
+          normalize_ms: Number(layout.metrics.normalizeMs.toFixed(2)),
+        });
+
+        const next: LayoutPoint[] = res.points.map((point, index) => ({
+          path: point.path,
+          contentHash: point.contentHash,
+          tagIds: point.tagIds,
+          previewable: isPreviewablePath(point.path),
+          fallbackLabel: fallbackLabelForPath(point.path),
+          nx: layout.x[index] ?? 0,
+          ny: layout.y[index] ?? 0,
         }));
         setPoints(next);
-        graphPerfMark("setPoints_done", { layoutPoints: next.length });
+        graphPerfMark("setPoints_done", { layout_points: next.length });
         dragActiveRef.current = false;
         setPan({ x: 0, y: 0 });
         setScale(1);
@@ -595,7 +817,9 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
           graphPerfMark("run_superseded");
           return;
         }
-        graphPerfMark("load_error", { message: e instanceof Error ? e.message : String(e) });
+        graphPerfMark("load_error", {
+          message: e instanceof Error ? e.message : String(e),
+        });
         setError(invokeErrorText(e));
       } finally {
         if (gen === loadGenerationRef.current) {
@@ -609,68 +833,81 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
   );
 
   useEffect(() => {
-    const id = window.setTimeout(() => setDebouncedLimitInput(limitInput), LIMIT_DEBOUNCE_MS);
+    const id = window.setTimeout(
+      () => setDebouncedLimitInput(limitInput),
+      LIMIT_DEBOUNCE_MS,
+    );
     return () => window.clearTimeout(id);
   }, [limitInput]);
 
   useEffect(() => {
+    requestGraphLoad(
+      parseLimitInput(debouncedLimitInput),
+      selectedAlgorithm,
+      tagFilterIds,
+    );
+  }, [debouncedLimitInput, requestGraphLoad, selectedAlgorithm, tagFilterIds]);
+
+  useEffect(() => {
+    if (!loadRequest) return;
     const effectId = ++graphEffectIdRef.current;
-    void runLoad(parseLimitInput(debouncedLimitInput), algorithm, tagFilterIds, effectId);
-  }, [debouncedLimitInput, algorithm, tagFilterIds, runLoad]);
+    void runLoad(
+      loadRequest.limit,
+      loadRequest.algo,
+      loadRequest.tagFilters,
+      effectId,
+    );
+  }, [loadRequest, runLoad]);
 
-  function hitTest(clientX: number, clientY: number): string | null {
-    const canvas = canvasRef.current;
-    if (!canvas) return null;
-    const r = canvas.getBoundingClientRect();
-    const sx = clientX - r.left;
-    const sy = clientY - r.top;
-    const cw = r.width;
-    const ch = r.height;
-    const innerW = cw - 2 * MARGIN;
-    const innerH = ch - 2 * MARGIN;
-    const cx = cw / 2;
-    const cy = ch / 2;
-    const panX = panRef.current.x;
-    const panY = panRef.current.y;
-    const sc = scaleRef.current;
-
-    const hitR = THUMB / 2 + 4;
-    const hitR2 = hitR * hitR;
-    const pad = THUMB / 2 + 14;
-    const bounds = normalizedVisibleBounds(cw, ch, innerW, innerH, cx, cy, panX, panY, sc, pad);
-    const vis = collectVisibleIndices(bounds, gridIndex, GRID_DIM);
-
-    for (let vi = vis.length - 1; vi >= 0; vi--) {
-      const pt = points[vis[vi]!];
-      if (!pt) continue;
-      const px = MARGIN + pt.nx * innerW;
-      const py = MARGIN + pt.ny * innerH;
-      const tsx = (px - cx) * sc + cx + panX;
-      const tsy = (py - cy) * sc + cy + panY;
-      const dx = sx - tsx;
-      const dy = sy - tsy;
-      if (dx * dx + dy * dy <= hitR2) {
-        return pt.path;
+  const hitTest = useCallback(
+    (screenX: number, screenY: number): string | null => {
+      const currentScale = scaleRef.current;
+      const visible = collectVisibleGraphPoints(
+        pointsRef.current,
+        gridRef.current,
+        GRID_DIM,
+        viewportRef.current,
+        panRef.current.x,
+        panRef.current.y,
+        currentScale,
+        graphVisibilityPad(currentScale) + 4,
+      );
+      const hitRadius = graphNodeScreenRadius(currentScale) + 4;
+      const hitRadiusSq = hitRadius * hitRadius;
+      for (let i = visible.length - 1; i >= 0; i--) {
+        const point = visible[i]!;
+        const dx = screenX - point.screenX;
+        const dy = screenY - point.screenY;
+        if (dx * dx + dy * dy <= hitRadiusSq) {
+          return point.path;
+        }
       }
-    }
-    return null;
-  }
+      return null;
+    },
+    [],
+  );
 
   function endPanDrag() {
     dragActiveRef.current = false;
     dragRef.current = null;
     setPan({ ...panRef.current });
+    refreshThumbnailDemand(true);
   }
 
   const limitParsed = parseLimitInput(limitInput);
+  const selectedAlgorithmOption: AlgorithmOption | null =
+    ALGORITHM_OPTIONS.find((option) => option.value === selectedAlgorithm) ??
+    ALGORITHM_OPTIONS[0];
 
   function toggleTagFilter(id: string) {
-    setTagFilterIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+    setTagFilterIds((prev) =>
+      prev.includes(id) ? prev.filter((value) => value !== id) : [...prev, id],
+    );
   }
 
   return (
     <section className="flex h-full min-h-0 flex-col">
-      <div className="relative mb-8 shrink-0">
+      <div className="relative shrink-0">
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
@@ -714,33 +951,61 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
             />
           </div>
           <div className="flex flex-col gap-1 text-left">
-            <Label htmlFor="graph-algorithm-combobox" className="app-label">
-              Algorithm
-            </Label>
-            <Combobox<AlgorithmOption>
-              value={selectedAlgorithmOption}
-              onValueChange={(value) => {
-                if (!value) return;
-                setAlgorithm(value.value);
-              }}
-            >
-              <ComboboxInput
-                id="graph-algorithm-combobox"
-                readOnly
-                showClear={false}
-                aria-label="Layout algorithm"
-                className="w-40"
-              />
-              <ComboboxContent>
-                <ComboboxList>
-                  {ALGORITHM_OPTIONS.map((option) => (
-                    <ComboboxItem key={option.value} value={option}>
-                      {option.label}
-                    </ComboboxItem>
-                  ))}
-                </ComboboxList>
-              </ComboboxContent>
-            </Combobox>
+            <div className="relative w-fit pr-5">
+              <Label htmlFor="graph-algorithm-combobox" className="app-label">
+                Algorithm
+              </Label>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    className="absolute top-1/2 right-0 inline-flex size-3.5 -translate-y-1/2 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                    aria-label="About layout algorithms"
+                  >
+                    <CircleHelp className="size-3.5" aria-hidden="true" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent
+                  side="top"
+                  className="max-w-64 items-start text-left"
+                >
+                  <div className="flex flex-col gap-1">
+                    <p className="font-medium">Layout algorithms</p>
+                    <p>
+                      PCA is fastest. UMAP and t-SNE can reveal tighter local
+                      clusters, but they usually take longer to compute.
+                    </p>
+                  </div>
+                </TooltipContent>
+              </Tooltip>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Combobox<AlgorithmOption>
+                value={selectedAlgorithmOption}
+                onValueChange={(value) => {
+                  if (!value || value.value === selectedAlgorithm) return;
+                  setSelectedAlgorithm(value.value);
+                  setDebouncedLimitInput(limitInput);
+                }}
+              >
+                <ComboboxInput
+                  id="graph-algorithm-combobox"
+                  readOnly
+                  showClear={false}
+                  aria-label="Layout algorithm"
+                  className="w-40"
+                />
+                <ComboboxContent>
+                  <ComboboxList>
+                    {ALGORITHM_OPTIONS.map((option) => (
+                      <ComboboxItem key={option.value} value={option}>
+                        {option.label}
+                      </ComboboxItem>
+                    ))}
+                  </ComboboxList>
+                </ComboboxContent>
+              </Combobox>
+            </div>
           </div>
           <div className="flex min-w-[12rem] max-w-full flex-1 flex-col gap-1 text-left">
             <span className="app-label">Filter by tags (OR)</span>
@@ -750,15 +1015,15 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
               </p>
             ) : (
               <div className="flex flex-wrap gap-2">
-                {tagsState.tags.map((t) => {
-                  const on = tagFilterIds.includes(t.id);
+                {tagsState.tags.map((tag) => {
+                  const pressed = tagFilterIds.includes(tag.id);
                   return (
                     <TagFilterPill
-                      key={t.id}
-                      tag={t}
-                      pressed={on}
-                      onPressedChange={() => toggleTagFilter(t.id)}
-                      ariaLabel={`Filter by tag ${t.name}`}
+                      key={tag.id}
+                      tag={tag}
+                      pressed={pressed}
+                      onPressedChange={() => toggleTagFilter(tag.id)}
+                      ariaLabel={`Filter by tag ${tag.name}`}
                     />
                   );
                 })}
@@ -766,39 +1031,18 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
             )}
           </div>
         </div>
-
-        {tagsState.tags.length > 0 ? (
-          <div className="flex flex-wrap items-center gap-2 text-[10px] text-muted-foreground">
-            <span>Legend:</span>
-            {tagsState.tags.map((t) => (
-              <span key={t.id} className="inline-flex items-center gap-1">
-                <span className="h-2 w-2 rounded-full" style={{ backgroundColor: t.color }} />
-                {t.name}
-              </span>
-            ))}
-            <span className="inline-flex items-center gap-1">
-              <span className="h-2 w-2 rounded-full" style={{ backgroundColor: UNTAGGED_RING }} />
-              Untagged
-            </span>
-            {legendShowsRingOverflow ? (
-              <span className="inline-flex items-center gap-1">
-                <span className="h-2 w-2 rounded-full" style={{ backgroundColor: RING_OVERFLOW_COLOR }} />
-                5+ tag colors
-              </span>
-            ) : null}
-          </div>
-        ) : null}
       </div>
 
       {limitParsed > HARD_WARN ? (
         <p className="app-muted mb-2 text-center text-xs">
-          Large limits may freeze the browser during layout. Consider {HARD_WARN} or fewer.
+          Large limits may freeze the browser during layout. Consider{" "}
+          {HARD_WARN} or fewer.
         </p>
       ) : null}
 
       <div
         ref={wrapRef}
-        className="relative min-h-0 flex-1 overflow-hidden rounded-lg border border-border bg-muted"
+        className="relative min-h-0 flex-1 overflow-hidden rounded-xl border border-border/70 bg-muted/20"
       >
         {loading || layoutBusy ? (
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-4">
@@ -806,13 +1050,22 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
           </div>
         ) : error ? (
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-4">
-            <ErrorMessage variant="centered" className="max-w-md" message={error} />
+            <ErrorMessage
+              variant="centered"
+              className="max-w-md"
+              message={error}
+            />
           </div>
         ) : noResults ? (
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-4">
-            <p className="text-center text-sm text-muted-foreground">
-              No results for the current filters.
-            </p>
+            <Empty className="max-w-md border-none bg-transparent p-0">
+              <EmptyHeader>
+                <EmptyTitle>No results for the current filters</EmptyTitle>
+                <EmptyDescription>
+                  Try increasing the limit or removing some tag filters.
+                </EmptyDescription>
+              </EmptyHeader>
+            </Empty>
           </div>
         ) : null}
         <canvas
@@ -832,13 +1085,14 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
             };
           }}
           onPointerMove={(e) => {
-            const d = dragRef.current;
-            if (!d?.active) return;
+            const drag = dragRef.current;
+            if (!drag?.active) return;
             panRef.current = {
-              x: d.px + (e.clientX - d.sx),
-              y: d.py + (e.clientY - d.sy),
+              x: drag.px + (e.clientX - drag.sx),
+              y: drag.py + (e.clientY - drag.sy),
             };
             scheduleDraw();
+            refreshThumbnailDemand();
           }}
           onPointerUp={(e) => {
             (e.target as HTMLCanvasElement).releasePointerCapture(e.pointerId);
@@ -846,7 +1100,9 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
           }}
           onPointerLeave={(e) => {
             try {
-              (e.target as HTMLCanvasElement).releasePointerCapture(e.pointerId);
+              (e.target as HTMLCanvasElement).releasePointerCapture(
+                e.pointerId,
+              );
             } catch {
               /* noop */
             }
@@ -856,24 +1112,48 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
           }}
           onWheel={(e) => {
             e.preventDefault();
+            const rect = e.currentTarget.getBoundingClientRect();
+            const screenX = e.clientX - rect.left;
+            const screenY = e.clientY - rect.top;
+            const currentScale = scaleRef.current;
             const delta = e.deltaY > 0 ? 0.92 : 1.08;
-            const ns = Math.min(4, Math.max(0.25, scaleRef.current * delta));
-            scaleRef.current = ns;
+            const nextScale = Math.min(
+              MAX_GRAPH_SCALE,
+              Math.max(MIN_GRAPH_SCALE, currentScale * delta),
+            );
+            if (nextScale === currentScale) return;
+            panRef.current = adjustPanForZoomAtScreenPoint(
+              viewportRef.current,
+              panRef.current.x,
+              panRef.current.y,
+              currentScale,
+              nextScale,
+              screenX,
+              screenY,
+            );
+            scaleRef.current = nextScale;
             scheduleDraw();
+            refreshThumbnailDemand();
             if (wheelScaleRafRef.current == null) {
               wheelScaleRafRef.current = requestAnimationFrame(() => {
                 wheelScaleRafRef.current = null;
+                setPan({ ...panRef.current });
                 setScale(scaleRef.current);
+                refreshThumbnailDemand(true);
               });
             }
           }}
           onClick={(e) => {
-            const path = hitTest(e.clientX, e.clientY);
+            const path = hitTest(e.nativeEvent.offsetX, e.nativeEvent.offsetY);
             if (!path) {
+              selectedPathRef.current = null;
               setSelectedPath(null);
+              refreshThumbnailDemand(true);
               return;
             }
+            selectedPathRef.current = path;
             setSelectedPath(path);
+            refreshThumbnailDemand(true);
             if (e.detail === 2) {
               navigate(`/file?path=${encodeURIComponent(path)}`, {
                 state: { returnTo: "/graph" },
@@ -882,13 +1162,14 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
           }}
         />
         {points.length > 0 ? (
-          <div className="pointer-events-none absolute bottom-2 left-2 rounded-md border border-border bg-card/95 px-2 py-1 text-[10px] text-muted-foreground shadow-sm backdrop-blur-sm">
+          <div className="pointer-events-none absolute bottom-2 left-2 rounded-lg border border-border/70 bg-background/90 px-2 py-1 text-[10px] text-muted-foreground shadow-xs backdrop-blur-sm">
             Drag to pan · wheel to zoom · click select · double-click open
           </div>
         ) : null}
         {pointCount !== null && !error ? (
-          <div className="pointer-events-none absolute bottom-2 right-2 rounded-md border border-border bg-card/95 px-2 py-1 text-[10px] text-muted-foreground shadow-sm backdrop-blur-sm">
-            {pointCount} point{pointCount === 1 ? "" : "s"}
+          <div className="pointer-events-none absolute bottom-2 right-2 rounded-lg border border-border/70 bg-background/90 px-2 py-1 text-[10px] text-muted-foreground shadow-xs backdrop-blur-sm">
+            {pointCount} point{pointCount === 1 ? "" : "s"} ·{" "}
+            {activeAlgorithm.toUpperCase()}
           </div>
         ) : null}
       </div>

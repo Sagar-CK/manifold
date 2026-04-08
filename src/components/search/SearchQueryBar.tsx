@@ -19,6 +19,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { SEARCH_QUERY_INPUT_ID } from "@/lib/appShortcuts";
 import type { TagDef } from "@/lib/tags";
 import type { MatchTypeFilter } from "./searchTypes";
 
@@ -52,6 +53,7 @@ export function SearchQueryBar({
     <div className="flex w-full flex-col">
       <InputGroup className="w-full">
         <InputGroupInput
+          id={SEARCH_QUERY_INPUT_ID}
           value={query}
           onChange={(e) => onQueryChange(e.target.value)}
           placeholder="Search across your files…"

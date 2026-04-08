@@ -43,17 +43,17 @@ export function ContentHashPathPickerDialog({
           <AlertDialogTitle>{title}</AlertDialogTitle>
           <AlertDialogDescription>{description}</AlertDialogDescription>
         </AlertDialogHeader>
-        <div className="max-h-64 space-y-2 overflow-y-auto">
+        <div className="flex max-h-64 flex-col gap-2 overflow-y-auto">
           {paths.map((path) => (
             <Tooltip key={path}>
               <TooltipTrigger asChild>
                 <Button
                   type="button"
                   variant="ghost"
-                  className="h-auto w-full justify-start p-0 font-normal hover:bg-transparent focus-visible:bg-transparent"
+                  className="h-auto w-full justify-start rounded-xl border border-transparent p-1 font-normal hover:border-border/70 hover:bg-muted/20 focus-visible:border-border/70 focus-visible:bg-muted/20"
                   onClick={() => onSelectPath(path)}
                 >
-                  <span className="block min-w-0 w-full truncate rounded-md bg-muted px-2 py-1.5 font-mono text-xs text-foreground">
+                  <span className="block min-w-0 w-full truncate rounded-lg bg-muted/20 px-2.5 py-1.5 font-mono text-xs text-foreground">
                     {formatIndexedPathForDisplay(path, homePath, includeRoots)}
                   </span>
                 </Button>

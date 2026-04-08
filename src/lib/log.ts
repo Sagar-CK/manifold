@@ -22,7 +22,10 @@ function shouldLogVerbose(isDebugEnabled?: () => boolean): boolean {
   return isDebugEnabled?.() === true;
 }
 
-export function createLogger(scope: string, options?: CreateLoggerOptions): ScopedLogger {
+export function createLogger(
+  scope: string,
+  options?: CreateLoggerOptions,
+): ScopedLogger {
   const prefix = `[manifold][${scope}]`;
 
   const emitVerbose = (
@@ -57,11 +60,14 @@ export function createLogger(scope: string, options?: CreateLoggerOptions): Scop
 export function isSearchDebugEnabled(): boolean {
   return (
     import.meta.env.DEV ||
-    (typeof window !== "undefined" && window.localStorage.getItem("manifold:debug:search") === "1")
+    (typeof window !== "undefined" &&
+      window.localStorage.getItem("manifold:debug:search") === "1")
   );
 }
 
-export const searchLog = createLogger("search", { isDebugEnabled: isSearchDebugEnabled });
+export const searchLog = createLogger("search", {
+  isDebugEnabled: isSearchDebugEnabled,
+});
 
 export const autoTagLog = createLogger("autoTag");
 

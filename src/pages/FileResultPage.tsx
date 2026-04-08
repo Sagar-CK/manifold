@@ -1,8 +1,21 @@
+import { ArrowLeft, ExternalLink } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
-import { invoke } from "@tauri-apps/api/core";
-import { openPath } from "@tauri-apps/plugin-opener";
-import { ArrowLeft, ExternalLink } from "lucide-react";
+import {
+  qdrantSimilarByPath,
+  type SimilarHit,
+  thumbnailImageBase64Png,
+} from "@/lib/api/tauri";
+import { invokeErrorText } from "@/lib/errors";
+import {
+  fileExtension,
+  fileTypeLabelFromPath,
+  formatSimilarityScore,
+  openPathInDefaultApp,
+} from "@/lib/files";
+import { groupByContentHash } from "@/lib/resultGrouping";
+import { pruneIndexedPathIfMissing } from "@/lib/staleIndexedPaths";
+import { toggleTagForPath } from "@/lib/tagActions";
 import { ContentHashPathPickerDialog } from "../components/ContentHashPathPickerDialog";
 import { ErrorMessage } from "../components/ErrorMessage";
 import { FileSearchResultCard } from "../components/FileSearchResultCard";
@@ -10,64 +23,30 @@ import { TagsPathDropdown } from "../components/TagsPathDropdown";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Label } from "../components/ui/label";
-import { Skeleton } from "../components/ui/skeleton";
 import { ScrollArea } from "../components/ui/scroll-area";
-import { invokeErrorText } from "../lib/errors";
+import { Skeleton } from "../components/ui/skeleton";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "../components/ui/tooltip";
 import type { LocalConfig } from "../lib/localConfig";
 import { navigateBackOrFallback } from "../lib/navigateBack";
-import { runAutoTagOrchestration } from "../lib/autoTagging";
 import { formatIndexedPathForDisplay } from "../lib/pathDisplay";
 import { isPathSelected } from "../lib/pathSelection";
+import { tagIdsForPath, tagsForPath } from "../lib/tags";
 import { useHomeDir } from "../lib/useHomeDir";
-import { useThumbnailsForPaths } from "../lib/useThumbnailsForPaths";
-import { syncPathTagsToQdrant } from "../lib/qdrantTags";
 import { useTagsState } from "../lib/useTagsState";
 import {
-  loadTagsState,
-  saveTagsState,
-  tagIdsForPath,
-  tagsForPath,
-  togglePathTag,
-} from "../lib/tags";
-import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip";
-
-type SimilarHit = {
-  score: number;
-  file: { path: string; contentHash: string };
-};
+  isPreviewablePath,
+  useThumbnailsForPaths,
+} from "../lib/useThumbnailsForPaths";
 
 type SimilarGroup = {
   key: string;
   primary: SimilarHit;
   variants: SimilarHit[];
 };
-
-function fileTypeLabel(path: string) {
-  const ext = path.split(".").pop()?.replace(/^\./, "").trim().toUpperCase() ?? "";
-  return ext || "FILE";
-}
-
-function formatSimilarityScore(score: number) {
-  if (score >= 0 && score <= 1) return `${(score * 100).toFixed(1)}%`;
-  return score.toFixed(4);
-}
-
-function groupSimilarByContentHash(hits: SimilarHit[]): SimilarGroup[] {
-  const byHash = new Map<string, SimilarGroup>();
-  for (const hit of hits) {
-    const key = hit.file.contentHash || hit.file.path;
-    const existing = byHash.get(key);
-    if (!existing) {
-      byHash.set(key, { key, primary: hit, variants: [hit] });
-      continue;
-    }
-    existing.variants.push(hit);
-    if (hit.score > existing.primary.score) {
-      existing.primary = hit;
-    }
-  }
-  return Array.from(byHash.values());
-}
 
 export type FileResultLocationState = {
   /** Exploration stack: each similar-file drill appends the path (Back pops one level). */
@@ -89,19 +68,23 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
   const [thumbDataUrl, setThumbDataUrl] = useState<string | null>(null);
   const [thumbLoading, setThumbLoading] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
+  const [staleCleanupMessage, setStaleCleanupMessage] = useState<string | null>(
+    null,
+  );
 
   const [trail, setTrail] = useState<string[]>([]);
   const [similar, setSimilar] = useState<SimilarHit[]>([]);
   const [similarLoading, setSimilarLoading] = useState(false);
   const [similarError, setSimilarError] = useState<string | null>(null);
   const [pathChooserOpen, setPathChooserOpen] = useState(false);
-  const [selectedSimilarGroup, setSelectedSimilarGroup] = useState<SimilarGroup | null>(null);
-  const [pathChooserOpenInAppMode, setPathChooserOpenInAppMode] = useState(false);
+  const [selectedSimilarGroup, setSelectedSimilarGroup] =
+    useState<SimilarGroup | null>(null);
+  const [pathChooserOpenInAppMode, setPathChooserOpenInAppMode] =
+    useState(false);
   const homePath = useHomeDir();
-  const [tagsState, setTagsState] = useTagsState();
+  const [tagsState] = useTagsState();
 
-  const ext = filePath?.split(".").pop()?.toLowerCase() ?? "";
-  const canThumb = ext === "png" || ext === "jpg" || ext === "jpeg" || ext === "pdf";
+  const canThumb = filePath ? isPreviewablePath(filePath) : false;
 
   useEffect(() => {
     if (!filePath) {
@@ -116,10 +99,6 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
     setTrail([filePath]);
   }, [filePath, location.key]);
 
-  useEffect(() => {
-    setTagsState(loadTagsState());
-  }, [filePath]);
-
   const displayPaths = useMemo(() => {
     if (!filePath) return [];
     const aliases = locState?.sameContentPaths;
@@ -131,7 +110,14 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
     return [filePath];
   }, [filePath, location.key, locState?.sameContentPaths]);
 
-  const headerPathExcludeSet = useMemo(() => new Set(displayPaths), [displayPaths]);
+  const headerPathExcludeSet = useMemo(
+    () => new Set(displayPaths),
+    [displayPaths],
+  );
+
+  useEffect(() => {
+    setStaleCleanupMessage(null);
+  }, [filePath]);
 
   useEffect(() => {
     setThumbDataUrl(null);
@@ -145,14 +131,26 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
     setThumbLoading(true);
     void (async () => {
       try {
-        const thumb = (await invoke("thumbnail_image_base64_png", {
-          args: { path: filePath, max_edge: 96, page: 0 },
-        })) as { png_base64: string };
+        const thumb = await thumbnailImageBase64Png(filePath, 96, 0);
         if (cancelled) return;
         setThumbDataUrl(`data:image/png;base64,${thumb.png_base64}`);
-      } catch {
+      } catch (error) {
         if (!cancelled) {
           setThumbDataUrl(null);
+          void pruneIndexedPathIfMissing(cfg.sourceId, filePath, error)
+            .then((didPrune) => {
+              if (cancelled || !didPrune) return;
+              setSimilar([]);
+              setStaleCleanupMessage(
+                "This file no longer exists, so its stale search entry was removed from the index.",
+              );
+            })
+            .catch((cleanupError) => {
+              if (cancelled) return;
+              setStaleCleanupMessage(
+                `This file no longer exists, but removing its stale search entry failed: ${invokeErrorText(cleanupError)}`,
+              );
+            });
         }
       } finally {
         if (!cancelled) setThumbLoading(false);
@@ -176,15 +174,19 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
     setSimilarLoading(true);
     void (async () => {
       try {
-        const hits = (await invoke("qdrant_similar_by_path", {
-          args: { sourceId: cfg.sourceId, path: filePath, limit: cfg.topK },
-        })) as SimilarHit[];
+        const hits = await qdrantSimilarByPath(
+          cfg.sourceId,
+          filePath,
+          cfg.topK,
+        );
         if (cancelled) return;
         const scoped = hits.filter((h) => isPathSelected(h.file.path, cfg));
-        const filtered = scoped.filter((h) => !headerPathExcludeSet.has(h.file.path));
+        const filtered = scoped.filter(
+          (h) => !headerPathExcludeSet.has(h.file.path),
+        );
         setSimilar(filtered);
-      } catch (e) {
-        if (!cancelled) setSimilarError(invokeErrorText(e));
+      } catch (error) {
+        if (!cancelled) setSimilarError(String(error));
       } finally {
         if (!cancelled) setSimilarLoading(false);
       }
@@ -204,13 +206,33 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
     headerPathExcludeSet,
   ]);
 
-  const similarGroups = useMemo(() => groupSimilarByContentHash(similar), [similar]);
+  const similarGroups = useMemo(
+    () =>
+      groupByContentHash(similar, (currentPrimary, candidate) =>
+        candidate.score > currentPrimary.score ? candidate : currentPrimary,
+      ).map((group) => ({
+        key: group.key,
+        primary: group.primary,
+        variants: group.variants,
+      })),
+    [similar],
+  );
   const thumbPathList = useMemo(
     () => similarGroups.map((g) => g.primary.file.path),
     [similarGroups],
   );
   const thumbPathsKey = thumbPathList.join("\0");
-  const { thumbByPath, thumbFailedByPath } = useThumbnailsForPaths(thumbPathsKey, thumbPathList);
+  const { thumbByPath, thumbFailedByPath } = useThumbnailsForPaths(
+    thumbPathsKey,
+    thumbPathList,
+    {
+      onThumbError: (path, error) => {
+        void pruneIndexedPathIfMissing(cfg.sourceId, path, error).catch(
+          () => {},
+        );
+      },
+    },
+  );
 
   function leaveFileView() {
     const dest = locState?.returnTo;
@@ -226,7 +248,9 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
         replace: true,
         state: {
           resultStack: trail.slice(0, -1),
-          ...(locState?.returnTo != null ? { returnTo: locState.returnTo } : {}),
+          ...(locState?.returnTo != null
+            ? { returnTo: locState.returnTo }
+            : {}),
         },
       });
     } else {
@@ -260,27 +284,27 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
 
   return (
     <section className="flex h-full min-h-0 flex-1 flex-col gap-5">
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="w-fit gap-1 px-2 text-muted-foreground"
-              aria-label={trail.length > 1 ? "Back to previous file" : "Back"}
-              onClick={goBackFromFileResult}
-            >
-              <ArrowLeft className="size-4" aria-hidden />
-              Back
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom">
-            {trail.length > 1 ? "Back to previous file" : "Back"}
-          </TooltipContent>
-        </Tooltip>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="w-fit gap-1 px-2 text-muted-foreground"
+            aria-label={trail.length > 1 ? "Back to previous file" : "Back"}
+            onClick={goBackFromFileResult}
+          >
+            <ArrowLeft className="size-4" aria-hidden />
+            Back
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="bottom">
+          {trail.length > 1 ? "Back to previous file" : "Back"}
+        </TooltipContent>
+      </Tooltip>
 
       <div className="flex flex-row gap-4 sm:gap-5">
-        <div className="flex h-24 w-28 shrink-0 items-center justify-center rounded-lg border border-border bg-card/80 shadow-xs">
+        <div className="flex h-24 w-28 shrink-0 items-center justify-center rounded-xl border border-border/70 bg-muted/15 shadow-none">
           {canThumb ? (
             thumbDataUrl ? (
               <img
@@ -291,10 +315,12 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
             ) : thumbLoading ? (
               <Skeleton className="h-16 w-24 rounded-md" />
             ) : (
-              <span className="app-label">{fileTypeLabel(filePath)}</span>
+              <span className="app-label">
+                {fileTypeLabelFromPath(filePath)}
+              </span>
             )
           ) : (
-            <span className="app-label">{fileTypeLabel(filePath)}</span>
+            <span className="app-label">{fileTypeLabelFromPath(filePath)}</span>
           )}
         </div>
 
@@ -303,11 +329,14 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
             <div key={p} className="flex max-w-full items-center gap-2 text-sm">
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <div className="min-w-0 w-fit max-w-full cursor-default truncate rounded-md bg-muted px-2 py-1 font-mono text-[12px] text-muted-foreground sm:max-w-lg">
+                  <div className="min-w-0 w-fit max-w-full cursor-default truncate rounded-full border border-border/70 bg-muted/15 px-3 py-1.5 font-mono text-[12px] text-muted-foreground sm:max-w-lg">
                     {formatIndexedPathForDisplay(p, homePath, cfg.include)}
                   </div>
                 </TooltipTrigger>
-                <TooltipContent side="bottom" className="max-w-md break-all font-mono text-xs">
+                <TooltipContent
+                  side="bottom"
+                  className="max-w-md break-all font-mono text-xs"
+                >
                   {p}
                 </TooltipContent>
               </Tooltip>
@@ -320,25 +349,31 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
                     className="shrink-0 text-muted-foreground hover:text-foreground"
                     aria-label={`Open ${p}`}
                     onClick={async () => {
-                      setOpenError(null);
-                      try {
-                        await openPath(p);
-                      } catch (e) {
-                        setOpenError(invokeErrorText(e));
-                      }
+                      setOpenError(await openPathInDefaultApp(p));
                     }}
                   >
                     <ExternalLink className="h-4 w-4" aria-hidden />
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent side="bottom">Open in default app</TooltipContent>
+                <TooltipContent side="bottom">
+                  Open in default app
+                </TooltipContent>
               </Tooltip>
             </div>
           ))}
-          <ErrorMessage variant="inline" className="text-xs" message={openError} />
+          <ErrorMessage
+            variant="inline"
+            className="text-xs"
+            message={openError}
+          />
+          <ErrorMessage
+            variant="inline"
+            className="text-xs"
+            message={staleCleanupMessage}
+          />
 
-          <div className="mt-3 flex flex-col gap-2">
-            <Label className="app-label">Tags</Label>
+          <div className="mt-3 flex flex-col gap-2.5">
+            <Label className="app-section-title text-sm">Tags</Label>
             {tagsState.tags.length === 0 ? (
               <p className="text-xs text-muted-foreground">
                 Create tags in Settings, then toggle them here.
@@ -346,43 +381,37 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
             ) : (
               <div className="flex flex-wrap gap-1.5">
                 {tagsState.tags.map((t) => {
-                  const active = tagIdsForPath(tagsState, filePath).includes(t.id);
+                  const active = tagIdsForPath(tagsState, filePath).includes(
+                    t.id,
+                  );
                   return (
                     <Button
                       key={t.id}
                       type="button"
                       variant="ghost"
                       className="h-auto p-0 font-normal hover:bg-transparent"
-                      aria-label={active ? `Remove tag ${t.name}` : `Add tag ${t.name}`}
+                      aria-label={
+                        active ? `Remove tag ${t.name}` : `Add tag ${t.name}`
+                      }
                       onClick={() => {
-                        const next = togglePathTag(tagsState, filePath, t.id);
-                        setTagsState(next);
-                        saveTagsState(next);
-                        void syncPathTagsToQdrant(
-                          cfg.sourceId,
-                          filePath,
-                          tagIdsForPath(next, filePath),
-                        ).catch(() => {
-                          /* ignore */
+                        void toggleTagForPath({
+                          path: filePath,
+                          tagId: t.id,
+                          sourceId: cfg.sourceId,
+                          cfg,
+                          navigateToReviewTags: () => navigate("/review-tags"),
                         });
-                        if (cfg.autoTaggingEnabled && tagIdsForPath(next, filePath).includes(t.id)) {
-                          void runAutoTagOrchestration(cfg, filePath, t.id, next, setTagsState);
-                        }
                       }}
                     >
                       <Badge
                         variant={active ? "secondary" : "outline"}
-                        className="border font-normal"
-                        style={
-                          active
-                            ? {
-                                backgroundColor: `${t.color}24`,
-                                borderColor: t.color,
-                                color: "inherit",
-                              }
-                            : undefined
-                        }
+                        className="gap-1.5 border-border/70 font-normal"
                       >
+                        <span
+                          className="size-1.5 shrink-0 rounded-full"
+                          style={{ backgroundColor: t.color }}
+                          aria-hidden="true"
+                        />
                         {t.name}
                       </Badge>
                     </Button>
@@ -395,21 +424,28 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col">
-        <h2 className="app-label mb-3">Similar</h2>
+        <h2 className="app-section-title mb-3">Similar</h2>
         <ScrollArea className="min-h-0 flex-1 pr-3">
           {similarLoading ? (
             <p className="app-muted text-sm">Loading…</p>
           ) : similarError ? (
-            <ErrorMessage variant="inline" className="text-sm" message={similarError} />
+            <ErrorMessage
+              variant="inline"
+              className="text-sm"
+              message={similarError}
+            />
           ) : similarGroups.length === 0 ? (
-            <p className="app-muted text-sm">No similar files in the current scope.</p>
+            <p className="app-muted text-sm">
+              No similar files in the current scope.
+            </p>
           ) : (
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
               {similarGroups.map((group) => {
                 const hit = group.primary;
                 const p = hit.file.path;
-                const pExt = p.split(".").pop()?.toLowerCase() ?? "";
-                const isPreviewImage = pExt === "png" || pExt === "jpg" || pExt === "jpeg";
+                const pExt = fileExtension(p);
+                const isPreviewImage =
+                  pExt === "png" || pExt === "jpg" || pExt === "jpeg";
                 const isPreviewFile = isPreviewImage || pExt === "pdf";
                 const isStacked = group.variants.length > 1;
                 return (
@@ -435,8 +471,8 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
                           return;
                         }
                         setOpenError(null);
-                        void openPath(p).catch((err) => {
-                          setOpenError(invokeErrorText(err));
+                        void openPathInDefaultApp(p).then((error) => {
+                          setOpenError(error);
                         });
                         return;
                       }
@@ -449,7 +485,9 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
                       navigate(`/file?path=${encodeURIComponent(p)}`, {
                         state: {
                           resultStack: [...trail, p],
-                          ...(locState?.returnTo != null ? { returnTo: locState.returnTo } : {}),
+                          ...(locState?.returnTo != null
+                            ? { returnTo: locState.returnTo }
+                            : {}),
                         },
                       });
                     }}
@@ -460,7 +498,6 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
                           path={p}
                           sourceId={cfg.sourceId}
                           tagsState={tagsState}
-                          setTagsState={setTagsState}
                           cfg={cfg}
                         />
                       ) : null
@@ -494,16 +531,17 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
         onSelectPath={(p) => {
           const variants = selectedSimilarGroup?.variants ?? [];
           if (pathChooserOpenInAppMode) {
-            setOpenError(null);
-            void openPath(p).catch((err) => {
-              setOpenError(invokeErrorText(err));
+            void openPathInDefaultApp(p).then((error) => {
+              setOpenError(error);
             });
           } else {
             navigate(`/file?path=${encodeURIComponent(p)}`, {
               state: {
                 resultStack: [...trail, p],
                 sameContentPaths: variants.map((v) => v.file.path),
-                ...(locState?.returnTo != null ? { returnTo: locState.returnTo } : {}),
+                ...(locState?.returnTo != null
+                  ? { returnTo: locState.returnTo }
+                  : {}),
               },
             });
           }

@@ -2,7 +2,7 @@
 
 const STORAGE_KEY = "manifold.debug.graphPerf";
 
-export function isGraphPerfDebugEnabled(): boolean {
+function isGraphPerfDebugEnabled(): boolean {
   if (typeof localStorage === "undefined") return false;
   try {
     return localStorage.getItem(STORAGE_KEY) === "1";
@@ -19,7 +19,10 @@ export function graphPerfSessionStart(): void {
   console.log(`[graph-perf] ${isoNow()} session_start`);
 }
 
-export function graphPerfMark(phase: string, extra?: Record<string, unknown>): void {
+export function graphPerfMark(
+  phase: string,
+  extra?: Record<string, unknown>,
+): void {
   if (!isGraphPerfDebugEnabled()) return;
   const wall = isoNow();
   const sinceSession = (performance.now() - sessionStartMs).toFixed(2);

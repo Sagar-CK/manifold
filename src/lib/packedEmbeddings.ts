@@ -1,4 +1,8 @@
-export function decodePackedF32Base64(b64: string, n: number, d: number): Float32Array {
+export function decodePackedF32Base64(
+  b64: string,
+  n: number,
+  d: number,
+): Float32Array {
   if (n === 0 || d === 0) {
     return new Float32Array();
   }
@@ -10,7 +14,9 @@ export function decodePackedF32Base64(b64: string, n: number, d: number): Float3
   }
   const out = new Float32Array(buf);
   if (out.length !== n * d) {
-    throw new Error(`packed embedding size mismatch: expected ${n * d} floats, got ${out.length}`);
+    throw new Error(
+      `packed embedding size mismatch: expected ${n * d} floats, got ${out.length}`,
+    );
   }
   return out;
 }

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { thumbnailImageBase64Png } from "@/lib/api/tauri";
 
 const DEFAULT_THUMBNAIL_CONCURRENCY = 4;
 
@@ -23,17 +23,64 @@ function readCachedUrl(path: string, maxEdge: number): string | undefined {
 
 export function isPreviewablePath(path: string) {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
-  return ext === "png" || ext === "jpg" || ext === "jpeg" || ext === "pdf";
+  return (
+    ext === "png" ||
+    ext === "jpg" ||
+    ext === "jpeg" ||
+    ext === "pdf" ||
+    ext === "mp4" ||
+    ext === "mov"
+  );
 }
 
-export type UseThumbnailsForPathsOptions = {
+type UseThumbnailsForPathsOptions = {
   onThumbError?: (path: string, error: unknown) => void;
   maxEdge?: number;
   batchUpdates?: boolean;
   concurrency?: number;
   reorderPreviewPaths?: (previewPaths: string[]) => string[];
   deferStartUntilIdle?: boolean;
+  requestedPaths?: string[];
+  priorityPaths?: string[];
 };
+
+export function prioritizePaths(
+  paths: string[],
+  priorityPaths?: string[],
+): string[] {
+  if (!priorityPaths || priorityPaths.length === 0) return paths;
+  const allowed = new Set(paths);
+  const ordered: string[] = [];
+  const seen = new Set<string>();
+  for (const path of priorityPaths) {
+    if (!allowed.has(path) || seen.has(path)) continue;
+    seen.add(path);
+    ordered.push(path);
+  }
+  for (const path of paths) {
+    if (seen.has(path)) continue;
+    seen.add(path);
+    ordered.push(path);
+  }
+  return ordered;
+}
+
+export function resolveThumbnailQueuePaths(
+  paths: string[],
+  requestedPaths?: string[],
+  priorityPaths?: string[],
+): string[] {
+  const requestedSet =
+    requestedPaths && requestedPaths.length > 0
+      ? new Set(requestedPaths)
+      : null;
+  const previewPaths = paths.filter((path) => {
+    if (!isPreviewablePath(path)) return false;
+    if (requestedSet && !requestedSet.has(path)) return false;
+    return true;
+  });
+  return prioritizePaths(previewPaths, priorityPaths);
+}
 
 /** Loads PNG thumbnails for previewable paths (module-level cache). */
 export function useThumbnailsForPaths(
@@ -49,11 +96,19 @@ export function useThumbnailsForPaths(
   const reorderRef = useRef(options?.reorderPreviewPaths);
   reorderRef.current = options?.reorderPreviewPaths;
   const deferStartUntilIdle = options?.deferStartUntilIdle ?? false;
+  const requestedPathsRef = useRef(options?.requestedPaths);
+  requestedPathsRef.current = options?.requestedPaths;
+  const priorityPathsRef = useRef(options?.priorityPaths);
+  priorityPathsRef.current = options?.priorityPaths;
+  const requestedPathsKey = options?.requestedPaths?.join("\0") ?? "";
+  const priorityPathsKey = options?.priorityPaths?.join("\0") ?? "";
 
   const pathsRef = useRef(paths);
   pathsRef.current = paths;
   const [thumbByPath, setThumbByPath] = useState<Record<string, string>>({});
-  const [thumbFailedByPath, setThumbFailedByPath] = useState<Record<string, true>>({});
+  const [thumbFailedByPath, setThumbFailedByPath] = useState<
+    Record<string, true>
+  >({});
 
   const pendingThumbsRef = useRef<Record<string, string>>({});
   const pendingFailedRef = useRef<Record<string, true>>({});
@@ -72,11 +127,16 @@ export function useThumbnailsForPaths(
     setThumbFailedByPath(failedMap);
 
     let previewPaths = paths.filter((p) => {
-      if (!isPreviewablePath(p)) return false;
       if (readCachedUrl(p, maxEdge)) return false;
       if (sharedFailed[p]) return false;
       return true;
     });
+
+    previewPaths = resolveThumbnailQueuePaths(
+      previewPaths,
+      requestedPathsRef.current,
+      priorityPathsRef.current,
+    );
 
     const reorder = reorderRef.current;
     if (reorder) previewPaths = reorder(previewPaths);
@@ -90,7 +150,8 @@ export function useThumbnailsForPaths(
       if (cancelled) return;
       const thumbs = pendingThumbsRef.current;
       const fails = pendingFailedRef.current;
-      if (Object.keys(thumbs).length === 0 && Object.keys(fails).length === 0) return;
+      if (Object.keys(thumbs).length === 0 && Object.keys(fails).length === 0)
+        return;
       pendingThumbsRef.current = {};
       pendingFailedRef.current = {};
       if (Object.keys(thumbs).length > 0) {
@@ -126,9 +187,7 @@ export function useThumbnailsForPaths(
           nextIndex += 1;
           const p = previewPaths[current];
           try {
-            const thumb = (await invoke("thumbnail_image_base64_png", {
-              args: { path: p, max_edge: maxEdge, page: 0 },
-            })) as { png_base64: string };
+            const thumb = await thumbnailImageBase64Png(p, maxEdge, 0);
             const dataUrl = `data:image/png;base64,${thumb.png_base64}`;
             sharedCache[cacheKey(p, maxEdge)] = dataUrl;
             delete sharedFailed[p];
@@ -163,7 +222,11 @@ export function useThumbnailsForPaths(
     };
 
     let idleId: number | null = null;
-    if (deferStartUntilIdle && previewPaths.length > 0 && typeof requestIdleCallback !== "undefined") {
+    if (
+      deferStartUntilIdle &&
+      previewPaths.length > 0 &&
+      typeof requestIdleCallback !== "undefined"
+    ) {
       idleId = requestIdleCallback(
         () => {
           idleId = null;
@@ -187,7 +250,15 @@ export function useThumbnailsForPaths(
       pendingThumbsRef.current = {};
       pendingFailedRef.current = {};
     };
-  }, [pathsKey, maxEdge, batchUpdates, concurrency, deferStartUntilIdle]);
+  }, [
+    pathsKey,
+    maxEdge,
+    batchUpdates,
+    concurrency,
+    deferStartUntilIdle,
+    requestedPathsKey,
+    priorityPathsKey,
+  ]);
 
   return { thumbByPath, thumbFailedByPath };
 }

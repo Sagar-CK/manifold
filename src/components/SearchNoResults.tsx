@@ -1,3 +1,10 @@
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyTitle,
+} from "@/components/ui/empty";
+
 type SearchNoResultsProps =
   | { variant: "tag-filters" }
   | { variant: "query"; query: string };
@@ -12,9 +19,11 @@ export function SearchNoResults(props: SearchNoResultsProps) {
       : `Nothing matched “${props.query.trim()}”.`;
 
   return (
-    <div className="app-muted text-center">
-      <p>No matching files.</p>
-      <p className="mt-1">{detail}</p>
-    </div>
+    <Empty className="min-h-[15rem] border-border/60 bg-muted/10 py-16">
+      <EmptyHeader>
+        <EmptyTitle>No matching files</EmptyTitle>
+        <EmptyDescription>{detail}</EmptyDescription>
+      </EmptyHeader>
+    </Empty>
   );
 }

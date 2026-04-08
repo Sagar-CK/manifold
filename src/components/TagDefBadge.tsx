@@ -1,24 +1,34 @@
 import { X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
 import type { TagDef } from "@/lib/tags";
+import { cn } from "@/lib/utils";
 
 const tagDefBadgeSurfaceClassName =
-  "border-transparent text-foreground shadow-none ring-1 ring-inset ring-foreground/10 dark:ring-foreground/15";
+  "border-border/70 bg-background text-foreground shadow-none";
 
 /** Same tint + ring as {@link TagDefBadge}, for menus and inline labels (no remove control). */
-export function TagDefLabel({ tag, className }: { tag: TagDef; className?: string }) {
+export function TagDefLabel({
+  tag,
+  className,
+}: {
+  tag: TagDef;
+  className?: string;
+}) {
   return (
     <Badge
-      variant="secondary"
+      variant="outline"
       className={cn(
-        "inline-flex w-fit max-w-xs min-w-0",
+        "inline-flex w-fit max-w-xs min-w-0 gap-1.5",
         tagDefBadgeSurfaceClassName,
         className,
       )}
-      style={{ backgroundColor: `${tag.color}38` }}
     >
+      <span
+        className="size-1.5 shrink-0 rounded-full"
+        style={{ backgroundColor: tag.color }}
+        aria-hidden="true"
+      />
       <span className="min-w-0 truncate">{tag.name}</span>
     </Badge>
   );
@@ -40,19 +50,25 @@ export function TagDefBadge({
   return (
     <Badge
       asChild
-      variant="secondary"
-      className={cn("w-fit max-w-xs min-w-0", tagDefBadgeSurfaceClassName, className)}
-      style={{
-        backgroundColor: `${tag.color}38`,
-      }}
+      variant="outline"
+      className={cn(
+        "w-fit max-w-xs min-w-0",
+        tagDefBadgeSurfaceClassName,
+        className,
+      )}
     >
       <div>
+        <span
+          className="size-1.5 shrink-0 rounded-full"
+          style={{ backgroundColor: tag.color }}
+          aria-hidden="true"
+        />
         <span className="min-w-0 flex-1 truncate">{tag.name}</span>
         <Button
           type="button"
           variant="ghost"
           size="icon-xs"
-          className="size-5 shrink-0 rounded-full p-0 text-foreground/45 hover:text-foreground/90"
+          className="size-5 shrink-0 rounded-full p-0 text-muted-foreground hover:text-foreground"
           aria-label={`Remove tag ${tag.name}`}
           onClick={(e) => {
             e.preventDefault();

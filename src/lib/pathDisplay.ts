@@ -1,4 +1,4 @@
-export function normalizePathSlashes(value: string): string {
+function normalizePathSlashes(value: string): string {
   return value.replace(/\\/g, "/").replace(/\/+$/, "");
 }
 
@@ -27,7 +27,9 @@ export function formatIndexedPathForDisplay(
   includeRoots: string[],
 ): string {
   const p = normalizePathSlashes(absolutePath.trim());
-  const roots = includeRoots.map((r) => normalizePathSlashes(r.trim())).filter(Boolean);
+  const roots = includeRoots
+    .map((r) => normalizePathSlashes(r.trim()))
+    .filter(Boolean);
 
   let bestLen = 0;
   let bestRoot = "";

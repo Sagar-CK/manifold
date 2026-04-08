@@ -1,19 +1,10 @@
-import type { MouseEvent } from "react";
 import { Check, X } from "lucide-react";
+import type { MouseEvent } from "react";
+import { fileExtension, fileNameFromPath, fileTypeLabel } from "@/lib/files";
+import type { TagDef } from "../lib/tags";
+import { TagDefLabel } from "./TagDefBadge";
 import { Button } from "./ui/button";
 import { Skeleton } from "./ui/skeleton";
-import { TagDefLabel } from "./TagDefBadge";
-import type { TagDef } from "../lib/tags";
-
-function fileTypeLabel(ext: string) {
-  const cleanExt = ext.replace(/^\./, "").trim().toUpperCase();
-  return cleanExt || "FILE";
-}
-
-function fileNameFromPath(path: string) {
-  const normalized = path.replace(/\\/g, "/");
-  return normalized.split("/").pop() ?? path;
-}
 
 export function ReviewPendingTagRow({
   path,
@@ -37,7 +28,7 @@ export function ReviewPendingTagRow({
   /** Preview click: plain → in-app file view; ⌘/Ctrl → open in default app (parent implements). */
   onInspectFile?: (e: MouseEvent<HTMLButtonElement>) => void;
 }) {
-  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  const ext = fileExtension(path);
   const fileName = fileNameFromPath(path);
 
   const previewBlock = (
@@ -45,7 +36,10 @@ export function ReviewPendingTagRow({
       <div className="relative w-full px-1">
         {showTagBadge ? (
           <div className="absolute top-0.5 right-0.5 z-10 max-w-[min(100%-3rem,11rem)]">
-            <TagDefLabel tag={tag} className="max-w-full truncate text-[10px]" />
+            <TagDefLabel
+              tag={tag}
+              className="max-w-full truncate text-[10px]"
+            />
           </div>
         ) : null}
         {thumbUrl ? (
@@ -61,26 +55,31 @@ export function ReviewPendingTagRow({
             {thumbExpectLoading && !thumbFailed ? (
               <Skeleton className="h-16 w-28 rounded-md" />
             ) : (
-              <div className="flex h-11 w-11 items-center justify-center rounded-md border border-border bg-muted">
-                <span className="app-label leading-none">{fileTypeLabel(ext)}</span>
+              <div className="flex h-11 w-11 items-center justify-center rounded-lg border border-border/70 bg-muted/20">
+                <span className="app-label leading-none">
+                  {fileTypeLabel(ext)}
+                </span>
               </div>
             )}
           </div>
         )}
       </div>
-      <div className="w-full min-w-0 truncate text-center text-xs font-normal leading-tight text-foreground" title={path}>
+      <div
+        className="w-full min-w-0 truncate text-center text-xs font-normal leading-tight text-foreground"
+        title={path}
+      >
         {fileName}
       </div>
     </>
   );
 
   return (
-    <div className="group relative flex min-w-0 flex-col items-center gap-2 rounded-lg p-1">
+    <div className="group relative flex min-w-0 flex-col items-center gap-2">
       {onInspectFile ? (
         <Button
           type="button"
           variant="ghost"
-          className="h-auto w-full flex-col gap-2 rounded-md p-0 text-left font-normal hover:bg-muted"
+          className="h-auto w-full flex-col gap-2 rounded-xl border border-transparent p-2 text-left font-normal hover:border-border/70 hover:bg-muted/20"
           onClick={(e) => onInspectFile(e)}
           title="Click to view · ⌘ or Ctrl-click to open in default app"
           aria-label={`View file ${fileName}. Command or control click opens in default app.`}
@@ -93,9 +92,9 @@ export function ReviewPendingTagRow({
       <div className="flex items-center justify-center gap-0.5">
         <Button
           type="button"
-          variant="ghost"
+          variant="outline"
           size="icon-sm"
-          className="size-8 text-emerald-600 hover:bg-emerald-100 hover:text-emerald-700"
+          className="size-8 rounded-full border-border/70 text-muted-foreground hover:bg-muted hover:text-foreground"
           aria-label={`Accept tag ${tag.name} for ${fileName}`}
           onClick={onAccept}
         >
@@ -103,9 +102,9 @@ export function ReviewPendingTagRow({
         </Button>
         <Button
           type="button"
-          variant="ghost"
+          variant="outline"
           size="icon-sm"
-          className="size-8 text-destructive hover:bg-destructive/10"
+          className="size-8 rounded-full border-border/70 text-muted-foreground hover:bg-muted hover:text-foreground"
           aria-label={`Reject tag ${tag.name} for ${fileName}`}
           onClick={onReject}
         >

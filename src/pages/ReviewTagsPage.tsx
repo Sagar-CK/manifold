@@ -1,57 +1,99 @@
 import { ArrowLeft, Check } from "lucide-react";
-import { openPath } from "@tauri-apps/plugin-opener";
+import { useEffect, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { useMemo } from "react";
-import { navigateBackOrFallback } from "../lib/navigateBack";
-import { createLogger } from "../lib/log";
-import { ReviewPendingTagRow } from "../components/ReviewPendingTagRow";
-import { useTagsState } from "@/lib/useTagsState";
+import { openPathInDefaultApp as tryOpenPathInDefaultApp } from "@/lib/files";
 import {
-  acceptPendingAutoTag,
-  rejectPendingAutoTag,
-  acceptAllPendingForTag,
-  rejectAllPendingForTag,
-  saveTagsState,
-  tagIdsForPath,
-  type TagDef,
-} from "../lib/tags";
-import { TagDefLabel } from "../components/TagDefBadge";
-import { syncPathTagsToQdrant } from "../lib/qdrantTags";
+  acceptAllPendingTagsForTag,
+  acceptPendingTag,
+  rejectAllPendingTagsForTag,
+  rejectPendingTag,
+} from "@/lib/tagActions";
+import { useTagsState } from "@/lib/useTagsState";
 import { PageHeader } from "../components/PageHeader";
+import { ReviewPendingTagRow } from "../components/ReviewPendingTagRow";
+import { TagDefLabel } from "../components/TagDefBadge";
 import { Button } from "../components/ui/button";
-import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip";
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "../components/ui/empty";
 import { ScrollArea } from "../components/ui/scroll-area";
-import { isPreviewablePath, useThumbnailsForPaths } from "../lib/useThumbnailsForPaths";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "../components/ui/tooltip";
+import { createLogger } from "../lib/log";
+import { navigateBackOrFallback } from "../lib/navigateBack";
+import {
+  pruneIndexedPathIfMissing,
+  pruneMissingIndexedPathsFromList,
+} from "../lib/staleIndexedPaths";
+import type { TagDef } from "../lib/tags";
+import {
+  isPreviewablePath,
+  useThumbnailsForPaths,
+} from "../lib/useThumbnailsForPaths";
 
 const reviewLog = createLogger("review-tags");
 
 async function openPathInDefaultApp(path: string) {
-  try {
-    await openPath(path);
-  } catch (e) {
-    reviewLog.error("openPath failed", { path, error: String(e) });
+  const error = await tryOpenPathInDefaultApp(path);
+  if (error) {
+    reviewLog.error("openPath failed", { path, error });
   }
 }
 
-export function ReviewTagsPage({
-  sourceId,
-}: {
-  sourceId: string;
-}) {
+export function ReviewTagsPage({ sourceId }: { sourceId: string }) {
   const navigate = useNavigate();
-  const [tagsState, setTagsState] = useTagsState();
+  const [tagsState] = useTagsState();
 
   const pendingPaths = Object.keys(tagsState.pendingAutoTags).filter(
     (p) => tagsState.pendingAutoTags[p]?.length > 0,
   );
 
   const thumbPathsKey = pendingPaths.join("\0");
-  const { thumbByPath, thumbFailedByPath } = useThumbnailsForPaths(thumbPathsKey, pendingPaths);
+  const { thumbByPath, thumbFailedByPath } = useThumbnailsForPaths(
+    thumbPathsKey,
+    pendingPaths,
+    {
+      onThumbError: (path, error) => {
+        void pruneIndexedPathIfMissing(sourceId, path, error).catch(
+          (cleanupError) => {
+            reviewLog.warn("stale review thumbnail cleanup failed", {
+              path,
+              error: String(cleanupError),
+            });
+          },
+        );
+      },
+    },
+  );
 
   const hasPending = pendingPaths.length > 0;
 
+  useEffect(() => {
+    if (pendingPaths.length === 0) return;
+    void pruneMissingIndexedPathsFromList(sourceId, pendingPaths).catch(
+      (error) => {
+        reviewLog.warn("review stale suggestion prune failed", {
+          count: pendingPaths.length,
+          error: String(error),
+        });
+      },
+    );
+  }, [sourceId, thumbPathsKey]);
+
   const pendingRows = useMemo(() => {
-    const rows: Array<{ path: string; tagId: string; key: string; tagDef: TagDef }> = [];
+    const rows: Array<{
+      path: string;
+      tagId: string;
+      key: string;
+      tagDef: TagDef;
+    }> = [];
     for (const path of pendingPaths) {
       for (const tagId of tagsState.pendingAutoTags[path] ?? []) {
         const tagDef = tagsState.tags.find((t) => t.id === tagId);
@@ -75,43 +117,30 @@ export function ReviewTagsPage({
     const order = new Map(tagsState.tags.map((t, i) => [t.id, i] as const));
     return Array.from(map.entries())
       .map(([tagId, v]) => ({ tagId, tagDef: v.tagDef, rows: v.rows }))
-      .sort((a, b) => (order.get(a.tagId) ?? 999) - (order.get(b.tagId) ?? 999));
+      .sort(
+        (a, b) => (order.get(a.tagId) ?? 999) - (order.get(b.tagId) ?? 999),
+      );
   }, [pendingRows, tagsState.tags]);
 
   const handleAccept = (path: string, tagId: string) => {
-    const next = acceptPendingAutoTag(tagsState, path, tagId);
-    setTagsState(next);
-    saveTagsState(next);
-    void syncPathTagsToQdrant(sourceId, path, tagIdsForPath(next, path)).catch(() => {});
+    acceptPendingTag(path, tagId, sourceId);
   };
 
   const handleReject = (path: string, tagId: string) => {
-    const next = rejectPendingAutoTag(tagsState, path, tagId);
-    setTagsState(next);
-    saveTagsState(next);
+    rejectPendingTag(path, tagId);
   };
 
   const handleAcceptAllForTag = (tagId: string) => {
-    const pathsWithTag = Object.keys(tagsState.pendingAutoTags).filter((p) =>
-      tagsState.pendingAutoTags[p]?.includes(tagId),
-    );
-    const next = acceptAllPendingForTag(tagsState, tagId);
-    setTagsState(next);
-    saveTagsState(next);
-    for (const path of pathsWithTag) {
-      void syncPathTagsToQdrant(sourceId, path, tagIdsForPath(next, path)).catch(() => {});
-    }
+    acceptAllPendingTagsForTag(tagId, sourceId);
   };
 
   const handleRejectAllForTag = (tagId: string) => {
-    const next = rejectAllPendingForTag(tagsState, tagId);
-    setTagsState(next);
-    saveTagsState(next);
+    rejectAllPendingTagsForTag(tagId);
   };
 
   return (
     <section className="flex min-h-0 flex-1 flex-col">
-      <div className="relative mb-6 shrink-0 flex flex-col items-center gap-2 text-center">
+      <div className="relative shrink-0 flex flex-col items-center gap-2 text-center">
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
@@ -132,11 +161,19 @@ export function ReviewTagsPage({
 
       <div className="min-h-0 flex-1">
         {!hasPending ? (
-          <div className="flex h-full min-h-0 flex-col items-center justify-center rounded-2xl bg-muted/30 py-24 text-center">
-            <Check className="mb-5 size-14 text-muted-foreground/25" strokeWidth={1.75} aria-hidden />
-            <p className="text-lg font-semibold tracking-tight text-foreground">Nothing pending</p>
-            <p className="mt-1.5 text-sm text-muted-foreground">No suggestions.</p>
-          </div>
+          <Empty className="min-h-full border-border/60 bg-muted/10 py-24">
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <Check
+                  className="text-muted-foreground"
+                  strokeWidth={1.75}
+                  aria-hidden
+                />
+              </EmptyMedia>
+              <EmptyTitle>Nothing pending</EmptyTitle>
+              <EmptyDescription>No suggestions.</EmptyDescription>
+            </EmptyHeader>
+          </Empty>
         ) : (
           <ScrollArea className="h-full pr-3">
             <div className="flex flex-col gap-8 pb-8">
@@ -147,41 +184,56 @@ export function ReviewTagsPage({
                       <TagDefLabel tag={tagDef} className="text-sm" />
                     </div>
                     <div className="flex flex-wrap gap-2 sm:justify-end">
-                      <Button onClick={() => handleRejectAllForTag(tagId)} variant="outline" size="sm">
+                      <Button
+                        onClick={() => handleRejectAllForTag(tagId)}
+                        variant="outline"
+                        size="sm"
+                      >
                         Reject all
                       </Button>
-                      <Button onClick={() => handleAcceptAllForTag(tagId)} variant="default" size="sm">
+                      <Button
+                        onClick={() => handleAcceptAllForTag(tagId)}
+                        variant="secondary"
+                        size="sm"
+                      >
                         Accept all
                       </Button>
                     </div>
                   </div>
                   <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
-                    {rows.map(({ path, tagId: rowTagId, key, tagDef: rowTag }) => {
-                      const preview = isPreviewablePath(path);
-                      return (
-                        <ReviewPendingTagRow
-                          key={key}
-                          path={path}
-                          tag={rowTag}
-                          showTagBadge={false}
-                          thumbUrl={thumbByPath[path] ?? null}
-                          thumbFailed={!!thumbFailedByPath[path]}
-                          thumbExpectLoading={preview && !thumbFailedByPath[path]}
-                          onAccept={() => handleAccept(path, rowTagId)}
-                          onReject={() => handleReject(path, rowTagId)}
-                          onInspectFile={(e) => {
-                            if (e.metaKey || e.ctrlKey) {
-                              e.preventDefault();
-                              void openPathInDefaultApp(path);
-                              return;
+                    {rows.map(
+                      ({ path, tagId: rowTagId, key, tagDef: rowTag }) => {
+                        const preview = isPreviewablePath(path);
+                        return (
+                          <ReviewPendingTagRow
+                            key={key}
+                            path={path}
+                            tag={rowTag}
+                            showTagBadge={false}
+                            thumbUrl={thumbByPath[path] ?? null}
+                            thumbFailed={!!thumbFailedByPath[path]}
+                            thumbExpectLoading={
+                              preview && !thumbFailedByPath[path]
                             }
-                            navigate(`/file?path=${encodeURIComponent(path)}`, {
-                              state: { returnTo: "/review-tags" },
-                            });
-                          }}
-                        />
-                      );
-                    })}
+                            onAccept={() => handleAccept(path, rowTagId)}
+                            onReject={() => handleReject(path, rowTagId)}
+                            onInspectFile={(e) => {
+                              if (e.metaKey || e.ctrlKey) {
+                                e.preventDefault();
+                                void openPathInDefaultApp(path);
+                                return;
+                              }
+                              navigate(
+                                `/file?path=${encodeURIComponent(path)}`,
+                                {
+                                  state: { returnTo: "/review-tags" },
+                                },
+                              );
+                            }}
+                          />
+                        );
+                      },
+                    )}
                   </div>
                 </section>
               ))}

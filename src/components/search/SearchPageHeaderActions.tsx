@@ -1,5 +1,6 @@
 import { ChartScatter, ListChecks, Settings } from "lucide-react";
 import { Link } from "react-router-dom";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Tooltip,
@@ -19,7 +20,7 @@ export function SearchPageHeaderActions({
           <Button
             variant="ghost"
             size="icon"
-            className="relative text-muted-foreground"
+            className="relative rounded-full text-muted-foreground hover:bg-muted/50"
             asChild
           >
             <Link
@@ -32,9 +33,12 @@ export function SearchPageHeaderActions({
             >
               <ListChecks className="h-5 w-5" aria-hidden="true" />
               {pendingReviewCount > 0 ? (
-                <span className="absolute -right-0.5 -top-0.5 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-orange-500 px-1 text-[10px] font-semibold leading-none text-white">
+                <Badge
+                  variant="outline"
+                  className="absolute -right-1 -top-1 h-[18px] min-w-[18px] justify-center rounded-full border-border/70 bg-card px-1 text-[10px] font-medium leading-none text-foreground shadow-xs"
+                >
                   {pendingReviewCount > 99 ? "99+" : pendingReviewCount}
-                </span>
+                </Badge>
               ) : null}
             </Link>
           </Button>
@@ -46,7 +50,7 @@ export function SearchPageHeaderActions({
           <Button
             variant="ghost"
             size="icon"
-            className="text-muted-foreground"
+            className="rounded-full text-muted-foreground hover:bg-muted/50"
             asChild
           >
             <Link to="/graph" aria-label="Open graph explorer">
@@ -61,7 +65,7 @@ export function SearchPageHeaderActions({
           <Button
             variant="ghost"
             size="icon"
-            className="text-muted-foreground"
+            className="rounded-full text-muted-foreground hover:bg-muted/50"
             asChild
           >
             <Link to="/settings" aria-label="Open settings">

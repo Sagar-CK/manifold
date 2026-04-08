@@ -1,6 +1,6 @@
 import { Toggle } from "@/components/ui/toggle";
-import { cn } from "@/lib/utils";
 import type { TagDef } from "@/lib/tags";
+import { cn } from "@/lib/utils";
 
 type TagFilterPillProps = {
   tag: Pick<TagDef, "id" | "name" | "color">;
@@ -9,7 +9,12 @@ type TagFilterPillProps = {
   ariaLabel: string;
 };
 
-export function TagFilterPill({ tag, pressed, onPressedChange, ariaLabel }: TagFilterPillProps) {
+export function TagFilterPill({
+  tag,
+  pressed,
+  onPressedChange,
+  ariaLabel,
+}: TagFilterPillProps) {
   return (
     <Toggle
       variant="outline"
@@ -17,18 +22,15 @@ export function TagFilterPill({ tag, pressed, onPressedChange, ariaLabel }: TagF
       onPressedChange={onPressedChange}
       aria-label={ariaLabel}
       className={cn(
-        "h-auto min-h-0 shrink-0 rounded-full border px-2.5 py-0.5 text-xs font-medium shadow-none hover:bg-muted/80",
+        "h-auto min-h-0 shrink-0 rounded-full border-border/70 bg-background px-2.5 py-1 text-xs font-normal text-foreground shadow-none hover:bg-muted/50 aria-pressed:border-border aria-pressed:bg-muted aria-pressed:text-foreground",
         pressed && "shadow-none",
       )}
-      style={
-        pressed
-          ? {
-              backgroundColor: `${tag.color}20`,
-              borderColor: tag.color,
-            }
-          : undefined
-      }
     >
+      <span
+        className="size-1.5 rounded-full"
+        style={{ backgroundColor: tag.color }}
+        aria-hidden="true"
+      />
       {tag.name}
     </Toggle>
   );
