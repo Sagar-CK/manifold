@@ -1,6 +1,7 @@
 {
   "qdrantVersion": "v1.17.1",
   "pdfiumVersion": "chromium%2F7543",
+  "ffmpegVersion": "8.1",
   "targets": {
     "darwin-arm64": {
       "qdrant": {
@@ -16,6 +17,32 @@
         "archiveType": "tar.gz",
         "binaryPathInArchive": "lib/libpdfium.dylib",
         "outputBinaryName": "libpdfium.dylib"
+      },
+      "ffmpeg": {
+        "artifacts": [
+          {
+            "archiveUrl": "https://deolaha.ca/ffmpeg/ffmpeg-8.1.zip",
+            "archiveSha256": "d67db25908eff64b7d0eaa73784f0c55728d9e036a96931095fcf8e8968eefab",
+            "archiveType": "zip",
+            "outputs": [
+              {
+                "binaryPathInArchive": "ffmpeg",
+                "outputBinaryName": "ffmpeg"
+              }
+            ]
+          },
+          {
+            "archiveUrl": "https://deolaha.ca/ffmpeg/ffprobe-8.1.zip",
+            "archiveSha256": "b6e9bf4f4ab2992dace205498d99d9e2ede684e3e8ae89485cadd3b91711ea04",
+            "archiveType": "zip",
+            "outputs": [
+              {
+                "binaryPathInArchive": "ffprobe",
+                "outputBinaryName": "ffprobe"
+              }
+            ]
+          }
+        ]
       }
     },
     "darwin-x64": {
@@ -32,6 +59,32 @@
         "archiveType": "tar.gz",
         "binaryPathInArchive": "lib/libpdfium.dylib",
         "outputBinaryName": "libpdfium.dylib"
+      },
+      "ffmpeg": {
+        "artifacts": [
+          {
+            "archiveUrl": "https://deolaha.ca/ffmpeg/ffmpeg-8.1.zip",
+            "archiveSha256": "d67db25908eff64b7d0eaa73784f0c55728d9e036a96931095fcf8e8968eefab",
+            "archiveType": "zip",
+            "outputs": [
+              {
+                "binaryPathInArchive": "ffmpeg",
+                "outputBinaryName": "ffmpeg"
+              }
+            ]
+          },
+          {
+            "archiveUrl": "https://deolaha.ca/ffmpeg/ffprobe-8.1.zip",
+            "archiveSha256": "b6e9bf4f4ab2992dace205498d99d9e2ede684e3e8ae89485cadd3b91711ea04",
+            "archiveType": "zip",
+            "outputs": [
+              {
+                "binaryPathInArchive": "ffprobe",
+                "outputBinaryName": "ffprobe"
+              }
+            ]
+          }
+        ]
       }
     },
     "linux-x64": {
@@ -48,6 +101,21 @@
         "archiveType": "tar.gz",
         "binaryPathInArchive": "lib/libpdfium.so",
         "outputBinaryName": "libpdfium.so"
+      },
+      "ffmpeg": {
+        "archiveUrl": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-04-07-13-13/ffmpeg-n8.1-7-ga3475e2554-linux64-lgpl-8.1.tar.xz",
+        "archiveSha256": "c8463921eae61720ad47df0674163a7945e6824c743dfca47ea6e33cc1d03819",
+        "archiveType": "tar.xz",
+        "outputs": [
+          {
+            "binaryPathInArchive": "ffmpeg-n8.1-7-ga3475e2554-linux64-lgpl-8.1/bin/ffmpeg",
+            "outputBinaryName": "ffmpeg"
+          },
+          {
+            "binaryPathInArchive": "ffmpeg-n8.1-7-ga3475e2554-linux64-lgpl-8.1/bin/ffprobe",
+            "outputBinaryName": "ffprobe"
+          }
+        ]
       }
     },
     "win32-x64": {
@@ -64,6 +132,21 @@
         "archiveType": "tar.gz",
         "binaryPathInArchive": "bin/pdfium.dll",
         "outputBinaryName": "pdfium.dll"
+      },
+      "ffmpeg": {
+        "archiveUrl": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-04-07-13-13/ffmpeg-n8.1-7-ga3475e2554-win64-lgpl-8.1.zip",
+        "archiveSha256": "064303b1d434452aea176a7764628e35f3be0bf37565aa45b6a8f914265ecd0e",
+        "archiveType": "zip",
+        "outputs": [
+          {
+            "binaryPathInArchive": "ffmpeg-n8.1-7-ga3475e2554-win64-lgpl-8.1/bin/ffmpeg.exe",
+            "outputBinaryName": "ffmpeg.exe"
+          },
+          {
+            "binaryPathInArchive": "ffmpeg-n8.1-7-ga3475e2554-win64-lgpl-8.1/bin/ffprobe.exe",
+            "outputBinaryName": "ffprobe.exe"
+          }
+        ]
       }
     }
   }

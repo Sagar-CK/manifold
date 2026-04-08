@@ -13,7 +13,7 @@ Only Gemini (and optional remote Qdrant) leave the machine.
 - **Scopes** — include folders, excludes, extensions, defaults in Settings.
 - **Media indexing** — images, PDF (bundled PDFium), audio/video; OCR/text via Gemini where needed.
 - **Search** — hybrid full-text + semantic (`content_embeddings` / `metadata_embeddings` in Qdrant; see `src-tauri/src/qdrant.rs`).
-- **UI** — results with thumbnails where supported, **graph** view for 2D embedding projection, **tags** and review flows (optional Gemini-assisted tagging).
+- **UI** — results with thumbnails where supported, including video thumbnails via bundled FFmpeg, **graph** view for 2D embedding projection, **tags** and review flows (optional Gemini-assisted tagging).
 
 **Routes** (hash router): `/` search · `/file` · `/graph` · `/settings` · `/review-tags`.
 
@@ -35,6 +35,7 @@ manifold/
 │   │   ├── lib.rs
 │   │   ├── embedding.rs          # Indexing, Gemini embed + extraction
 │   │   ├── qdrant.rs             # Client, collections, search
+│   │   ├── scan.rs               # Shared scan pipeline + derivations
 │   │   ├── text_index.rs         # Local full-text index
 │   │   ├── gemini_settings.rs
 │   │   ├── logging.rs
@@ -60,7 +61,7 @@ manifold/
 | ------- | --------------------------------------------------------------------------------------------------------------------------- |
 | Desktop | Tauri 2, Rust                                                                                                               |
 | UI      | React 19, Vite 7, Tailwind CSS 4, shadcn/Radix, `lucide-react`, React Router                                                |
-| Vectors | Qdrant (HTTP/gRPC; v1.17.x in Docker and bundled binary manifest)                                                           |
+| Vectors | Qdrant (gRPC at `6334`; dashboard at `6333`; v1.17.x in Docker and bundled binary manifest)                               |
 | Models  | `models/gemini-embedding-2-preview` (embeddings), `models/gemini-3-flash-preview` (text/OCR) — `src-tauri/src/embedding.rs` |
 
 
@@ -76,17 +77,16 @@ manifold/
   ```bash
    pnpm install
   ```
-2. **Bootstrap dev resources** — creates `.env.local` from `.env.example` when missing and downloads **PDFium** into `src-tauri/resources/pdfium/`.
+2. **Bootstrap dev resources** — creates `.env.local` from `.env.example` when missing and downloads **PDFium** plus **FFmpeg** into `src-tauri/resources/`.
   ```bash
    pnpm setup:dev
   ```
 3. **Qdrant**
-  - **With Docker (typical dev):** default HTTP URL is `http://127.0.0.1:6333`. Start the stack:
+  - **With Docker (typical dev):** default gRPC URL is `http://127.0.0.1:6334`. Start the stack:
    Dashboard: [http://127.0.0.1:6333/dashboard](http://127.0.0.1:6333/dashboard). On macOS, prefer `127.0.0.1` over `localhost` if the UI and API disagree (IPv4 vs IPv6).
   - **Without Docker:** clear `MANIFOLD_QDRANT_URL` in `.env.local`, run `pnpm setup:binaries`, then start the app — the bundled Qdrant binary under `src-tauri/resources/qdrant/` can be launched automatically when no external URL is set (see `.env.example` comments).
 4. **Gemini API key** — set in `.env.local`:
-  - `MANIFOLD_GEMINI_API_KEY` (primary), or  
-  - `GOOGLE_GENERATIVE_AI_API_KEY` (fallback name the backend accepts)
+  - `MANIFOLD_GEMINI_API_KEY`
 5. **Run the app**
   ```bash
    pnpm tauri dev
@@ -100,10 +100,13 @@ Do not commit `.env.local`.
 | Command                                          | Purpose                                                       |
 | ------------------------------------------------ | ------------------------------------------------------------- |
 | `pnpm dev`                                       | Vite dev server only (Tauri runs this via `beforeDevCommand`) |
-| `pnpm build`                                     | Production frontend build (`tsc` + Vite)                      |
+| `pnpm build`                                     | Production frontend build (`typecheck` + Vite)                |
+| `pnpm typecheck`                                 | TypeScript compiler check                                     |
+| `pnpm lint` / `pnpm format`                      | Biome linting and formatting                                  |
+| `pnpm test` / `pnpm check`                       | Vitest unit tests / full local verification                   |
 | `pnpm tauri dev` / `pnpm tauri build`            | Desktop app                                                   |
-| `pnpm setup:dev`                                 | `.env.local` + PDFium                                         |
-| `pnpm setup:binaries`                            | PDFium + Qdrant binaries (release / CI)                       |
+| `pnpm setup:dev`                                 | `.env.local` + PDFium + FFmpeg                                |
+| `pnpm setup:binaries`                            | PDFium + FFmpeg + Qdrant binaries (release / CI)              |
 | `pnpm setup:pdfium` / `pnpm setup:qdrant-binary` | Single-artifact setup                                         |
 | `pnpm qdrant:up` / `pnpm qdrant:down`            | Docker Compose Qdrant                                         |
 
@@ -114,9 +117,11 @@ Do not commit `.env.local`.
 
 See `.env.example` for the full list. Highlights:
 
-- `**MANIFOLD_QDRANT_URL**` — HTTP API base (unset in packaged builds to allow bundled Qdrant).
-- `**MANIFOLD_QDRANT_GRPC_URL**` — optional gRPC override.
+- `**MANIFOLD_GEMINI_API_KEY**` — Gemini embeddings/OCR API key.
+- `**MANIFOLD_QDRANT_URL**` — Qdrant gRPC endpoint (default local dev: `http://127.0.0.1:6334`).
 - `**MANIFOLD_QDRANT_API_KEY**` — for secured or remote Qdrant.
+- `**MANIFOLD_PDFIUM_LIB_DIR**` — optional PDFium override.
+- `**MANIFOLD_FFMPEG_BIN_DIR**` — optional directory override for `ffmpeg` and `ffprobe`.
 
 ### `MANIFOLD_LOG` (Rust / Tauri)
 
@@ -145,4 +150,4 @@ Artifacts: `src-tauri/target/release/bundle/`. GitHub Actions (`.github/workflow
 
 - Clearing the index removes **vectors and index data**, not files on disk.
 - Binary provenance and licensing: `**docs/runtime-binaries.md`**.
-
+- Current macOS FFmpeg upstream artifacts are `x86_64`; Apple Silicon users can override them with `MANIFOLD_FFMPEG_BIN_DIR` if they need a native build.

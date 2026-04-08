@@ -34,16 +34,28 @@ async function ensureEnvLocal() {
 }
 
 async function ensureResourceDirs() {
-  await mkdir(path.join(repoRoot, "src-tauri", "resources", "pdfium"), { recursive: true });
+  await mkdir(path.join(repoRoot, "src-tauri", "resources", "pdfium"), {
+    recursive: true,
+  });
+  await mkdir(path.join(repoRoot, "src-tauri", "resources", "ffmpeg"), {
+    recursive: true,
+  });
 }
 
 async function main() {
   await ensureEnvLocal();
   await ensureResourceDirs();
-  // PDFium only: Qdrant runs in Docker for local dev (see README). Use `pnpm setup:binaries` for Qdrant + PDFium (CI / production).
-  await run(process.execPath, ["./scripts/setup-binaries.mjs", "--pdfium-only"]);
+  // Qdrant runs in Docker for local dev (see README). Use `pnpm setup:binaries` for
+  // Qdrant + PDFium + FFmpeg (CI / production).
+  await run(process.execPath, [
+    "./scripts/setup-binaries.mjs",
+    "--pdfium-only",
+    "--ffmpeg-only",
+  ]);
   console.log("\n[setup:dev] Complete.");
-  console.log("[setup:dev] Start Qdrant: pnpm qdrant:up   (or: docker compose up -d)");
+  console.log(
+    "[setup:dev] Start Qdrant: pnpm qdrant:up   (or: docker compose up -d)",
+  );
   console.log("[setup:dev] Then run: pnpm tauri dev");
 }
 

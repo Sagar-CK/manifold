@@ -3,6 +3,7 @@
 Manifold depends on native runtime binaries for:
 
 - PDF rendering (`pdfium`) — loaded dynamically by `pdfium-render` (see `src-tauri/src/lib.rs`)
+- Video thumbnails (`ffmpeg`, `ffprobe`) — invoked by the Tauri thumbnail command for `mp4` / `mov`
 - Vector storage/search (`qdrant`) — bundled for packaged apps; optional local binary for dev without Docker
 
 ## Source of truth
@@ -10,7 +11,7 @@ Manifold depends on native runtime binaries for:
 - Binary manifest: `scripts/binaries-manifest.json`
 - Installer script: `scripts/setup-binaries.mjs`
 
-The actual `qdrant` and PDFium library files are **not committed** to this repository (they are listed in `.gitignore`). After cloning, run `pnpm setup:dev` (PDFium only) and/or `pnpm setup:binaries` so `src-tauri/resources/` contains the artifacts for your platform. CI runs `pnpm setup:binaries` on each matrix runner before `tauri build`.
+The actual runtime binaries are **not committed** to this repository (they are listed in `.gitignore`). After cloning, run `pnpm setup:dev` (PDFium + FFmpeg) and/or `pnpm setup:binaries` so `src-tauri/resources/` contains the artifacts for your platform. CI runs `pnpm setup:binaries` on each matrix runner before `tauri build`.
 
 The manifest pins versioned release URLs by platform:
 
@@ -18,6 +19,13 @@ The manifest pins versioned release URLs by platform:
 - `darwin-x64`
 - `linux-x64`
 - `win32-x64`
+
+FFmpeg providers are pinned from sources linked from the official FFmpeg download page:
+
+- macOS: Evermeet (`ffmpeg` and `ffprobe` zip artifacts)
+- Linux / Windows: BtbN FFmpeg Builds (LGPL archives)
+
+Current macOS upstream artifacts are `x86_64`; the manifest uses those for both macOS targets until an officially linked arm64 build source is available. On Apple Silicon, `MANIFOLD_FFMPEG_BIN_DIR` can override the bundled binaries if needed.
 
 ## Verification model
 
@@ -30,13 +38,15 @@ For each artifact, the setup script:
 ## Setup commands
 
 - `pnpm setup:dev` — PDFium only (local dev; use Docker for Qdrant per README).
-- `pnpm setup:binaries` — Qdrant + PDFium (release builds and CI).
+- `pnpm setup:binaries` — Qdrant + PDFium + FFmpeg (release builds and CI).
 - `node ./scripts/setup-binaries.mjs --pdfium-only` — PDFium only.
+- `node ./scripts/setup-binaries.mjs --ffmpeg-only` — FFmpeg only.
 - `node ./scripts/setup-binaries.mjs --qdrant-only` — Qdrant only.
 
 ## Output locations
 
 - PDFium: `src-tauri/resources/pdfium/`
+- FFmpeg: `src-tauri/resources/ffmpeg/`
 - Qdrant: `src-tauri/resources/qdrant/`
 
 These directories are included in Tauri bundling via `src-tauri/tauri.conf.json` (`resources/**/*`).
@@ -54,3 +64,5 @@ When upgrading, verify upstream license and redistribution terms:
 
 - Qdrant releases: https://github.com/qdrant/qdrant/releases
 - PDFium binaries: https://github.com/bblanchon/pdfium-binaries/releases
+- FFmpeg download page: https://www.ffmpeg.org/download.html
+- FFmpeg legal notes: https://ffmpeg.org/legal.html

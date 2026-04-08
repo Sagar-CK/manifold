@@ -46,3 +46,7 @@ src-tauri/resources/qdrant/qdrant.exe
 src-tauri/resources/pdfium/libpdfium.dylib
 src-tauri/resources/pdfium/libpdfium.so
 src-tauri/resources/pdfium/pdfium.dll
+src-tauri/resources/ffmpeg/ffmpeg
+src-tauri/resources/ffmpeg/ffprobe
+src-tauri/resources/ffmpeg/ffmpeg.exe
+src-tauri/resources/ffmpeg/ffprobe.exe
