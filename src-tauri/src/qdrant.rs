@@ -6,7 +6,7 @@ use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::AppHandle;
 use tauri::Manager;
 use tokio::sync::Mutex;
@@ -82,14 +82,7 @@ fn dashboard_url_hint(grpc_endpoint: &str, http_port: Option<u16>) -> String {
 }
 
 fn external_connection_dashboard_hint(grpc_endpoint: &str) -> String {
-    if let Some(http) = trim_env_var("MANIFOLD_QDRANT_URL") {
-        format!(
-            "{}/dashboard#/collections",
-            http.trim_end_matches('/')
-        )
-    } else {
-        dashboard_url_hint(grpc_endpoint, None)
-    }
+    dashboard_url_hint(grpc_endpoint, None)
 }
 
 fn log_qdrant_connected(connection_mode: &str, grpc_endpoint: &str, dashboard_url: &str) {
@@ -215,8 +208,34 @@ fn build_qdrant_client(url: &str, timeout_ms: u64, connect_timeout_ms: Option<u6
     builder.build().map_err(|e| e.to_string())
 }
 
-async fn quick_ready(client: &Qdrant) -> Result<(), String> {
-    client.health_check().await.map_err(|e| format!("Qdrant not ready: {e}"))?;
+fn humanize_qdrant_connection_error(url: &str, error: &str) -> String {
+    let parsed_url = url::Url::parse(url).ok();
+    let port = parsed_url.as_ref().and_then(|parsed| parsed.port());
+    let host = parsed_url
+        .as_ref()
+        .and_then(|parsed| parsed.host_str())
+        .unwrap_or("127.0.0.1");
+
+    if port == Some(6333) {
+        return format!(
+            "Qdrant is not accessible at {url}. This looks like the HTTP dashboard port (:6333), but Manifold needs the gRPC endpoint on :6334. Update MANIFOLD_QDRANT_URL to http://{host}:6334."
+        );
+    }
+
+    if error.contains("h2 protocol error") || error.contains("http2 error") {
+        return format!(
+            "Qdrant is not accessible at {url}. Manifold could not complete the gRPC health check. Make sure Qdrant is running and that MANIFOLD_QDRANT_URL points to the gRPC endpoint, usually http://{host}:6334, not the dashboard port :6333."
+        );
+    }
+
+    format!("Qdrant is not accessible at {url}: {error}")
+}
+
+async fn quick_ready(client: &Qdrant, url: &str) -> Result<(), String> {
+    client
+        .health_check()
+        .await
+        .map_err(|e| humanize_qdrant_connection_error(url, &e.to_string()))?;
     Ok(())
 }
 
@@ -244,29 +263,7 @@ async fn ensure_collection(client: &Qdrant, collection_name: &str) -> Result<(),
 }
 
 fn configured_qdrant_url() -> Option<String> {
-    // Escape hatch for direct gRPC
-    if let Ok(grpc_override) = std::env::var("MANIFOLD_QDRANT_GRPC_URL") {
-        let trimmed = grpc_override.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
-    }
-
-    let url = std::env::var("MANIFOLD_QDRANT_URL").unwrap_or_default();
-    let trimmed = url.trim().to_string();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    // Heuristic: swap 6333 (http) to 6334 (grpc)
-    if let Ok(mut parsed_url) = url::Url::parse(&trimmed) {
-        if parsed_url.port() == Some(6333) {
-            let _ = parsed_url.set_port(Some(6334));
-            return Some(parsed_url.to_string());
-        }
-    }
-
-    Some(trimmed)
+    trim_env_var("MANIFOLD_QDRANT_URL")
 }
 
 fn find_available_port(start: u16) -> Result<u16, String> {
@@ -342,7 +339,7 @@ async fn ensure_runtime_base_url(app: &AppHandle, state: &QdrantState) -> Result
     let default_url = "http://127.0.0.1:6334".to_string(); // grpc default
     let default_client = build_qdrant_client(&default_url, 500, None)?;
 
-    if quick_ready(&default_client).await.is_ok() {
+    if quick_ready(&default_client, &default_url).await.is_ok() {
         let mut runtime = state.runtime.lock().await;
         runtime.base_url = Some(default_url.clone());
         runtime.http_dashboard_port = Some(6333);
@@ -381,7 +378,7 @@ async fn ensure_runtime_base_url(app: &AppHandle, state: &QdrantState) -> Result
     let client = build_qdrant_client(&base_url, 500, None)?;
 
     for _ in 0..30 {
-        if quick_ready(&client).await.is_ok() {
+        if quick_ready(&client, &base_url).await.is_ok() {
             return Ok(base_url);
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -402,19 +399,14 @@ async fn start_qdrant(app: &AppHandle, state: &QdrantState) -> Result<QdrantInst
 
     let client = build_qdrant_client(&trimmed, 5000, Some(350))?;
 
-    quick_ready(&client).await?;
+    quick_ready(&client, &trimmed).await?;
     ensure_collection(&client, CONTENT_COLLECTION_NAME).await?;
     ensure_collection(&client, METADATA_COLLECTION_NAME).await?;
 
     let (connection_mode, dashboard_url) = {
         let rt = state.runtime.lock().await;
         if uses_env_config {
-            let mode = if trim_env_var("MANIFOLD_QDRANT_GRPC_URL").is_some() {
-                "configured_grpc_override"
-            } else {
-                "configured_http_env"
-            };
-            (mode, external_connection_dashboard_hint(&trimmed))
+            ("configured_env", external_connection_dashboard_hint(&trimmed))
         } else if rt.child.is_some() {
             (
                 "bundled_binary",
@@ -808,6 +800,13 @@ pub async fn upsert_metadata(app: &AppHandle, state: &QdrantState, args: UpsertM
 /// Batch size for embedding-job Qdrant upserts (content and metadata collections).
 pub const EMBEDDING_QDRANT_UPSERT_BATCH: usize = 24;
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BatcherFlushStats {
+    pub content_points: usize,
+    pub metadata_points: usize,
+    pub elapsed_ms: u128,
+}
+
 async fn build_content_point_for_embedding(
     app: &AppHandle,
     state: &QdrantState,
@@ -921,16 +920,23 @@ impl EmbeddingUpsertBatcher {
         app: &AppHandle,
         state: &QdrantState,
         args: UpsertEmbeddingArgs,
-    ) -> Result<(), String> {
+    ) -> Result<BatcherFlushStats, String> {
         let point = build_content_point_for_embedding(app, state, args).await?;
         let mut g = self.content.lock().await;
         g.push(point);
         if g.len() >= EMBEDDING_QDRANT_UPSERT_BATCH {
             let chunk = std::mem::take(&mut *g);
+            let content_points = chunk.len();
             drop(g);
+            let started = Instant::now();
             upsert_content_points_batch(app, state, chunk).await?;
+            return Ok(BatcherFlushStats {
+                content_points,
+                metadata_points: 0,
+                elapsed_ms: started.elapsed().as_millis(),
+            });
         }
-        Ok(())
+        Ok(BatcherFlushStats::default())
     }
 
     pub async fn enqueue_metadata(
@@ -938,24 +944,38 @@ impl EmbeddingUpsertBatcher {
         app: &AppHandle,
         state: &QdrantState,
         args: UpsertMetadataEmbeddingArgs,
-    ) -> Result<(), String> {
+    ) -> Result<BatcherFlushStats, String> {
         let point = build_metadata_point_for_embedding(app, state, args).await?;
         let mut g = self.metadata.lock().await;
         g.push(point);
         if g.len() >= EMBEDDING_QDRANT_UPSERT_BATCH {
             let chunk = std::mem::take(&mut *g);
+            let metadata_points = chunk.len();
             drop(g);
+            let started = Instant::now();
             upsert_metadata_points_batch(app, state, chunk).await?;
+            return Ok(BatcherFlushStats {
+                content_points: 0,
+                metadata_points,
+                elapsed_ms: started.elapsed().as_millis(),
+            });
         }
-        Ok(())
+        Ok(BatcherFlushStats::default())
     }
 
     /// Flush any buffered points (call when the embedding job finishes or after errors).
-    pub async fn flush(&self, app: &AppHandle, state: &QdrantState) -> Result<(), String> {
+    pub async fn flush(
+        &self,
+        app: &AppHandle,
+        state: &QdrantState,
+    ) -> Result<BatcherFlushStats, String> {
+        let started = Instant::now();
+        let mut stats = BatcherFlushStats::default();
         {
             let mut c = self.content.lock().await;
             if !c.is_empty() {
                 let chunk = std::mem::take(&mut *c);
+                stats.content_points = chunk.len();
                 drop(c);
                 upsert_content_points_batch(app, state, chunk).await?;
             }
@@ -964,11 +984,23 @@ impl EmbeddingUpsertBatcher {
             let mut m = self.metadata.lock().await;
             if !m.is_empty() {
                 let chunk = std::mem::take(&mut *m);
+                stats.metadata_points = chunk.len();
                 drop(m);
                 upsert_metadata_points_batch(app, state, chunk).await?;
             }
         }
-        Ok(())
+        stats.elapsed_ms = started.elapsed().as_millis();
+        Ok(stats)
+    }
+
+    pub async fn has_pending(&self) -> bool {
+        let content = self.content.lock().await;
+        if !content.is_empty() {
+            return true;
+        }
+        drop(content);
+        let metadata = self.metadata.lock().await;
+        !metadata.is_empty()
     }
 }
 
@@ -1170,20 +1202,6 @@ pub struct SetPathTagIdsArgs {
     pub tag_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TagPathTagIdsEntry {
-    pub path: String,
-    pub tag_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SyncTagsBackfillArgs {
-    pub source_id: String,
-    pub entries: Vec<TagPathTagIdsEntry>,
-}
-
 fn tag_ids_only_payload(tag_ids: &[String]) -> Payload {
     let mut p = Payload::new();
     p.insert("tagIds", tag_ids_payload_value(tag_ids));
@@ -1225,44 +1243,12 @@ pub async fn set_path_tag_ids(app: &AppHandle, state: &QdrantState, args: SetPat
     Ok(())
 }
 
-pub async fn sync_tags_backfill(app: &AppHandle, state: &QdrantState, args: SyncTagsBackfillArgs) -> Result<u32, String> {
-    let mut n = 0u32;
-    for e in args.entries {
-        set_path_tag_ids(
-            app,
-            state,
-            SetPathTagIdsArgs {
-                source_id: args.source_id.clone(),
-                path: e.path,
-                tag_ids: e.tag_ids,
-            },
-        )
-        .await?;
-        n += 1;
-    }
-    Ok(n)
-}
-
 /// Max points returned for graph visualization (protects memory / IPC).
 const SCROLL_CONTENT_VECTORS_HARD_MAX: u32 = 5000;
-const SCROLL_CONTENT_VECTORS_BATCH: u32 = 256;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ScrollContentVectorsArgs {
-    pub source_id: String,
-    pub limit: Option<u32>,
-    /// Optional Qdrant filter object (must/should/must_not); merged with `sourceId` and tag filter.
-    #[serde(default)]
-    pub filter: Option<serde_json::Value>,
-    /// If non-empty, only points whose payload `tagIds` contains any of these ids (OR).
-    #[serde(default)]
-    pub tag_filter_ids: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ContentEmbeddingPoint {
+struct ContentEmbeddingPoint {
     pub path: String,
     pub content_hash: String,
     pub embedding: Vec<f32>,
@@ -1271,17 +1257,9 @@ pub struct ContentEmbeddingPoint {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ScrollContentVectorsResult {
-    pub points: Vec<ContentEmbeddingPoint>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ScrollGraphArgs {
     pub source_id: String,
     pub limit: Option<u32>,
-    #[serde(default)]
-    pub filter: Option<serde_json::Value>,
     #[serde(default)]
     pub tag_filter_ids: Option<Vec<String>>,
 }
@@ -1303,6 +1281,23 @@ pub struct ScrollGraphResult {
     pub d: usize,
 }
 
+fn split_existing_graph_points(
+    points: Vec<ContentEmbeddingPoint>,
+) -> (Vec<ContentEmbeddingPoint>, Vec<String>) {
+    let mut existing = Vec::with_capacity(points.len());
+    let mut stale_paths = Vec::new();
+
+    for point in points {
+        if Path::new(&point.path).exists() {
+            existing.push(point);
+        } else {
+            stale_paths.push(point.path);
+        }
+    }
+
+    (existing, stale_paths)
+}
+
 fn build_graph_scroll_filter(source_id: &str, tag_filter_ids: &[String]) -> Filter {
     let source = Condition::matches("sourceId", source_id.to_string());
     if tag_filter_ids.is_empty() {
@@ -1315,314 +1310,6 @@ fn build_graph_scroll_filter(source_id: &str, tag_filter_ids: &[String]) -> Filt
             .collect();
         Filter::must([source, Condition::from(Filter::should(should))])
     }
-}
-
-fn scroll_user_filter_is_nonempty(f: &serde_json::Value) -> bool {
-    match f {
-        serde_json::Value::Object(o) => !o.is_empty(),
-        serde_json::Value::Array(a) => !a.is_empty(),
-        serde_json::Value::Bool(_) | serde_json::Value::Number(_) | serde_json::Value::String(_) => true,
-        serde_json::Value::Null => false,
-    }
-}
-
-fn merge_scroll_filter_json(
-    source_id: &str,
-    tag_filter_ids: &[String],
-    user_filter: Option<&serde_json::Value>,
-) -> serde_json::Value {
-    let mut must = vec![serde_json::json!({
-        "key": "sourceId",
-        "match": { "value": source_id }
-    })];
-    if !tag_filter_ids.is_empty() {
-        let should: Vec<serde_json::Value> = tag_filter_ids
-            .iter()
-            .map(|id| {
-                serde_json::json!({
-                    "key": "tagIds",
-                    "match": { "keyword": id }
-                })
-            })
-            .collect();
-        must.push(serde_json::json!({ "filter": { "should": should } }));
-    }
-    if let Some(u) = user_filter {
-        if scroll_user_filter_is_nonempty(u) {
-            must.push(serde_json::json!({ "filter": u }));
-        }
-    }
-    serde_json::json!({ "must": must })
-}
-
-async fn qdrant_http_base_url(app: &AppHandle, state: &QdrantState) -> Result<String, String> {
-    let rt = state.runtime.lock().await;
-    if let Some(port) = rt.http_dashboard_port {
-        return Ok(format!("http://127.0.0.1:{port}"));
-    }
-    drop(rt);
-    let grpc = if let Some(url) = configured_qdrant_url() {
-        url
-    } else {
-        ensure_runtime_base_url(app, state).await?
-    };
-    if let Ok(mut u) = url::Url::parse(&grpc) {
-        if u.port() == Some(6334) {
-            let _ = u.set_port(Some(6333));
-            return Ok(u.to_string());
-        }
-    }
-    Ok(grpc.replace(":6334", ":6333"))
-}
-
-fn parse_scroll_json_vector(v: &serde_json::Value) -> Option<Vec<f32>> {
-    if let Some(arr) = v.as_array() {
-        return arr
-            .iter()
-            .map(|x| x.as_f64().map(|f| f as f32))
-            .collect();
-    }
-    if let Some(obj) = v.as_object() {
-        for (_k, val) in obj {
-            if let Some(arr) = val.as_array() {
-                let vec: Option<Vec<f32>> = arr
-                    .iter()
-                    .map(|x| x.as_f64().map(|f| f as f32))
-                    .collect();
-                if vec.as_ref().map(|a| a.len() == VECTOR_DIM).unwrap_or(false) {
-                    return vec;
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Scroll content-collection points with dense vectors for 2D embedding visualization.
-/// Uses reservoir sampling so the result approximates a uniform random subset when the index exceeds `limit`.
-pub async fn scroll_content_vectors(
-    app: &AppHandle,
-    state: &QdrantState,
-    args: ScrollContentVectorsArgs,
-) -> Result<ScrollContentVectorsResult, String> {
-    use qdrant_client::qdrant::vector_output::Vector;
-    use rand::rngs::StdRng;
-    use rand::Rng;
-    use rand::SeedableRng;
-
-    let requested = args.limit.unwrap_or(500).max(1);
-    let limit = (requested.min(SCROLL_CONTENT_VECTORS_HARD_MAX)) as usize;
-
-    let tag_filter = args.tag_filter_ids.as_deref().unwrap_or(&[]);
-    let use_http = args
-        .filter
-        .as_ref()
-        .is_some_and(|f| scroll_user_filter_is_nonempty(f));
-
-    if use_http {
-        let base = qdrant_http_base_url(app, state).await?;
-        let merged = merge_scroll_filter_json(&args.source_id, tag_filter, args.filter.as_ref());
-        return scroll_content_vectors_http(&base, &merged, limit).await;
-    }
-
-    let client = instance(app, state).await?;
-    let filter = build_graph_scroll_filter(&args.source_id, tag_filter);
-
-    let mut reservoir: Vec<ContentEmbeddingPoint> = Vec::with_capacity(limit.min(256));
-    let mut rng = StdRng::from_entropy();
-    let mut offset: Option<PointId> = None;
-    let mut i: usize = 0;
-
-    loop {
-        let mut builder = ScrollPointsBuilder::new(CONTENT_COLLECTION_NAME)
-            .filter(filter.clone())
-            .limit(SCROLL_CONTENT_VECTORS_BATCH)
-            .with_payload(true)
-            .with_vectors(true);
-        if let Some(ref o) = offset {
-            builder = builder.offset(o.clone());
-        }
-
-        let res = client
-            .scroll(builder)
-            .await
-            .map_err(|e| format!("qdrant scroll (content vectors) failed: {e}"))?;
-
-        for p in res.result {
-            let path = payload_string_field(&p.payload, "path");
-            let content_hash = payload_string_field(&p.payload, "contentHash");
-            let (Some(path), Some(content_hash)) = (path, content_hash) else {
-                continue;
-            };
-
-            let embedding: Vec<f32> = match p.vectors.as_ref().and_then(|vo| vo.get_vector()) {
-                Some(Vector::Dense(d)) => d.data.clone(),
-                _ => continue,
-            };
-            if embedding.len() != VECTOR_DIM {
-                continue;
-            }
-
-            let tag_ids = payload_tag_ids_field(&p.payload);
-
-            let point = ContentEmbeddingPoint {
-                path,
-                content_hash,
-                embedding,
-                tag_ids,
-            };
-
-            if i < limit {
-                reservoir.push(point);
-            } else {
-                let j = rng.gen_range(0..=i);
-                if j < limit {
-                    reservoir[j] = point;
-                }
-            }
-            i += 1;
-        }
-
-        offset = res.next_page_offset;
-        if offset.is_none() {
-            break;
-        }
-    }
-
-    Ok(ScrollContentVectorsResult { points: reservoir })
-}
-
-async fn scroll_content_vectors_http(
-    base_url: &str,
-    filter: &serde_json::Value,
-    limit: usize,
-) -> Result<ScrollContentVectorsResult, String> {
-    use rand::rngs::StdRng;
-    use rand::Rng;
-    use rand::SeedableRng;
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(120))
-        .build()
-        .map_err(|e| format!("http client: {e}"))?;
-
-    let url = format!(
-        "{}/collections/{}/points/scroll",
-        base_url.trim_end_matches('/'),
-        CONTENT_COLLECTION_NAME
-    );
-
-    let mut reservoir: Vec<ContentEmbeddingPoint> = Vec::with_capacity(limit.min(256));
-    let mut rng = StdRng::from_entropy();
-    let mut i: usize = 0;
-    let mut offset_val: Option<serde_json::Value> = None;
-
-    loop {
-        let mut body = serde_json::json!({
-            "filter": filter,
-            "limit": SCROLL_CONTENT_VECTORS_BATCH,
-            "with_payload": true,
-            "with_vector": true,
-        });
-        if let Some(off) = offset_val.take() {
-            body.as_object_mut()
-                .expect("body object")
-                .insert("offset".to_string(), off);
-        }
-
-        let mut req = client.post(&url).json(&body);
-        if let Ok(k) = std::env::var("MANIFOLD_QDRANT_API_KEY") {
-            let t = k.trim();
-            if !t.is_empty() {
-                req = req.header("api-key", t);
-            }
-        }
-
-        let res = req
-            .send()
-            .await
-            .map_err(|e| format!("qdrant http scroll request failed: {e}"))?;
-        let status = res.status();
-        let text = res.text().await.map_err(|e| e.to_string())?;
-        if !status.is_success() {
-            return Err(format!(
-                "qdrant http scroll failed ({status}): {text}"
-            ));
-        }
-        let v: serde_json::Value =
-            serde_json::from_str(&text).map_err(|e| format!("scroll response json: {e}"))?;
-
-        let points = v
-            .get("result")
-            .and_then(|r| r.get("points"))
-            .and_then(|p| p.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        let next_off = v
-            .get("result")
-            .and_then(|r| r.get("next_page_offset"))
-            .cloned();
-
-        for p in points {
-            let path = p
-                .get("payload")
-                .and_then(|pl| pl.get("path"))
-                .and_then(|x| x.as_str())
-                .map(|s| s.to_string());
-            let content_hash = p
-                .get("payload")
-                .and_then(|pl| pl.get("contentHash"))
-                .and_then(|x| x.as_str())
-                .map(|s| s.to_string());
-            let (Some(path), Some(content_hash)) = (path, content_hash) else {
-                continue;
-            };
-
-            let tag_ids: Vec<String> = p
-                .get("payload")
-                .and_then(|pl| pl.get("tagIds"))
-                .and_then(|t| t.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            let vec_json = p.get("vector").cloned().unwrap_or(serde_json::Value::Null);
-            let Some(embedding) = parse_scroll_json_vector(&vec_json) else {
-                continue;
-            };
-            if embedding.len() != VECTOR_DIM {
-                continue;
-            }
-
-            let point = ContentEmbeddingPoint {
-                path,
-                content_hash,
-                embedding,
-                tag_ids,
-            };
-
-            if i < limit {
-                reservoir.push(point);
-            } else {
-                let j = rng.gen_range(0..=i);
-                if j < limit {
-                    reservoir[j] = point;
-                }
-            }
-            i += 1;
-        }
-
-        if next_off.is_none() || next_off.as_ref().is_some_and(|x| x.is_null()) {
-            break;
-        }
-        offset_val = next_off;
-    }
-
-    Ok(ScrollContentVectorsResult { points: reservoir })
 }
 
 fn content_point_from_scrolled(
@@ -1678,105 +1365,6 @@ async fn scroll_graph_first_page_grpc(
     Ok(out)
 }
 
-async fn scroll_graph_first_page_http(
-    base_url: &str,
-    filter: &serde_json::Value,
-    limit: usize,
-) -> Result<Vec<ContentEmbeddingPoint>, String> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(120))
-        .build()
-        .map_err(|e| format!("http client: {e}"))?;
-
-    let url = format!(
-        "{}/collections/{}/points/scroll",
-        base_url.trim_end_matches('/'),
-        CONTENT_COLLECTION_NAME
-    );
-
-    let scroll_limit = limit.min(SCROLL_CONTENT_VECTORS_HARD_MAX as usize).max(1);
-    let body = serde_json::json!({
-        "filter": filter,
-        "limit": scroll_limit,
-        "with_payload": true,
-        "with_vector": true,
-    });
-
-    let mut req = client.post(&url).json(&body);
-    if let Ok(k) = std::env::var("MANIFOLD_QDRANT_API_KEY") {
-        let t = k.trim();
-        if !t.is_empty() {
-            req = req.header("api-key", t);
-        }
-    }
-
-    let res = req
-        .send()
-        .await
-        .map_err(|e| format!("qdrant http scroll request failed: {e}"))?;
-    let status = res.status();
-    let text = res.text().await.map_err(|e| e.to_string())?;
-    if !status.is_success() {
-        return Err(format!(
-            "qdrant http scroll failed ({status}): {text}"
-        ));
-    }
-    let v: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("scroll response json: {e}"))?;
-
-    let points = v
-        .get("result")
-        .and_then(|r| r.get("points"))
-        .and_then(|p| p.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    let mut out = Vec::new();
-    for p in points {
-        let path = p
-            .get("payload")
-            .and_then(|pl| pl.get("path"))
-            .and_then(|x| x.as_str())
-            .map(|s| s.to_string());
-        let content_hash = p
-            .get("payload")
-            .and_then(|pl| pl.get("contentHash"))
-            .and_then(|x| x.as_str())
-            .map(|s| s.to_string());
-        let (Some(path), Some(content_hash)) = (path, content_hash) else {
-            continue;
-        };
-
-        let tag_ids: Vec<String> = p
-            .get("payload")
-            .and_then(|pl| pl.get("tagIds"))
-            .and_then(|t| t.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let vec_json = p.get("vector").cloned().unwrap_or(serde_json::Value::Null);
-        let Some(embedding) = parse_scroll_json_vector(&vec_json) else {
-            continue;
-        };
-        if embedding.len() != VECTOR_DIM {
-            continue;
-        }
-
-        out.push(ContentEmbeddingPoint {
-            path,
-            content_hash,
-            embedding,
-            tag_ids,
-        });
-    }
-
-    Ok(out)
-}
-
 fn pack_graph_embeddings(points: &[ContentEmbeddingPoint]) -> (String, usize, usize) {
     let n = points.len();
     if n == 0 {
@@ -1796,22 +1384,13 @@ pub async fn scroll_graph(
     app: &AppHandle,
     state: &QdrantState,
     args: ScrollGraphArgs,
-) -> Result<ScrollGraphResult, String> {
+) -> Result<(ScrollGraphResult, Vec<String>), String> {
     let requested = args.limit.unwrap_or(500).max(1);
     let limit = (requested.min(SCROLL_CONTENT_VECTORS_HARD_MAX)) as usize;
     let tag_filter = args.tag_filter_ids.as_deref().unwrap_or(&[]);
-    let use_http = args
-        .filter
-        .as_ref()
-        .is_some_and(|f| scroll_user_filter_is_nonempty(f));
-
-    let points = if use_http {
-        let base = qdrant_http_base_url(app, state).await?;
-        let merged = merge_scroll_filter_json(&args.source_id, tag_filter, args.filter.as_ref());
-        scroll_graph_first_page_http(&base, &merged, limit).await?
-    } else {
-        scroll_graph_first_page_grpc(app, state, &args.source_id, tag_filter, limit).await?
-    };
+    let points =
+        scroll_graph_first_page_grpc(app, state, &args.source_id, tag_filter, limit).await?;
+    let (points, stale_paths) = split_existing_graph_points(points);
 
     let meta: Vec<ScrollGraphPointMeta> = points
         .iter()
@@ -1822,12 +1401,15 @@ pub async fn scroll_graph(
         })
         .collect();
     let (packed_embeddings_f32_base64, n, d) = pack_graph_embeddings(&points);
-    Ok(ScrollGraphResult {
-        points: meta,
-        packed_embeddings_f32_base64,
-        n,
-        d,
-    })
+    Ok((
+        ScrollGraphResult {
+            points: meta,
+            packed_embeddings_f32_base64,
+            n,
+            d,
+        },
+        stale_paths,
+    ))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1857,7 +1439,7 @@ pub async fn status(app: &AppHandle, state: &QdrantState) -> Result<QdrantStatus
 
     let client = build_qdrant_client(&trimmed, 700, None)?;
 
-    match quick_ready(&client).await {
+    match quick_ready(&client, &trimmed).await {
         Ok(()) => Ok(QdrantStatus { base_url: trimmed }),
         Err(e) => {
             *state.last_failed_at.lock().await = Some(std::time::Instant::now());
@@ -2021,4 +1603,57 @@ pub async fn delete_points_for_paths(
     }
     
     Ok(DeletePointsForPathsResult { deleted_count })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{configured_qdrant_url, humanize_qdrant_connection_error};
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn configured_qdrant_url_uses_only_the_canonical_variable_without_rewriting() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+
+        std::env::remove_var("MANIFOLD_QDRANT_URL");
+        std::env::remove_var("MANIFOLD_QDRANT_GRPC_URL");
+        assert_eq!(configured_qdrant_url(), None);
+
+        std::env::set_var("MANIFOLD_QDRANT_GRPC_URL", "http://127.0.0.1:7000");
+        assert_eq!(configured_qdrant_url(), None);
+
+        std::env::set_var("MANIFOLD_QDRANT_URL", "http://127.0.0.1:6333");
+        assert_eq!(
+            configured_qdrant_url(),
+            Some("http://127.0.0.1:6333".to_string())
+        );
+
+        std::env::remove_var("MANIFOLD_QDRANT_URL");
+        std::env::remove_var("MANIFOLD_QDRANT_GRPC_URL");
+    }
+
+    #[test]
+    fn humanizes_dashboard_port_misconfiguration() {
+        let message = humanize_qdrant_connection_error(
+            "http://127.0.0.1:6333",
+            "Unknown error h2 protocol error: http2 error MetadataMap { headers: {} }",
+        );
+
+        assert!(message.contains("Qdrant is not accessible"));
+        assert!(message.contains("HTTP dashboard port (:6333)"));
+        assert!(message.contains("http://127.0.0.1:6334"));
+    }
+
+    #[test]
+    fn humanizes_generic_http2_transport_failures() {
+        let message = humanize_qdrant_connection_error(
+            "http://127.0.0.1:7000",
+            "Unknown error h2 protocol error: http2 error MetadataMap { headers: {} }",
+        );
+
+        assert!(message.contains("Qdrant is not accessible"));
+        assert!(message.contains("gRPC health check"));
+        assert!(message.contains("not the dashboard port :6333"));
+    }
 }

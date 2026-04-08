@@ -16,7 +16,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
-use tokio::sync::{watch, Mutex, Semaphore};
+use tokio::sync::{mpsc, oneshot, watch, Mutex, Semaphore};
 use tokio::task::JoinSet;
 use lru::LruCache;
 use std::num::NonZeroUsize;
@@ -33,9 +33,16 @@ const PDF_LOCAL_TEXT_MIN_NONSPACE: usize = 48;
 const EMBED_GEMINI_MAX_IN_FLIGHT: usize = 12;
 /// Max concurrent `generateContent` OCR calls to Gemini (separate pool from embed).
 const OCR_GEMINI_MAX_IN_FLIGHT: usize = 16;
+/// Batch size for Gemini metadata text embeddings.
+const METADATA_EMBED_BATCH_SIZE: usize = 16;
+/// Wait briefly to collect multiple metadata embedding requests into one batch.
+const METADATA_EMBED_BATCH_WAIT_MS: u64 = 40;
 /// Concurrent SHA256 reads while scanning candidates for embedding.
 const HASH_SCAN_PARALLELISM: usize = 8;
 const SHA256_MAX_BYTES: u64 = 1024 * 1024 * 128;
+/// Flush partial Qdrant batches often enough that new files become searchable during indexing.
+const QDRANT_VISIBILITY_FLUSH_INTERVAL_MS: u64 = 1500;
+const QDRANT_VISIBILITY_FLUSH_FILE_INTERVAL: u64 = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -183,15 +190,9 @@ fn read_gemini_api_key() -> Result<String, String> {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .or_else(|| {
-            std::env::var("GOOGLE_GENERATIVE_AI_API_KEY")
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        })
         .or_else(|| crate::gemini_settings::read_stored_key())
         .ok_or_else(|| {
-            "Missing Gemini API key. Set MANIFOLD_GEMINI_API_KEY or GOOGLE_GENERATIVE_AI_API_KEY (e.g. in .env.local or your environment), or save a key in Settings."
+            "Missing Gemini API key. Set MANIFOLD_GEMINI_API_KEY (for example in .env.local) or save a key in Settings."
                 .to_string()
         })?;
     Ok(key)
@@ -250,6 +251,84 @@ struct PendingEmbeddingFile {
     precopied_content_embedding: Option<Vec<f32>>,
     /// When duplicating by content hash, OCR/plain body reused from another path (no second OCR).
     precopy_extracted_text: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct EmbeddingFileOutcome {
+    ok: bool,
+    content_embed_elapsed_ms: u128,
+    metadata_embed_elapsed_ms: u128,
+    text_extract_elapsed_ms: u128,
+    qdrant_upsert_elapsed_ms: u128,
+}
+
+#[derive(Debug, Default)]
+struct EmbeddingJobMetrics {
+    completed_files: u64,
+    failed_files: u64,
+    content_embed_elapsed_ms_total: u128,
+    metadata_embed_elapsed_ms_total: u128,
+    text_extract_elapsed_ms_total: u128,
+    qdrant_upsert_elapsed_ms_total: u128,
+    qdrant_visibility_flush_elapsed_ms_total: u128,
+    qdrant_visibility_flush_calls: u64,
+    qdrant_visibility_content_points: u64,
+    qdrant_visibility_metadata_points: u64,
+    metadata_batch_http_elapsed_ms_total: u128,
+    metadata_batch_http_calls: u64,
+    metadata_batch_item_count: u64,
+    metadata_batch_cache_hits: u64,
+    metadata_batch_fallback_item_count: u64,
+}
+
+impl EmbeddingJobMetrics {
+    fn record_file_outcome(&mut self, outcome: EmbeddingFileOutcome) {
+        if outcome.ok {
+            self.completed_files = self.completed_files.saturating_add(1);
+        } else {
+            self.failed_files = self.failed_files.saturating_add(1);
+        }
+        self.content_embed_elapsed_ms_total = self
+            .content_embed_elapsed_ms_total
+            .saturating_add(outcome.content_embed_elapsed_ms);
+        self.metadata_embed_elapsed_ms_total = self
+            .metadata_embed_elapsed_ms_total
+            .saturating_add(outcome.metadata_embed_elapsed_ms);
+        self.text_extract_elapsed_ms_total = self
+            .text_extract_elapsed_ms_total
+            .saturating_add(outcome.text_extract_elapsed_ms);
+        self.qdrant_upsert_elapsed_ms_total = self
+            .qdrant_upsert_elapsed_ms_total
+            .saturating_add(outcome.qdrant_upsert_elapsed_ms);
+    }
+
+    fn record_visibility_flush(&mut self, stats: qdrant::BatcherFlushStats) {
+        let total_points = stats.content_points.saturating_add(stats.metadata_points);
+        if total_points == 0 {
+            return;
+        }
+        self.qdrant_visibility_flush_calls =
+            self.qdrant_visibility_flush_calls.saturating_add(1);
+        self.qdrant_visibility_flush_elapsed_ms_total = self
+            .qdrant_visibility_flush_elapsed_ms_total
+            .saturating_add(stats.elapsed_ms);
+        self.qdrant_visibility_content_points = self
+            .qdrant_visibility_content_points
+            .saturating_add(stats.content_points as u64);
+        self.qdrant_visibility_metadata_points = self
+            .qdrant_visibility_metadata_points
+            .saturating_add(stats.metadata_points as u64);
+    }
+
+    fn record_metadata_batch(&mut self, item_count: usize, elapsed_ms: u128) {
+        self.metadata_batch_http_calls = self.metadata_batch_http_calls.saturating_add(1);
+        self.metadata_batch_item_count = self
+            .metadata_batch_item_count
+            .saturating_add(item_count as u64);
+        self.metadata_batch_http_elapsed_ms_total = self
+            .metadata_batch_http_elapsed_ms_total
+            .saturating_add(elapsed_ms);
+    }
 }
 
 async fn wait_if_paused(
@@ -432,6 +511,12 @@ struct GeminiEmbeddingValues {
     values: Vec<f32>,
 }
 
+#[derive(Debug, Deserialize)]
+struct GeminiBatchEmbedResponse {
+    #[serde(default)]
+    embeddings: Vec<GeminiEmbeddingValues>,
+}
+
 #[derive(Clone)]
 pub struct GeminiClient {
     http: reqwest::Client,
@@ -455,6 +540,62 @@ impl std::fmt::Debug for GeminiClient {
         f.debug_struct("GeminiClient")
             .field("api_key", &"REDACTED")
             .finish()
+    }
+}
+
+struct MetadataEmbeddingRequest {
+    text: String,
+    response_tx: oneshot::Sender<Result<Vec<f32>, String>>,
+}
+
+#[derive(Clone)]
+struct MetadataEmbeddingBatcher {
+    batch_enabled: Arc<AtomicBool>,
+    client: GeminiClient,
+    metrics: Arc<Mutex<EmbeddingJobMetrics>>,
+    tx: mpsc::UnboundedSender<MetadataEmbeddingRequest>,
+}
+
+impl MetadataEmbeddingBatcher {
+    fn new(client: GeminiClient, metrics: Arc<Mutex<EmbeddingJobMetrics>>) -> Self {
+        let batch_enabled = Arc::new(AtomicBool::new(true));
+        let (tx, rx) = mpsc::unbounded_channel();
+        tauri::async_runtime::spawn(run_metadata_embedding_batcher(
+            batch_enabled.clone(),
+            client.clone(),
+            metrics.clone(),
+            rx,
+        ));
+        Self {
+            batch_enabled,
+            client,
+            metrics,
+            tx,
+        }
+    }
+
+    async fn embed(&self, text: String) -> Result<Vec<f32>, String> {
+        {
+            let mut cache = self.client.query_cache.lock().await;
+            if let Some(v) = cache.get(&text) {
+                let mut metrics = self.metrics.lock().await;
+                metrics.metadata_batch_cache_hits =
+                    metrics.metadata_batch_cache_hits.saturating_add(1);
+                return Ok(v.clone());
+            }
+        }
+
+        if !self.batch_enabled.load(Ordering::Relaxed) {
+            return embed_query_text_with_client(&self.client, &text).await;
+        }
+
+        let (response_tx, response_rx) = oneshot::channel();
+        self.tx
+            .send(MetadataEmbeddingRequest { text, response_tx })
+            .map_err(|_| "Metadata embedding batcher is unavailable".to_string())?;
+        response_rx
+            .await
+            .map_err(|_| "Metadata embedding batcher response channel closed".to_string())?
     }
 }
 
@@ -517,6 +658,22 @@ fn truncate_for_log(s: &str, max_chars: usize) -> String {
     }
     out.push_str("...(truncated)");
     out
+}
+
+fn batch_embed_request_body(texts: &[String]) -> serde_json::Value {
+    let requests: Vec<serde_json::Value> = texts
+        .iter()
+        .map(|text| {
+            serde_json::json!({
+                "model": GEMINI_MODEL,
+                "content": {
+                    "parts": [{ "text": text }]
+                },
+                "outputDimensionality": OUTPUT_DIM
+            })
+        })
+        .collect();
+    serde_json::json!({ "requests": requests })
 }
 
 async fn gemini_embed_post(client: &GeminiClient, body: serde_json::Value) -> Result<Vec<f32>, String> {
@@ -620,6 +777,123 @@ async fn gemini_embed_post(client: &GeminiClient, body: serde_json::Value) -> Re
         );
         return Err(format!(
             "Gemini embedContent failed (HTTP {}): {}",
+            status.as_u16(),
+            text
+        ));
+    }
+}
+
+async fn gemini_batch_embed_post(
+    client: &GeminiClient,
+    texts: &[String],
+) -> Result<Vec<Vec<f32>>, String> {
+    async fn sleep_ms(ms: u64) {
+        tokio::time::sleep(Duration::from_millis(ms)).await;
+    }
+
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/{}:batchEmbedContents",
+        GEMINI_MODEL
+    );
+    let body = batch_embed_request_body(texts);
+
+    let mut attempt = 0u32;
+    let mut backoff_ms: u64 = 400;
+    loop {
+        attempt += 1;
+        let started = Instant::now();
+        let res = match client
+            .http
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("x-goog-api-key", &client.api_key)
+            .timeout(Duration::from_secs(GEMINI_EMBED_TIMEOUT_SECS))
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                let chain = format_error_chain(&e);
+                let should_retry = attempt < 5;
+                tracing::error!(
+                    target: crate::logging::TARGET_EMBEDDING,
+                    attempt,
+                    elapsed_ms,
+                    item_count = texts.len(),
+                    will_retry = should_retry,
+                    error = %chain,
+                    "gemini batchEmbedContents request failed before HTTP response"
+                );
+                if should_retry {
+                    sleep_ms(backoff_ms).await;
+                    backoff_ms = std::cmp::min(5000, ((backoff_ms as f64) * 1.8).round() as u64);
+                    continue;
+                }
+                return Err(format!(
+                    "Gemini batchEmbedContents request failed after {}ms: {}",
+                    elapsed_ms, chain
+                ));
+            }
+        };
+
+        let status = res.status();
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        if status.is_success() {
+            let json: GeminiBatchEmbedResponse = res
+                .json()
+                .await
+                .map_err(|e| format!("Gemini batchEmbedContents invalid JSON: {e}"))?;
+            if json.embeddings.len() != texts.len() {
+                return Err(format!(
+                    "Gemini batchEmbedContents returned {} embeddings; expected {}",
+                    json.embeddings.len(),
+                    texts.len()
+                ));
+            }
+
+            let mut out = Vec::with_capacity(json.embeddings.len());
+            for embedding in json.embeddings {
+                if embedding.values.len() != OUTPUT_DIM {
+                    return Err(format!(
+                        "Gemini batchEmbedContents returned {} floats; expected {}",
+                        embedding.values.len(),
+                        OUTPUT_DIM
+                    ));
+                }
+                out.push(l2_normalize_vec(embedding.values));
+            }
+            return Ok(out);
+        }
+
+        let text = res.text().await.unwrap_or_default();
+        let retryable = matches!(status.as_u16(), 429 | 500 | 503);
+        if retryable && attempt < 5 {
+            tracing::error!(
+                target: crate::logging::TARGET_EMBEDDING,
+                attempt,
+                elapsed_ms,
+                item_count = texts.len(),
+                status = status.as_u16(),
+                body = %text,
+                "gemini batchEmbedContents retryable failure"
+            );
+            sleep_ms(backoff_ms).await;
+            backoff_ms = std::cmp::min(5000, ((backoff_ms as f64) * 1.8).round() as u64);
+            continue;
+        }
+        tracing::error!(
+            target: crate::logging::TARGET_EMBEDDING,
+            attempt,
+            elapsed_ms,
+            item_count = texts.len(),
+            status = status.as_u16(),
+            body = %text,
+            "gemini batchEmbedContents failed"
+        );
+        return Err(format!(
+            "Gemini batchEmbedContents failed (HTTP {}): {}",
             status.as_u16(),
             text
         ));
@@ -843,6 +1117,142 @@ async fn embed_query_text_with_client(client: &GeminiClient, text: &str) -> Resu
     }
 
     Ok(v)
+}
+
+async fn run_metadata_embedding_batcher(
+    batch_enabled: Arc<AtomicBool>,
+    client: GeminiClient,
+    metrics: Arc<Mutex<EmbeddingJobMetrics>>,
+    mut rx: mpsc::UnboundedReceiver<MetadataEmbeddingRequest>,
+) {
+    while let Some(first) = rx.recv().await {
+        let collect_started = Instant::now();
+        let mut batch = vec![first];
+        while batch.len() < METADATA_EMBED_BATCH_SIZE {
+            let remaining = Duration::from_millis(METADATA_EMBED_BATCH_WAIT_MS)
+                .saturating_sub(collect_started.elapsed());
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Some(req)) => batch.push(req),
+                Ok(None) | Err(_) => break,
+            }
+        }
+
+        let texts: Vec<String> = batch.iter().map(|req| req.text.clone()).collect();
+        let batch_started = Instant::now();
+        if !batch_enabled.load(Ordering::Relaxed) {
+            for req in batch {
+                let result = embed_query_text_with_client(&client, &req.text).await;
+                let _ = req.response_tx.send(result);
+            }
+            continue;
+        }
+        match gemini_batch_embed_post(&client, &texts).await {
+            Ok(vectors) => {
+                let elapsed_ms = batch_started.elapsed().as_millis();
+                {
+                    let mut cache = client.query_cache.lock().await;
+                    for (text, vector) in texts.iter().zip(vectors.iter()) {
+                        cache.put(text.clone(), vector.clone());
+                    }
+                }
+                {
+                    let mut job_metrics = metrics.lock().await;
+                    job_metrics.record_metadata_batch(texts.len(), elapsed_ms);
+                }
+                for (req, vector) in batch.into_iter().zip(vectors.into_iter()) {
+                    let _ = req.response_tx.send(Ok(vector));
+                }
+            }
+            Err(batch_error) => {
+                tracing::warn!(
+                    target: crate::logging::TARGET_EMBEDDING,
+                    item_count = texts.len(),
+                    error = %batch_error,
+                    "gemini metadata batch embedding failed; falling back to single requests"
+                );
+                if should_disable_metadata_batching(&batch_error) {
+                    batch_enabled.store(false, Ordering::Relaxed);
+                    tracing::warn!(
+                        target: crate::logging::TARGET_EMBEDDING,
+                        error = %batch_error,
+                        "disabling Gemini metadata batch embedding after permanent batch API failure"
+                    );
+                }
+                {
+                    let mut job_metrics = metrics.lock().await;
+                    job_metrics.metadata_batch_fallback_item_count = job_metrics
+                        .metadata_batch_fallback_item_count
+                        .saturating_add(texts.len() as u64);
+                }
+                for req in batch {
+                    let result = embed_query_text_with_client(&client, &req.text).await;
+                    let _ = req.response_tx.send(result);
+                }
+            }
+        }
+    }
+}
+
+fn should_disable_metadata_batching(error: &str) -> bool {
+    error.contains("HTTP 400")
+        || error.contains("HTTP 404")
+        || error.contains("HTTP 405")
+        || error.contains("UNIMPLEMENTED")
+}
+
+fn average_ms(total_ms: u128, count: u64) -> u128 {
+    if count == 0 {
+        0
+    } else {
+        total_ms / (count as u128)
+    }
+}
+
+async fn maybe_flush_qdrant_visibility(
+    app: &tauri::AppHandle,
+    state: &qdrant::QdrantState,
+    batcher: &qdrant::EmbeddingUpsertBatcher,
+    metrics: &Arc<Mutex<EmbeddingJobMetrics>>,
+    processed: u64,
+    last_flush_at: &mut Instant,
+    last_flush_processed: &mut u64,
+    force: bool,
+) -> Result<(), String> {
+    let due = force
+        || processed.saturating_sub(*last_flush_processed) >= QDRANT_VISIBILITY_FLUSH_FILE_INTERVAL
+        || last_flush_at.elapsed() >= Duration::from_millis(QDRANT_VISIBILITY_FLUSH_INTERVAL_MS);
+    if !due {
+        return Ok(());
+    }
+    if !force && !batcher.has_pending().await {
+        return Ok(());
+    }
+
+    let stats = batcher.flush(app, state).await?;
+    let total_points = stats.content_points.saturating_add(stats.metadata_points);
+    if total_points == 0 {
+        return Ok(());
+    }
+
+    {
+        let mut job_metrics = metrics.lock().await;
+        job_metrics.record_visibility_flush(stats);
+    }
+    tracing::info!(
+        target: crate::logging::TARGET_EMBEDDING,
+        processed_files = processed,
+        force,
+        content_points = stats.content_points,
+        metadata_points = stats.metadata_points,
+        flush_elapsed_ms = stats.elapsed_ms,
+        "embedding qdrant visibility flush completed"
+    );
+    *last_flush_at = Instant::now();
+    *last_flush_processed = processed;
+    Ok(())
 }
 
 pub async fn judge_tag(
@@ -1084,9 +1494,16 @@ pub async fn start(
         let embed_sem = Arc::new(Semaphore::new(EMBED_GEMINI_MAX_IN_FLIGHT));
         let ocr_sem = Arc::new(Semaphore::new(OCR_GEMINI_MAX_IN_FLIGHT));
         let qdrant_batcher = Arc::new(qdrant::EmbeddingUpsertBatcher::new());
+        let metrics = Arc::new(Mutex::new(EmbeddingJobMetrics::default()));
+        let metadata_batcher = Arc::new(MetadataEmbeddingBatcher::new(
+            gemini.clone(),
+            metrics.clone(),
+        ));
         let hash_runtime_cache: Arc<Mutex<HashMap<String, (Vec<f32>, String)>>> =
             Arc::new(Mutex::new(HashMap::new()));
-        let mut join_set = tokio::task::JoinSet::new();
+        let mut last_visibility_flush_at = Instant::now();
+        let mut last_visibility_flush_processed = 0u64;
+        let mut join_set: JoinSet<EmbeddingFileOutcome> = JoinSet::new();
         for pending in pending_files {
             if cancel_flag.load(Ordering::Relaxed) {
                 break;
@@ -1099,7 +1516,12 @@ pub async fn start(
                 let Some(joined) = join_set.join_next().await else {
                     break;
                 };
-                let completed = joined.unwrap_or(false);
+                let outcome: EmbeddingFileOutcome = joined.unwrap_or_default();
+                let completed = outcome.ok;
+                {
+                    let mut job_metrics = metrics.lock().await;
+                    job_metrics.record_file_outcome(outcome);
+                }
                 processed = processed.saturating_add(1);
                 let mgr = app2.state::<EmbeddingManager>();
                 let mut s = mgr.state.lock().await;
@@ -1123,6 +1545,28 @@ pub async fn start(
                         message: s.message.clone(),
                     },
                 );
+                drop(s);
+                drop(mgr);
+                if let Err(e) = maybe_flush_qdrant_visibility(
+                    &app2,
+                    &qdrant_state,
+                    &qdrant_batcher,
+                    &metrics,
+                    processed,
+                    &mut last_visibility_flush_at,
+                    &mut last_visibility_flush_processed,
+                    false,
+                )
+                .await
+                {
+                    tracing::error!(
+                        target: crate::logging::TARGET_EMBEDDING,
+                        error = %e,
+                        processed_files = processed,
+                        "embedding qdrant visibility flush failed"
+                    );
+                    emit_error(&app2, &e);
+                }
             }
             let app_for_file = app2.clone();
             let source_id_for_file = source_id.clone();
@@ -1130,6 +1574,7 @@ pub async fn start(
             let pdfium_for_job = pdfium_candidates.clone();
             let embed_sem_for_job = embed_sem.clone();
             let ocr_sem_for_job = ocr_sem.clone();
+            let metadata_batcher_for_file = metadata_batcher.clone();
             let qdrant_batcher_for_file = qdrant_batcher.clone();
             let hash_runtime_cache_for_file = hash_runtime_cache.clone();
             let vision_raster_for_file = vision_raster;
@@ -1142,6 +1587,7 @@ pub async fn start(
                 let mtime_ms = pending.mtime_ms;
                 let file_path = path.to_string_lossy().to_string();
                 let file_started = Instant::now();
+                let mut outcome = EmbeddingFileOutcome::default();
 
                 let mut precopied_embedding = pending.precopied_content_embedding.clone();
                 let mut precopy_extracted = pending.precopy_extracted_text.clone();
@@ -1165,7 +1611,7 @@ pub async fn start(
                         Ok(b) => Some(b),
                         Err(e) => {
                             emit_file_failed(&app_for_file, path, &format!("file read failed: {e}"));
-                            return false;
+                            return outcome;
                         }
                     }
                 } else {
@@ -1232,13 +1678,12 @@ pub async fn start(
                 };
                 let should_embed_metadata = pending.should_embed_metadata;
                 let metadata_handle = {
-                    let gemini = gemini_for_file.clone();
                     let metadata_text = metadata_text_for_embedding;
+                    let metadata_batcher = metadata_batcher_for_file.clone();
                     tokio::spawn(async move {
                         if should_embed_metadata {
                             let started = Instant::now();
-                            let metadata_embedding =
-                                embed_query_text_with_client(&gemini, &metadata_text).await?;
+                            let metadata_embedding = metadata_batcher.embed(metadata_text).await?;
                             Ok::<(Option<Vec<f32>>, u128), String>((
                                 Some(metadata_embedding),
                                 started.elapsed().as_millis(),
@@ -1348,29 +1793,33 @@ pub async fn start(
                     Ok(v) => v,
                     Err(e) => {
                         emit_file_failed(&app_for_file, path, &format!("embedding request failed: {e}"));
-                        return false;
+                        return outcome;
                     }
                 };
                 content_embed_elapsed_ms = content_elapsed;
+                outcome.content_embed_elapsed_ms = content_embed_elapsed_ms;
 
                 let (metadata_embedding, metadata_elapsed) = match metadata_res {
                     Ok(v) => v,
                     Err(e) => {
                         emit_file_failed(&app_for_file, path, &format!("metadata embedding failed: {e}"));
-                        return false;
+                        return outcome;
                     }
                 };
                 metadata_embed_elapsed_ms = metadata_elapsed;
+                outcome.metadata_embed_elapsed_ms = metadata_embed_elapsed_ms;
 
                 let (extracted_text, text_elapsed, pdf_used_local_text) = match text_res {
                     Ok(v) => v,
                     Err(_) => (None, 0, false),
                 };
                 text_extract_elapsed_ms = text_elapsed;
+                outcome.text_extract_elapsed_ms = text_extract_elapsed_ms;
 
                 let qdrant_state = app_for_file.state::<qdrant::QdrantState>();
+                let mut qdrant_upsert_elapsed_ms: u128 = 0;
                 if let Some(embedding) = content_embedding.clone() {
-                    if let Err(e) = qdrant_batcher_for_file
+                    match qdrant_batcher_for_file
                         .enqueue_content(
                             &app_for_file,
                             &qdrant_state,
@@ -1385,13 +1834,23 @@ pub async fn start(
                         )
                         .await
                     {
-                        emit_file_failed(&app_for_file, path, &format!("vector upsert failed: {e}"));
-                        return false;
+                        Ok(stats) => {
+                            qdrant_upsert_elapsed_ms =
+                                qdrant_upsert_elapsed_ms.saturating_add(stats.elapsed_ms);
+                        }
+                        Err(e) => {
+                            emit_file_failed(
+                                &app_for_file,
+                                path,
+                                &format!("vector upsert failed: {e}"),
+                            );
+                            return outcome;
+                        }
                     }
                 }
 
                 if let Some(metadata_embedding) = metadata_embedding {
-                    if let Err(e) = qdrant_batcher_for_file
+                    match qdrant_batcher_for_file
                         .enqueue_metadata(
                             &app_for_file,
                             &qdrant_state,
@@ -1406,29 +1865,21 @@ pub async fn start(
                         )
                         .await
                     {
-                        emit_file_failed(
-                            &app_for_file,
-                            path,
-                            &format!("metadata vector upsert failed: {e}"),
-                        );
-                        return false;
+                        Ok(stats) => {
+                            qdrant_upsert_elapsed_ms =
+                                qdrant_upsert_elapsed_ms.saturating_add(stats.elapsed_ms);
+                        }
+                        Err(e) => {
+                            emit_file_failed(
+                                &app_for_file,
+                                path,
+                                &format!("metadata vector upsert failed: {e}"),
+                            );
+                            return outcome;
+                        }
                     }
                 }
-
-                // Make vectors visible in Qdrant before logging completion. Otherwise
-                // `similar_by_path` and search see nothing until the job ends (buffer flush
-                // used to run only every N points or after all workers finished).
-                if let Err(e) = qdrant_batcher_for_file
-                    .flush(&app_for_file, &qdrant_state)
-                    .await
-                {
-                    emit_file_failed(
-                        &app_for_file,
-                        path,
-                        &format!("qdrant flush failed: {e}"),
-                    );
-                    return false;
-                }
+                outcome.qdrant_upsert_elapsed_ms = qdrant_upsert_elapsed_ms;
 
                 if pending.should_embed_content {
                     if let Some(ref emb) = content_embedding {
@@ -1471,18 +1922,25 @@ pub async fn start(
                     content_embed_elapsed_ms,
                     metadata_embed_elapsed_ms,
                     text_extract_elapsed_ms,
+                    qdrant_upsert_elapsed_ms,
                     file_read_bytes,
                     gemini_vision_payload_bytes,
                     pdf_used_local_text,
                     file_total_elapsed_ms = file_started.elapsed().as_millis(),
                     "embedding file completed"
                 );
-                true
+                outcome.ok = true;
+                outcome
             });
         }
 
         while let Some(joined) = join_set.join_next().await {
-            let completed = joined.unwrap_or(false);
+            let outcome: EmbeddingFileOutcome = joined.unwrap_or_default();
+            let completed = outcome.ok;
+            {
+                let mut job_metrics = metrics.lock().await;
+                job_metrics.record_file_outcome(outcome);
+            }
             // Count every finished file task (success or failure) so UI progress reflects real-time completion.
             processed = processed.saturating_add(1);
             let mgr = app2.state::<EmbeddingManager>();
@@ -1507,16 +1965,96 @@ pub async fn start(
                     message: s.message.clone(),
                 },
             );
+            drop(s);
+            drop(mgr);
+            if let Err(e) = maybe_flush_qdrant_visibility(
+                &app2,
+                &qdrant_state,
+                &qdrant_batcher,
+                &metrics,
+                processed,
+                &mut last_visibility_flush_at,
+                &mut last_visibility_flush_processed,
+                false,
+            )
+            .await
+            {
+                tracing::error!(
+                    target: crate::logging::TARGET_EMBEDDING,
+                    error = %e,
+                    processed_files = processed,
+                    "embedding qdrant visibility flush failed"
+                );
+                emit_error(&app2, &e);
+            }
         }
 
         let qdrant_state_job = app2.state::<qdrant::QdrantState>();
-        if let Err(e) = qdrant_batcher.flush(&app2, &qdrant_state_job).await {
+        if let Err(e) = maybe_flush_qdrant_visibility(
+            &app2,
+            &qdrant_state_job,
+            &qdrant_batcher,
+            &metrics,
+            processed,
+            &mut last_visibility_flush_at,
+            &mut last_visibility_flush_processed,
+            true,
+        )
+        .await
+        {
             tracing::error!(
                 target: crate::logging::TARGET_EMBEDDING,
                 error = %e,
                 "qdrant embedding batch flush failed"
             );
             emit_error(&app2, &e);
+        }
+
+        {
+            let job_metrics = metrics.lock().await;
+            tracing::info!(
+                target: crate::logging::TARGET_EMBEDDING,
+                source_id = %source_id,
+                completed_files = job_metrics.completed_files,
+                failed_files = job_metrics.failed_files,
+                content_embed_elapsed_ms_total = job_metrics.content_embed_elapsed_ms_total,
+                content_embed_elapsed_ms_avg = average_ms(
+                    job_metrics.content_embed_elapsed_ms_total,
+                    processed,
+                ),
+                metadata_embed_elapsed_ms_total = job_metrics.metadata_embed_elapsed_ms_total,
+                metadata_embed_elapsed_ms_avg = average_ms(
+                    job_metrics.metadata_embed_elapsed_ms_total,
+                    processed,
+                ),
+                text_extract_elapsed_ms_total = job_metrics.text_extract_elapsed_ms_total,
+                text_extract_elapsed_ms_avg = average_ms(
+                    job_metrics.text_extract_elapsed_ms_total,
+                    processed,
+                ),
+                qdrant_upsert_elapsed_ms_total = job_metrics.qdrant_upsert_elapsed_ms_total,
+                qdrant_upsert_elapsed_ms_avg = average_ms(
+                    job_metrics.qdrant_upsert_elapsed_ms_total,
+                    processed,
+                ),
+                qdrant_visibility_flush_calls = job_metrics.qdrant_visibility_flush_calls,
+                qdrant_visibility_flush_elapsed_ms_total =
+                    job_metrics.qdrant_visibility_flush_elapsed_ms_total,
+                qdrant_visibility_content_points = job_metrics.qdrant_visibility_content_points,
+                qdrant_visibility_metadata_points = job_metrics.qdrant_visibility_metadata_points,
+                metadata_batch_http_calls = job_metrics.metadata_batch_http_calls,
+                metadata_batch_item_count = job_metrics.metadata_batch_item_count,
+                metadata_batch_http_elapsed_ms_total =
+                    job_metrics.metadata_batch_http_elapsed_ms_total,
+                metadata_batch_http_elapsed_ms_avg = average_ms(
+                    job_metrics.metadata_batch_http_elapsed_ms_total,
+                    job_metrics.metadata_batch_http_calls,
+                ),
+                metadata_batch_cache_hits = job_metrics.metadata_batch_cache_hits,
+                metadata_batch_fallback_item_count =
+                    job_metrics.metadata_batch_fallback_item_count,
+                "embedding job aggregate timings"
+            );
         }
 
         let cancelled = cancel_flag.load(Ordering::Relaxed);
@@ -1582,3 +2120,26 @@ pub async fn cancel(mgr: tauri::State<'_, EmbeddingManager>) -> Result<(), Strin
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{batch_embed_request_body, GEMINI_MODEL, OUTPUT_DIM};
+
+    #[test]
+    fn batch_embed_body_includes_model_per_request() {
+        let texts = vec!["filename: one.png".to_string(), "filename: two.pdf".to_string()];
+        let body = batch_embed_request_body(&texts);
+        let requests = body["requests"].as_array().expect("requests array");
+        assert_eq!(requests.len(), 2);
+        for (request, expected_text) in requests.iter().zip(texts.iter()) {
+            assert_eq!(request["model"].as_str(), Some(GEMINI_MODEL));
+            assert_eq!(
+                request["content"]["parts"][0]["text"].as_str(),
+                Some(expected_text.as_str())
+            );
+            assert_eq!(
+                request["outputDimensionality"].as_u64(),
+                Some(OUTPUT_DIM as u64)
+            );
+        }
+    }
+}

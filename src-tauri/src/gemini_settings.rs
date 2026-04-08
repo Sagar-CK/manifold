@@ -39,10 +39,6 @@ pub fn env_has_gemini_key() -> bool {
         .ok()
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false)
-        || std::env::var("GOOGLE_GENERATIVE_AI_API_KEY")
-            .ok()
-            .map(|s| !s.trim().is_empty())
-            .unwrap_or(false)
 }
 
 #[derive(Serialize)]
@@ -109,4 +105,30 @@ pub fn clear_stored_api_key_file(app: &tauri::AppHandle) -> Result<(), String> {
         std::fs::remove_file(&path).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::env_has_gemini_key;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn env_status_only_uses_the_canonical_gemini_variable() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+
+        std::env::remove_var("MANIFOLD_GEMINI_API_KEY");
+        std::env::remove_var("GOOGLE_GENERATIVE_AI_API_KEY");
+        assert!(!env_has_gemini_key());
+
+        std::env::set_var("GOOGLE_GENERATIVE_AI_API_KEY", "legacy-key");
+        assert!(!env_has_gemini_key());
+
+        std::env::set_var("MANIFOLD_GEMINI_API_KEY", "current-key");
+        assert!(env_has_gemini_key());
+
+        std::env::remove_var("MANIFOLD_GEMINI_API_KEY");
+        std::env::remove_var("GOOGLE_GENERATIVE_AI_API_KEY");
+    }
 }

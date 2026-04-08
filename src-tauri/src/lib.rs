@@ -4,21 +4,127 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Mutex;
 use std::time::Duration;
-use tauri::Manager;
-use walkdir::WalkDir;
+use tauri::{
+    menu::{Menu, MenuItem, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID},
+    Emitter, Manager,
+};
 
 mod gemini_settings;
 mod logging;
 mod qdrant;
 mod embedding;
+mod scan;
 mod text_index;
 
+pub use scan::{
+    any_candidate_needs_embedding, compute_sha256, is_path_excluded, is_under_dir, normalize_ext,
+    normalize_path_key, scan_files, scan_files_count, scan_files_estimate,
+    scan_files_needs_embedding, ScanFilesArgs, ScanFilesEstimateResult,
+    ScanFilesNeedsEmbeddingArgs, ScanWalkCandidate, ScannedFile, MAX_EMBED_FILE_BYTES,
+    walk_scan_candidates,
+};
+
 const THUMB_CACHE_MAX_ENTRIES: usize = 512;
-const THUMB_CACHE_SCHEMA_VERSION: &str = "v2";
+const THUMB_CACHE_SCHEMA_VERSION: &str = "v3";
+const APP_SHORTCUT_EVENT: &str = "app://shortcut";
+const MENU_NAVIGATE_SEARCH_ID: &str = "navigate-search";
+const MENU_NAVIGATE_GRAPH_ID: &str = "navigate-graph";
+const MENU_NAVIGATE_REVIEW_TAGS_ID: &str = "navigate-review-tags";
+const MENU_OPEN_SETTINGS_ID: &str = "navigate-settings";
+const MENU_SHOW_KEYBOARD_SHORTCUTS_ID: &str = "show-keyboard-shortcuts";
+
+#[derive(Debug, Clone, Serialize)]
+struct AppShortcutEventPayload {
+    action: &'static str,
+}
+
+fn emit_app_shortcut<R: tauri::Runtime>(app: &tauri::AppHandle<R>, action: &'static str) {
+    let _ = app.emit(APP_SHORTCUT_EVENT, AppShortcutEventPayload { action });
+}
+
+fn build_app_menu<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri::Result<Menu<R>> {
+    let menu = Menu::default(app_handle)?;
+
+    let search_item = MenuItem::with_id(
+        app_handle,
+        MENU_NAVIGATE_SEARCH_ID,
+        "Search",
+        true,
+        Some("CmdOrCtrl+K"),
+    )?;
+    let graph_item = MenuItem::with_id(
+        app_handle,
+        MENU_NAVIGATE_GRAPH_ID,
+        "Graph Explorer",
+        true,
+        Some("CmdOrCtrl+G"),
+    )?;
+    let review_tags_item = MenuItem::with_id(
+        app_handle,
+        MENU_NAVIGATE_REVIEW_TAGS_ID,
+        "Review Suggested Tags",
+        true,
+        Some("CmdOrCtrl+Shift+T"),
+    )?;
+    let settings_item = MenuItem::with_id(
+        app_handle,
+        MENU_OPEN_SETTINGS_ID,
+        "Settings",
+        true,
+        Some("CmdOrCtrl+,"),
+    )?;
+    let navigate_separator = PredefinedMenuItem::separator(app_handle)?;
+    let navigate_menu = Submenu::with_items(
+        app_handle,
+        "Navigate",
+        true,
+        &[
+            &search_item,
+            &graph_item,
+            &review_tags_item,
+            &navigate_separator,
+            &settings_item,
+        ],
+    )?;
+
+    let items = menu.items()?;
+    let help_index = items
+        .iter()
+        .position(|item| item.id() == HELP_SUBMENU_ID)
+        .unwrap_or(items.len());
+    menu.insert(&navigate_menu, help_index)?;
+
+    let help_menu = if let Some(existing) = menu
+        .get(HELP_SUBMENU_ID)
+        .and_then(|item| item.as_submenu().cloned())
+    {
+        existing
+    } else {
+        let submenu = Submenu::with_id(app_handle, HELP_SUBMENU_ID, "Help", true)?;
+        menu.append(&submenu)?;
+        submenu
+    };
+
+    if !help_menu.items()?.is_empty() {
+        let separator = PredefinedMenuItem::separator(app_handle)?;
+        help_menu.append(&separator)?;
+    }
+
+    let keyboard_shortcuts_item = MenuItem::with_id(
+        app_handle,
+        MENU_SHOW_KEYBOARD_SHORTCUTS_ID,
+        "Keyboard Shortcuts",
+        true,
+        Some("CmdOrCtrl+/"),
+    )?;
+    help_menu.append(&keyboard_shortcuts_item)?;
+
+    Ok(menu)
+}
 
 #[derive(Debug, Clone)]
 struct ThumbnailCacheEntry {
@@ -86,6 +192,201 @@ fn thumbnail_file_kind(path: &Path) -> String {
         .and_then(|s| s.to_str())
         .map(normalize_ext)
         .unwrap_or_default()
+}
+
+fn ffmpeg_tool_file_name(tool: &str) -> String {
+    if cfg!(target_os = "windows") {
+        format!("{tool}.exe")
+    } else {
+        tool.to_string()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FfmpegToolLookup {
+    override_dir: Option<PathBuf>,
+    resource_dir: Option<PathBuf>,
+    exe_path: Option<PathBuf>,
+    cwd: Option<PathBuf>,
+    path_dirs: Vec<PathBuf>,
+}
+
+fn ffmpeg_tool_candidates(tool: &str, lookup: &FfmpegToolLookup) -> Vec<PathBuf> {
+    let file_name = ffmpeg_tool_file_name(tool);
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    if let Some(dir) = &lookup.override_dir {
+        candidates.push(dir.join(&file_name));
+    }
+
+    if let Some(resource_dir) = &lookup.resource_dir {
+        candidates.push(resource_dir.join("ffmpeg").join(&file_name));
+        candidates.push(resource_dir.join("resources").join("ffmpeg").join(&file_name));
+        candidates.push(resource_dir.join(&file_name));
+    }
+
+    if let Some(exe_path) = &lookup.exe_path {
+        if let Some(exe_dir) = exe_path.parent() {
+            candidates.push(exe_dir.join("ffmpeg").join(&file_name));
+            candidates.push(exe_dir.join(&file_name));
+            if exe_path
+                .components()
+                .any(|c| c.as_os_str() == std::ffi::OsStr::new("target"))
+            {
+                candidates.push(exe_dir.join("../../resources/ffmpeg").join(&file_name));
+            }
+            if let Some(src_tauri_dir) = exe_dir.parent().and_then(|p| p.parent()) {
+                candidates.push(src_tauri_dir.join("resources").join("ffmpeg").join(&file_name));
+            }
+        }
+    }
+
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("ffmpeg")
+            .join(&file_name),
+    );
+
+    if let Some(cwd) = &lookup.cwd {
+        candidates.push(cwd.join("src-tauri").join("resources").join("ffmpeg").join(&file_name));
+    }
+
+    for dir in &lookup.path_dirs {
+        candidates.push(dir.join(&file_name));
+    }
+
+    candidates
+}
+
+fn resolve_first_existing_path(candidates: &[PathBuf]) -> Option<PathBuf> {
+    candidates.iter().find(|path| path.exists()).cloned()
+}
+
+fn resolve_ffmpeg_tool_path(app: &tauri::AppHandle, tool: &str) -> Result<PathBuf, String> {
+    let override_dir = std::env::var_os("MANIFOLD_FFMPEG_BIN_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let path_dirs = std::env::var_os("PATH")
+        .map(|raw| std::env::split_paths(&raw).collect::<Vec<PathBuf>>())
+        .unwrap_or_default();
+    let lookup = FfmpegToolLookup {
+        override_dir,
+        resource_dir: app.path().resource_dir().ok(),
+        exe_path: std::env::current_exe().ok(),
+        cwd: std::env::current_dir().ok(),
+        path_dirs,
+    };
+    let candidates = ffmpeg_tool_candidates(tool, &lookup);
+    resolve_first_existing_path(&candidates).ok_or_else(|| {
+        format!(
+            "{tool} binary was not found. Run `pnpm setup:dev` (or `pnpm setup:binaries`) to install FFmpeg under src-tauri/resources/ffmpeg/, or set MANIFOLD_FFMPEG_BIN_DIR."
+        )
+    })
+}
+
+fn parse_ffprobe_duration(output: &[u8]) -> Option<f64> {
+    let raw = String::from_utf8_lossy(output);
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let seconds = trimmed.parse::<f64>().ok()?;
+    if seconds.is_finite() && seconds >= 0.0 {
+        Some(seconds)
+    } else {
+        None
+    }
+}
+
+fn choose_video_thumbnail_seek_seconds(duration_secs: Option<f64>) -> f64 {
+    match duration_secs {
+        Some(duration) if duration.is_finite() && duration > 0.0 => (duration * 0.10).clamp(1.0, 30.0),
+        _ => 1.0,
+    }
+}
+
+fn probe_video_duration_seconds(ffprobe_path: &Path, video_path: &Path) -> Option<f64> {
+    let output = Command::new(ffprobe_path)
+        .arg("-v")
+        .arg("error")
+        .arg("-show_entries")
+        .arg("format=duration")
+        .arg("-of")
+        .arg("default=noprint_wrappers=1:nokey=1")
+        .arg(video_path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_ffprobe_duration(&output.stdout)
+}
+
+fn ffmpeg_stderr_text(output: &std::process::Output) -> String {
+    let text = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if text.is_empty() {
+        "ffmpeg did not produce a thumbnail frame".to_string()
+    } else {
+        text
+    }
+}
+
+fn render_video_thumbnail_at_seek_base64(
+    ffmpeg_path: &Path,
+    video_path: &Path,
+    max_edge: u32,
+    seek_seconds: f64,
+) -> Result<String, String> {
+    let seek = format!("{seek_seconds:.3}");
+    let scale = format!("scale={max_edge}:{max_edge}:force_original_aspect_ratio=decrease");
+    let output = Command::new(ffmpeg_path)
+        .arg("-v")
+        .arg("error")
+        .arg("-ss")
+        .arg(&seek)
+        .arg("-i")
+        .arg(video_path)
+        .arg("-frames:v")
+        .arg("1")
+        .arg("-an")
+        .arg("-sn")
+        .arg("-dn")
+        .arg("-vf")
+        .arg(&scale)
+        .arg("-f")
+        .arg("image2pipe")
+        .arg("-vcodec")
+        .arg("png")
+        .arg("pipe:1")
+        .output()
+        .map_err(|e| format!("ffmpeg spawn failed: {e}"))?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return Err(ffmpeg_stderr_text(&output));
+    }
+    Ok(base64::engine::general_purpose::STANDARD.encode(output.stdout))
+}
+
+fn render_video_thumbnail_base64(
+    path: &Path,
+    max_edge: u32,
+    ffmpeg_path: &Path,
+    ffprobe_path: &Path,
+) -> Result<String, String> {
+    let duration_secs = probe_video_duration_seconds(ffprobe_path, path);
+    let first_seek = choose_video_thumbnail_seek_seconds(duration_secs);
+    match render_video_thumbnail_at_seek_base64(ffmpeg_path, path, max_edge, first_seek) {
+        Ok(base64_png) => Ok(base64_png),
+        Err(err) if first_seek > 0.0 => {
+            render_video_thumbnail_at_seek_base64(ffmpeg_path, path, max_edge, 0.0)
+                .map_err(|retry_err| format!("{err}; retry at 0s failed: {retry_err}"))
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn thumbnail_supported_file_kind(kind: &str) -> bool {
+    matches!(kind, "png" | "jpg" | "jpeg" | "pdf" | "mp4" | "mov")
 }
 
 /// Search paths for the PDFium dynamic library (shared with thumbnails and embedding).
@@ -226,44 +527,21 @@ fn render_pdf_thumbnail_base64(
 }
 
 fn load_env() {
-    let _ = dotenvy::from_filename(".env.local");
-    let _ = dotenvy::from_filename("../.env.local");
-    let _ = dotenvy::dotenv();
+    let repo_env_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("src-tauri has a workspace root")
+        .join(".env.local");
+    let _ = dotenvy::from_path(&repo_env_path);
 }
 
-/// Loads `.env.local` from paths that exist in packaged apps (CWD is often not the repo root).
-/// Earlier `load_env()` already ran; `dotenvy` does not override existing variables, so we load
-/// user app data first, then bundle-adjacent paths.
-fn load_env_packaged_locations(app: &tauri::AppHandle) {
+fn load_app_data_env(app: &tauri::AppHandle) {
     if let Ok(dir) = app.path().app_data_dir() {
         let _ = dotenvy::from_path(dir.join(".env.local"));
-    }
-    if let Ok(dir) = app.path().resource_dir() {
-        let _ = dotenvy::from_path(dir.join(".env.local"));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            let _ = dotenvy::from_path(exe_dir.join(".env.local"));
-            // macOS .app: executable is in Contents/MacOS; resources live in Contents/Resources.
-            if let Some(contents) = exe_dir.parent() {
-                let _ = dotenvy::from_path(contents.join("Resources").join(".env.local"));
-            }
-        }
     }
 }
 
 fn init_logging() {
-    let filter = logging::env_filter_directives();
-    let env_filter = tracing_subscriber::EnvFilter::try_new(&filter)
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("error"));
-
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .with_target(true)
-        .with_line_number(true)
-        .with_file(true)
-        .compact()
-        .try_init();
+    logging::init();
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -271,6 +549,20 @@ pub fn run() {
     load_env();
     init_logging();
     let app = tauri::Builder::default()
+        .menu(build_app_menu)
+        .on_menu_event(|app, event| {
+            if event.id() == MENU_NAVIGATE_SEARCH_ID {
+                emit_app_shortcut(app, "search");
+            } else if event.id() == MENU_NAVIGATE_GRAPH_ID {
+                emit_app_shortcut(app, "graph");
+            } else if event.id() == MENU_NAVIGATE_REVIEW_TAGS_ID {
+                emit_app_shortcut(app, "review-tags");
+            } else if event.id() == MENU_OPEN_SETTINGS_ID {
+                emit_app_shortcut(app, "settings");
+            } else if event.id() == MENU_SHOW_KEYBOARD_SHORTCUTS_ID {
+                emit_app_shortcut(app, "show-shortcuts");
+            }
+        })
         .manage(qdrant::QdrantState::default())
         .manage(embedding::EmbeddingManager::default())
         .manage(text_index::TextIndexState::default())
@@ -278,7 +570,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            load_env_packaged_locations(app.handle());
+            load_app_data_env(app.handle());
             gemini_settings::init_storage(app.handle());
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -301,12 +593,11 @@ pub fn run() {
             qdrant_similar_by_path,
             hybrid_search,
             qdrant_count_points,
-            qdrant_scroll_content_vectors,
             qdrant_scroll_graph,
             qdrant_set_path_tag_ids,
-            qdrant_sync_tags_backfill,
             qdrant_delete_all_points,
             qdrant_delete_points_for_paths,
+            prune_missing_indexed_paths,
             qdrant_delete_points_for_include_path,
             start_embedding_job,
             pause_embedding_job,
@@ -332,16 +623,6 @@ pub fn run() {
     });
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ScanFilesArgs {
-    pub include: Vec<String>,
-    pub exclude: Vec<String>,
-    pub extensions: Vec<String>,
-    #[serde(default = "default_true")]
-    pub use_default_folder_excludes: bool,
-}
-
 /// Max edge (px) and JPEG quality for raster images sent to Gemini (embed + OCR).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -364,575 +645,6 @@ pub fn clamp_vision_raster_options(o: VisionRasterOptions) -> VisionRasterOption
         max_edge_px: o.max_edge_px.clamp(256, 2048),
         jpeg_quality: o.jpeg_quality.clamp(50, 95),
     }
-}
-
-fn default_true() -> bool {
-    true
-}
-
-/// Max file size (bytes) eligible for embedding and embed preflight scans.
-pub const MAX_EMBED_FILE_BYTES: u64 = 25 * 1024 * 1024;
-
-#[derive(Debug, Clone)]
-pub struct ScanWalkCandidate {
-    pub path: PathBuf,
-    pub size_bytes: u64,
-    pub mtime_ms: i64,
-    pub ext: String,
-}
-
-fn file_mtime_ms(meta: &std::fs::Metadata) -> i64 {
-    meta.modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
-
-/// Walk include roots and return file candidates (extension filter, excludes, size cap).
-pub fn walk_scan_candidates(
-    args: &ScanFilesArgs,
-    max_file_bytes: u64,
-) -> Result<Vec<ScanWalkCandidate>, String> {
-    let include_dirs: Vec<PathBuf> = args.include.iter().map(PathBuf::from).collect();
-    let exclude_dirs: Vec<PathBuf> = args.exclude.iter().map(PathBuf::from).collect();
-    let use_default_folder_excludes = args.use_default_folder_excludes;
-    let allowed_exts: std::collections::HashSet<String> =
-        args.extensions.iter().map(|e| normalize_ext(e)).collect();
-
-    let mut out: Vec<ScanWalkCandidate> = Vec::new();
-    let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for root in include_dirs {
-        if !root.exists() {
-            continue;
-        }
-        for entry in WalkDir::new(&root)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(|e| {
-                if e.file_type().is_dir() {
-                    let p = e.path();
-                    !is_path_excluded(p, &exclude_dirs, use_default_folder_excludes)
-                } else {
-                    true
-                }
-            })
-        {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(err) => {
-                    if !is_walk_permission_denied(&err) {
-                        // skip non-permission walk errors
-                    }
-                    continue;
-                }
-            };
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let path = entry.path();
-            if is_path_excluded(path, &exclude_dirs, use_default_folder_excludes) {
-                continue;
-            }
-            let path_key = normalize_path_key(path);
-            if !seen_paths.insert(path_key) {
-                continue;
-            }
-            let ext = path
-                .extension()
-                .and_then(|s| s.to_str())
-                .map(normalize_ext);
-            let Some(ext) = ext else { continue };
-            if !allowed_exts.is_empty() && !allowed_exts.contains(&ext) {
-                continue;
-            }
-            let meta = match fs::metadata(path) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            if meta.len() > max_file_bytes {
-                continue;
-            }
-            out.push(ScanWalkCandidate {
-                path: path.to_path_buf(),
-                size_bytes: meta.len(),
-                mtime_ms: file_mtime_ms(&meta),
-                ext,
-            });
-        }
-    }
-
-    Ok(out)
-}
-
-/// Returns true if any candidate still needs content or metadata embedding (uses preflight index + hash).
-pub fn any_candidate_needs_embedding(
-    candidates: Vec<ScanWalkCandidate>,
-    index: qdrant::SourcePreflightIndex,
-) -> Result<bool, String> {
-    for c in candidates {
-        let path_str = c.path.to_string_lossy().to_string();
-        let content_hash =
-            if let Some(h) = qdrant::reuse_hash_if_fingerprint_matches(
-                &path_str,
-                c.size_bytes,
-                c.mtime_ms,
-                &index,
-            ) {
-                h
-            } else {
-                compute_sha256(&c.path, 1024 * 1024 * 128)?
-            };
-        let d = qdrant::decide_embedding_need_from_index(&path_str, &content_hash, &index);
-        if d.should_embed_content || d.should_embed_metadata {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-/// Built-in directory name segments to skip when `use_default_folder_excludes` is true.
-/// Keep in sync with `defaultFolderExcludes.ts` (`DEFAULT_FOLDER_EXCLUDE_SEGMENTS`).
-fn default_folder_exclude_segments() -> &'static [&'static str] {
-    &[
-        ".bzr",
-        ".cache",
-        ".eslintcache",
-        ".fseventsd",
-        ".git",
-        ".gradle",
-        ".hg",
-        ".mypy_cache",
-        ".next",
-        ".nuget",
-        ".nuxt",
-        ".nyc_output",
-        ".output",
-        ".parcel-cache",
-        ".pytest_cache",
-        ".ruff_cache",
-        ".Spotlight-V100",
-        ".svn",
-        ".svelte-kit",
-        ".TemporaryItems",
-        ".Trash",
-        ".turbo",
-        ".venv",
-        "__pycache__",
-        "bin",
-        "bower_components",
-        "build",
-        "Carthage",
-        "coverage",
-        "DerivedData",
-        "dist",
-        "env",
-        "htmlcov",
-        "jspm_packages",
-        "node_modules",
-        "obj",
-        "out",
-        "Pods",
-        "target",
-        "venv",
-        "virtualenv",
-    ]
-}
-
-fn path_has_default_excluded_segment(path: &Path) -> bool {
-    for c in path.components() {
-        if let std::path::Component::Normal(os) = c {
-            let Some(name) = os.to_str() else {
-                continue;
-            };
-            if default_folder_exclude_segments()
-                .iter()
-                .any(|seg| name.eq_ignore_ascii_case(seg))
-            {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-pub fn is_path_excluded(
-    path: &Path,
-    user_excludes: &[PathBuf],
-    use_default_folder_excludes: bool,
-) -> bool {
-    if user_excludes.iter().any(|ex| is_under_dir(path, ex)) {
-        return true;
-    }
-    use_default_folder_excludes && path_has_default_excluded_segment(path)
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScannedFile {
-    pub path: String,
-    pub size_bytes: u64,
-    pub mtime_ms: i64,
-    pub sha256: String,
-}
-
-fn is_under_dir(path: &Path, dir: &Path) -> bool {
-    path.starts_with(dir)
-}
-
-fn is_walk_permission_denied(err: &walkdir::Error) -> bool {
-    use std::io::ErrorKind;
-    err.io_error()
-        .is_some_and(|e| matches!(e.kind(), ErrorKind::PermissionDenied))
-}
-
-fn normalize_ext(s: &str) -> String {
-    s.trim()
-        .trim_start_matches('.')
-        .to_ascii_lowercase()
-}
-
-pub fn normalize_path_key(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace('\\', "/")
-        .trim_end_matches('/')
-        .to_ascii_lowercase()
-}
-
-pub(crate) fn compute_sha256(path: &Path, max_bytes: u64) -> Result<String, String> {
-    let mut file = fs::File::open(path).map_err(|e| e.to_string())?;
-    let mut hasher = Sha256::new();
-    let mut buf = [0u8; 1024 * 1024];
-    let mut read_total: u64 = 0;
-    loop {
-        let n = file.read(&mut buf).map_err(|e| e.to_string())?;
-        if n == 0 {
-            break;
-        }
-        read_total = read_total.saturating_add(n as u64);
-        if read_total > max_bytes {
-            return Err(format!(
-                "File too large to hash (>{} bytes): {}",
-                max_bytes,
-                path.display()
-            ));
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(hex::encode(hasher.finalize()))
-}
-
-#[tauri::command]
-async fn scan_files(args: ScanFilesArgs) -> Result<Vec<ScannedFile>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let include_dirs: Vec<PathBuf> = args.include.iter().map(PathBuf::from).collect();
-        let exclude_dirs: Vec<PathBuf> = args.exclude.iter().map(PathBuf::from).collect();
-        let use_default_folder_excludes = args.use_default_folder_excludes;
-        let allowed_exts: std::collections::HashSet<String> =
-            args.extensions.iter().map(|e| normalize_ext(e)).collect();
-
-        let mut out: Vec<ScannedFile> = Vec::new();
-        let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for root in include_dirs {
-            if !root.exists() {
-                continue;
-            }
-            for entry in WalkDir::new(root)
-                .follow_links(false)
-                .into_iter()
-                .filter_entry(|e| {
-                    // Avoid descending into excluded directories (prevents unnecessary IO + permission errors).
-                    if e.file_type().is_dir() {
-                        let p = e.path();
-                        !is_path_excluded(p, &exclude_dirs, use_default_folder_excludes)
-                    } else {
-                        true
-                    }
-                })
-            {
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(err) => {
-                        if !is_walk_permission_denied(&err) {
-                            // skip non-permission walk errors
-                        }
-                        continue;
-                    }
-                };
-                if !entry.file_type().is_file() {
-                    continue;
-                }
-                let path = entry.path();
-                if is_path_excluded(path, &exclude_dirs, use_default_folder_excludes) {
-                    continue;
-                }
-                let path_key = normalize_path_key(path);
-                if !seen_paths.insert(path_key) {
-                    continue;
-                }
-                let ext = path
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .map(normalize_ext);
-                let Some(ext) = ext else { continue };
-                if !allowed_exts.is_empty() && !allowed_exts.contains(&ext) {
-                    continue;
-                }
-                let meta = match fs::metadata(path) {
-                    Ok(m) => m,
-                    Err(_err) => continue,
-                };
-                let modified = meta.modified().ok();
-                let mtime_ms = modified
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0);
-                let sha256 = compute_sha256(path, 1024 * 1024 * 128)?; // 128MB guardrail
-                out.push(ScannedFile {
-                    path: path.to_string_lossy().to_string(),
-                    size_bytes: meta.len(),
-                    mtime_ms,
-                    sha256,
-                });
-            }
-        }
-        Ok(out)
-    })
-    .await
-    .map_err(|e| format!("scan_files: task join error: {e}"))?
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScanFilesCountResult {
-    pub total: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ScanFilesEstimateResult {
-    pub total: u64,
-    pub image_files: u64,
-    pub audio_files: u64,
-    pub video_files: u64,
-    pub text_like_files: u64,
-    pub total_text_bytes: u64,
-    pub total_audio_bytes: u64,
-    pub total_video_bytes: u64,
-}
-
-#[tauri::command]
-async fn scan_files_count(args: ScanFilesArgs) -> Result<ScanFilesCountResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let include_dirs: Vec<PathBuf> = args.include.iter().map(PathBuf::from).collect();
-        let exclude_dirs: Vec<PathBuf> = args.exclude.iter().map(PathBuf::from).collect();
-        let use_default_folder_excludes = args.use_default_folder_excludes;
-        let allowed_exts: std::collections::HashSet<String> =
-            args.extensions.iter().map(|e| normalize_ext(e)).collect();
-
-        let mut total: u64 = 0;
-        let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for root in include_dirs {
-            if !root.exists() {
-                continue;
-            }
-            for entry in WalkDir::new(root)
-                .follow_links(false)
-                .into_iter()
-                .filter_entry(|e| {
-                    if e.file_type().is_dir() {
-                        let p = e.path();
-                        !is_path_excluded(p, &exclude_dirs, use_default_folder_excludes)
-                    } else {
-                        true
-                    }
-                })
-            {
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(err) => {
-                        if !is_walk_permission_denied(&err) {
-                            // skip non-permission walk errors
-                        }
-                        continue;
-                    }
-                };
-                if !entry.file_type().is_file() {
-                    continue;
-                }
-                let path = entry.path();
-                if is_path_excluded(path, &exclude_dirs, use_default_folder_excludes) {
-                    continue;
-                }
-                let path_key = normalize_path_key(path);
-                if !seen_paths.insert(path_key) {
-                    continue;
-                }
-                let ext = path
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .map(normalize_ext);
-                let Some(ext) = ext else { continue };
-                if !allowed_exts.is_empty() && !allowed_exts.contains(&ext) {
-                    continue;
-                }
-                total = total.saturating_add(1);
-            }
-        }
-
-        Ok(ScanFilesCountResult { total })
-    })
-    .await
-    .map_err(|e| format!("scan_files_count: task join error: {e}"))?
-}
-
-#[tauri::command]
-async fn scan_files_estimate(args: ScanFilesArgs) -> Result<ScanFilesEstimateResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let include_dirs: Vec<PathBuf> = args.include.iter().map(PathBuf::from).collect();
-        let exclude_dirs: Vec<PathBuf> = args.exclude.iter().map(PathBuf::from).collect();
-        let use_default_folder_excludes = args.use_default_folder_excludes;
-        let allowed_exts: std::collections::HashSet<String> =
-            args.extensions.iter().map(|e| normalize_ext(e)).collect();
-
-        let mut total: u64 = 0;
-        let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut image_files: u64 = 0;
-        let mut audio_files: u64 = 0;
-        let mut video_files: u64 = 0;
-        let mut text_like_files: u64 = 0;
-        let mut total_text_bytes: u64 = 0;
-        let mut total_audio_bytes: u64 = 0;
-        let mut total_video_bytes: u64 = 0;
-
-        for root in include_dirs {
-            if !root.exists() {
-                continue;
-            }
-            for entry in WalkDir::new(root)
-                .follow_links(false)
-                .into_iter()
-                .filter_entry(|e| {
-                    if e.file_type().is_dir() {
-                        let p = e.path();
-                        !is_path_excluded(p, &exclude_dirs, use_default_folder_excludes)
-                    } else {
-                        true
-                    }
-                })
-            {
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(err) => {
-                        if !is_walk_permission_denied(&err) {
-                            // skip non-permission walk errors
-                        }
-                        continue;
-                    }
-                };
-                if !entry.file_type().is_file() {
-                    continue;
-                }
-                let path = entry.path();
-                if is_path_excluded(path, &exclude_dirs, use_default_folder_excludes) {
-                    continue;
-                }
-                let path_key = normalize_path_key(path);
-                if !seen_paths.insert(path_key) {
-                    continue;
-                }
-                let ext = path
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .map(normalize_ext);
-                let Some(ext) = ext else { continue };
-                if !allowed_exts.is_empty() && !allowed_exts.contains(&ext) {
-                    continue;
-                }
-                let size_bytes = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-                total = total.saturating_add(1);
-                match ext.as_str() {
-                    "png" | "jpg" | "jpeg" => {
-                        image_files = image_files.saturating_add(1);
-                    }
-                    "mp3" | "wav" => {
-                        audio_files = audio_files.saturating_add(1);
-                        total_audio_bytes = total_audio_bytes.saturating_add(size_bytes);
-                    }
-                    "mp4" | "mov" => {
-                        video_files = video_files.saturating_add(1);
-                        total_video_bytes = total_video_bytes.saturating_add(size_bytes);
-                    }
-                    _ => {
-                        text_like_files = text_like_files.saturating_add(1);
-                        total_text_bytes = total_text_bytes.saturating_add(size_bytes);
-                    }
-                }
-            }
-        }
-
-        Ok(ScanFilesEstimateResult {
-            total,
-            image_files,
-            audio_files,
-            video_files,
-            text_like_files,
-            total_text_bytes,
-            total_audio_bytes,
-            total_video_bytes,
-        })
-    })
-    .await
-    .map_err(|e| format!("scan_files_estimate: task join error: {e}"))?
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ScanFilesNeedsEmbeddingArgs {
-    pub scan: ScanFilesArgs,
-    pub source_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ScanFilesNeedsEmbeddingResult {
-    pub total_selected: u64,
-    pub needs_embedding: bool,
-}
-
-#[tauri::command]
-async fn scan_files_needs_embedding(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, qdrant::QdrantState>,
-    args: ScanFilesNeedsEmbeddingArgs,
-) -> Result<ScanFilesNeedsEmbeddingResult, String> {
-    let scan = args.scan.clone();
-    let candidates = tauri::async_runtime::spawn_blocking(move || {
-        walk_scan_candidates(&scan, MAX_EMBED_FILE_BYTES)
-    })
-    .await
-    .map_err(|e| format!("scan_files_needs_embedding: join error: {e}"))??;
-
-    let total_selected = candidates.len() as u64;
-
-    if candidates.is_empty() {
-        return Ok(ScanFilesNeedsEmbeddingResult {
-            total_selected,
-            needs_embedding: false,
-        });
-    }
-
-    let index = qdrant::load_source_preflight_index(&app, &state, &args.source_id).await?;
-
-    let needs_embedding = tauri::async_runtime::spawn_blocking(move || {
-        any_candidate_needs_embedding(candidates, index)
-    })
-    .await
-    .map_err(|e| format!("scan_files_needs_embedding: join error: {e}"))??;
-
-    Ok(ScanFilesNeedsEmbeddingResult {
-        total_selected,
-        needs_embedding,
-    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1035,10 +747,34 @@ async fn thumbnail_image_base64_png(
     }
 
     let path_for_kind = path.clone();
+    let thumb_kind = thumbnail_file_kind(&path_for_kind);
+    if !thumbnail_supported_file_kind(&thumb_kind) {
+        return Err(format!("thumbnail unsupported file type: {thumb_kind}"));
+    }
+    let ffmpeg_path = if matches!(thumb_kind.as_str(), "mp4" | "mov") {
+        Some(resolve_ffmpeg_tool_path(&app, "ffmpeg")?)
+    } else {
+        None
+    };
+    let ffprobe_path = if matches!(thumb_kind.as_str(), "mp4" | "mov") {
+        Some(resolve_ffmpeg_tool_path(&app, "ffprobe")?)
+    } else {
+        None
+    };
     let render_task = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
-        match thumbnail_file_kind(&path_for_kind).as_str() {
+        match thumb_kind.as_str() {
             "png" | "jpg" | "jpeg" => render_image_thumbnail_base64(&path, max_edge),
             "pdf" => render_pdf_thumbnail_base64(&path, max_edge, page, &pdfium_candidates),
+            "mp4" | "mov" => render_video_thumbnail_base64(
+                &path,
+                max_edge,
+                ffmpeg_path
+                    .as_deref()
+                    .ok_or_else(|| "ffmpeg path missing".to_string())?,
+                ffprobe_path
+                    .as_deref()
+                    .ok_or_else(|| "ffprobe path missing".to_string())?,
+            ),
             ext => Err(format!("thumbnail unsupported file type: {ext}")),
         }
     });
@@ -1137,21 +873,27 @@ async fn qdrant_count_points(
 }
 
 #[tauri::command]
-async fn qdrant_scroll_content_vectors(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, qdrant::QdrantState>,
-    args: qdrant::ScrollContentVectorsArgs,
-) -> Result<qdrant::ScrollContentVectorsResult, String> {
-    qdrant::scroll_content_vectors(&app, &state, args).await
-}
-
-#[tauri::command]
 async fn qdrant_scroll_graph(
     app: tauri::AppHandle,
     state: tauri::State<'_, qdrant::QdrantState>,
+    text_index_state: tauri::State<'_, text_index::TextIndexState>,
     args: qdrant::ScrollGraphArgs,
 ) -> Result<qdrant::ScrollGraphResult, String> {
-    qdrant::scroll_graph(&app, &state, args).await
+    let source_id = args.source_id.clone();
+    let (result, stale_paths) = qdrant::scroll_graph(&app, &state, args).await?;
+    if !stale_paths.is_empty() {
+        qdrant::delete_points_for_paths(
+            &app,
+            &state,
+            qdrant::DeletePointsForPathsArgs {
+                source_id: source_id.clone(),
+                paths: stale_paths.clone(),
+            },
+        )
+        .await?;
+        text_index::delete_for_paths(&app, &text_index_state, &source_id, &stale_paths).await?;
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1161,15 +903,6 @@ async fn qdrant_set_path_tag_ids(
     args: qdrant::SetPathTagIdsArgs,
 ) -> Result<(), String> {
     qdrant::set_path_tag_ids(&app, &state, args).await
-}
-
-#[tauri::command]
-async fn qdrant_sync_tags_backfill(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, qdrant::QdrantState>,
-    args: qdrant::SyncTagsBackfillArgs,
-) -> Result<u32, String> {
-    qdrant::sync_tags_backfill(&app, &state, args).await
 }
 
 #[tauri::command]
@@ -1194,6 +927,55 @@ async fn qdrant_delete_points_for_paths(
     let res = qdrant::delete_points_for_paths(&app, &state, args.clone()).await?;
     text_index::delete_for_paths(&app, &text_index_state, &args.source_id, &args.paths).await?;
     Ok(res)
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PruneMissingPathsArgs {
+    source_id: String,
+    paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PruneMissingPathsResult {
+    removed_paths: Vec<String>,
+}
+
+#[tauri::command]
+async fn prune_missing_indexed_paths(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, qdrant::QdrantState>,
+    text_index_state: tauri::State<'_, text_index::TextIndexState>,
+    args: PruneMissingPathsArgs,
+) -> Result<PruneMissingPathsResult, String> {
+    use std::collections::HashSet;
+    use std::path::Path;
+
+    let mut seen = HashSet::new();
+    let removed_paths: Vec<String> = args
+        .paths
+        .into_iter()
+        .filter(|path| seen.insert(path.clone()))
+        .filter(|path| !Path::new(path).exists())
+        .collect();
+
+    if removed_paths.is_empty() {
+        return Ok(PruneMissingPathsResult { removed_paths });
+    }
+
+    qdrant::delete_points_for_paths(
+        &app,
+        &state,
+        qdrant::DeletePointsForPathsArgs {
+            source_id: args.source_id.clone(),
+            paths: removed_paths.clone(),
+        },
+    )
+    .await?;
+    text_index::delete_for_paths(&app, &text_index_state, &args.source_id, &removed_paths).await?;
+
+    Ok(PruneMissingPathsResult { removed_paths })
 }
 
 #[tauri::command]
@@ -1557,3 +1339,70 @@ async fn clear_stored_gemini_api_key(
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{
+        choose_video_thumbnail_seek_seconds, ffmpeg_tool_candidates, ffmpeg_tool_file_name,
+        resolve_first_existing_path, thumbnail_supported_file_kind, FfmpegToolLookup,
+    };
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_test_dir(prefix: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("manifold-{prefix}-{nonce}"));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn choose_video_thumbnail_seek_seconds_uses_default_when_duration_unknown() {
+        assert_eq!(choose_video_thumbnail_seek_seconds(None), 1.0);
+    }
+
+    #[test]
+    fn choose_video_thumbnail_seek_seconds_clamps_short_and_long_durations() {
+        assert_eq!(choose_video_thumbnail_seek_seconds(Some(5.0)), 1.0);
+        assert_eq!(choose_video_thumbnail_seek_seconds(Some(400.0)), 30.0);
+        assert_eq!(choose_video_thumbnail_seek_seconds(Some(50.0)), 5.0);
+    }
+
+    #[test]
+    fn resolve_ffmpeg_tool_prefers_override_before_path_fallback() {
+        let root = unique_test_dir("ffmpeg-lookup");
+        let override_dir = root.join("override");
+        let path_dir = root.join("path");
+        let file_name = ffmpeg_tool_file_name("ffmpeg");
+        fs::create_dir_all(&override_dir).expect("create override dir");
+        fs::create_dir_all(&path_dir).expect("create path dir");
+        fs::write(override_dir.join(&file_name), b"").expect("write override ffmpeg");
+        fs::write(path_dir.join(&file_name), b"").expect("write path ffmpeg");
+
+        let lookup = FfmpegToolLookup {
+            override_dir: Some(override_dir.clone()),
+            resource_dir: None,
+            exe_path: None,
+            cwd: None,
+            path_dirs: vec![path_dir.clone()],
+        };
+        let candidates = ffmpeg_tool_candidates("ffmpeg", &lookup);
+        let resolved = resolve_first_existing_path(&candidates).expect("resolve ffmpeg");
+
+        assert_eq!(resolved, override_dir.join(file_name));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn thumbnail_supported_file_kind_includes_current_video_types() {
+        assert!(thumbnail_supported_file_kind("png"));
+        assert!(thumbnail_supported_file_kind("pdf"));
+        assert!(thumbnail_supported_file_kind("mp4"));
+        assert!(thumbnail_supported_file_kind("mov"));
+        assert!(!thumbnail_supported_file_kind("wav"));
+    }
+}
