@@ -1,8 +1,13 @@
-import { Pencil, X } from "lucide-react";
+import { Delete02Icon, PencilIcon } from "@hugeicons/core-free-icons";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ErrorMessage } from "@/components/ErrorMessage";
+import { AppAlert } from "@/components/AppAlert";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Field,
+  FieldDescription,
+  FieldLabel,
+} from "@/components/ui/field";
+import { HugeIcon } from "@/components/ui/huge-icon";
 import { Input } from "@/components/ui/input";
 import {
   Tooltip,
@@ -14,7 +19,7 @@ import {
   type GeminiApiKeyStatus,
   geminiApiKeyStatus,
   saveGeminiApiKey,
-} from "@/lib/api/tauri";
+} from "@/lib/api/desktop";
 import { invokeErrorText } from "@/lib/errors";
 
 export function SettingsGeminiApiKeyCard({
@@ -46,8 +51,7 @@ export function SettingsGeminiApiKeyCard({
   useEffect(() => {
     if (status === null || bootstrappedEditing.current) return;
     bootstrappedEditing.current = true;
-    const hasKey = status.configured && status.source !== "none";
-    setEditing(!hasKey);
+    setEditing(!status.configured);
   }, [status]);
 
   useEffect(() => {
@@ -77,8 +81,7 @@ export function SettingsGeminiApiKeyCard({
   function handleCancelEdit() {
     setDraft("");
     setError(null);
-    const hasKey = status?.configured && status.source !== "none";
-    setEditing(!hasKey);
+    setEditing(!status?.configured);
   }
 
   async function handleClearStored() {
@@ -97,127 +100,100 @@ export function SettingsGeminiApiKeyCard({
     }
   }
 
-  const hasConfiguredKey = status?.configured && status.source !== "none";
-  const canRemoveStored = status?.source === "appStorage";
+  const hasSavedKey = status?.configured ?? false;
 
   return (
-    <Card size="sm" className="shadow-xs">
-      <CardHeader className="pb-2">
-        <CardTitle className="app-section-title">Gemini API Key</CardTitle>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-3 pt-0">
-        {editing ? (
-          <div className="flex items-center gap-1">
-            <Input
-              id="gemini-api-key"
-              className="min-w-0 flex-1"
-              type="password"
-              autoComplete="off"
-              placeholder="sk-…"
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
+    <Field>
+      <FieldLabel htmlFor="gemini-api-key">Gemini API key</FieldLabel>
+      <FieldDescription>Required for embeddings.</FieldDescription>
+
+      {editing ? (
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <Input
+            id="gemini-api-key"
+            type="password"
+            autoComplete="off"
+            placeholder="Paste API key…"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            disabled={busy}
+            className="h-8 text-xs sm:flex-1"
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void handleSave();
+              }
+              if (e.key === "Escape") {
+                e.preventDefault();
+                handleCancelEdit();
+              }
+            }}
+          />
+          <div className="flex gap-2">
+            <Button
+              type="button"
+              disabled={busy || !draft.trim()}
+              onClick={() => void handleSave()}
+            >
+              Save
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
               disabled={busy}
-              onBlur={() => {
-                if (draft.trim()) {
-                  void handleSave();
-                }
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  e.currentTarget.blur();
-                }
-                if (e.key === "Escape") {
-                  e.preventDefault();
-                  handleCancelEdit();
-                }
-              }}
-            />
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  className="shrink-0"
-                  aria-label="Cancel editing"
-                  disabled={busy}
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => handleCancelEdit()}
-                >
-                  <X className="h-4 w-4" aria-hidden="true" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="left">Cancel</TooltipContent>
-            </Tooltip>
+              onClick={handleCancelEdit}
+            >
+              Cancel
+            </Button>
           </div>
-        ) : hasConfiguredKey ? (
-          <div className="flex min-w-0 items-center gap-1">
-            <div className="min-w-0 flex-1 truncate rounded-lg border border-border/70 bg-muted/15 px-2.5 py-1.5 font-mono text-xs text-muted-foreground">
-              {status?.source === "environment"
-                ? "Using key from environment"
-                : "••••••••••••••••"}
-            </div>
+        </div>
+      ) : (
+        <div className="flex h-8 w-full sm:w-fit sm:min-w-[14rem] items-center rounded-lg bg-muted p-[3px]">
+          <p className="min-w-0 flex-1 truncate px-1.5 font-mono text-xs text-muted-foreground">
+            {hasSavedKey ? "••••••••••••••••" : "No key saved"}
+          </p>
+          <div className="flex h-full shrink-0 items-center gap-0.5 pr-0.5">
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
                   type="button"
                   variant="ghost"
                   size="icon-sm"
-                  className="shrink-0"
-                  aria-label="Edit API key"
+                  className="size-6 rounded-md text-muted-foreground"
                   disabled={busy}
+                  aria-label={hasSavedKey ? "Change API key" : "Add API key"}
                   onClick={() => setEditing(true)}
                 >
-                  <Pencil className="h-4 w-4" aria-hidden="true" />
+                  <HugeIcon icon={PencilIcon} className="size-3" aria-hidden />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent side="left">Edit</TooltipContent>
+              <TooltipContent side="top">
+                {hasSavedKey ? "Change" : "Add key"}
+              </TooltipContent>
             </Tooltip>
-            {canRemoveStored ? (
+            {hasSavedKey ? (
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button
                     type="button"
                     variant="ghost"
                     size="icon-sm"
-                    className="shrink-0"
-                    aria-label="Remove stored API key"
+                    className="size-6 rounded-md text-muted-foreground"
                     disabled={busy}
+                    aria-label="Remove API key"
                     onClick={() => void handleClearStored()}
                   >
-                    <X className="h-4 w-4" aria-hidden="true" />
+                    <HugeIcon icon={Delete02Icon} className="size-3" aria-hidden />
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent side="left">Remove</TooltipContent>
+                <TooltipContent side="top">Remove</TooltipContent>
               </Tooltip>
             ) : null}
           </div>
-        ) : (
-          <div className="flex min-w-0 items-center gap-1">
-            <p className="min-w-0 flex-1 text-sm text-muted-foreground">
-              No key saved.
-            </p>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  className="shrink-0"
-                  aria-label="Edit API key"
-                  disabled={busy}
-                  onClick={() => setEditing(true)}
-                >
-                  <Pencil className="h-4 w-4" aria-hidden="true" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="left">Edit</TooltipContent>
-            </Tooltip>
-          </div>
-        )}
-        <ErrorMessage message={error} />
-      </CardContent>
-    </Card>
+        </div>
+      )}
+
+      <AppAlert variant="inline" message={error} />
+    </Field>
   );
 }

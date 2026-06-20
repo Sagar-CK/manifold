@@ -1,19 +1,19 @@
-import { ListFilter } from "lucide-react";
+import { ListFilter } from "@hugeicons/core-free-icons";
 import { TagFilterPill } from "@/components/TagFilterPill";
-import {
-  DropdownMenu,
-  DropdownMenuCheckboxItem,
-  DropdownMenuContent,
-  DropdownMenuGroup,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+import { HugeIcon } from "@/components/ui/huge-icon";
 import {
   InputGroup,
   InputGroupAddon,
   InputGroupButton,
   InputGroupInput,
 } from "@/components/ui/input-group";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { Spinner } from "@/components/ui/spinner";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
   Tooltip,
   TooltipContent,
@@ -23,11 +23,15 @@ import { SEARCH_QUERY_INPUT_ID } from "@/lib/appShortcuts";
 import type { TagDef } from "@/lib/tags";
 import type { MatchTypeFilter } from "./searchTypes";
 
+const MATCH_TYPE_OPTIONS = [
+  { value: "ocr" as const, label: "OCR" },
+  { value: "text" as const, label: "Text", title: "PDF page text or file name" },
+  { value: "semantic" as const, label: "Semantic" },
+];
+
 export function SearchQueryBar({
   query,
   onQueryChange,
-  searchTypeMenuOpen,
-  onSearchTypeMenuOpenChange,
   matchTypeFilter,
   onMatchTypeFilterChange,
   isSearching,
@@ -37,8 +41,6 @@ export function SearchQueryBar({
 }: {
   query: string;
   onQueryChange: (value: string) => void;
-  searchTypeMenuOpen: boolean;
-  onSearchTypeMenuOpenChange: (open: boolean) => void;
   matchTypeFilter: MatchTypeFilter;
   onMatchTypeFilterChange: (next: MatchTypeFilter) => void;
   isSearching: boolean;
@@ -46,8 +48,12 @@ export function SearchQueryBar({
   tagFilterIds: string[];
   onToggleTagFilter: (id: string) => void;
 }) {
-  const hasMatchTypeEnabled =
-    matchTypeFilter.textMatch || matchTypeFilter.semantic;
+  const activeMatchTypes = MATCH_TYPE_OPTIONS.filter(
+    (option) => matchTypeFilter[option.value],
+  ).map((option) => option.value);
+
+  const allMatchTypesEnabled =
+    matchTypeFilter.ocr && matchTypeFilter.text && matchTypeFilter.semantic;
 
   return (
     <div className="flex w-full flex-col">
@@ -61,60 +67,58 @@ export function SearchQueryBar({
           aria-label="Search query"
         />
         <InputGroupAddon align="inline-end">
-          <DropdownMenu
-            open={searchTypeMenuOpen}
-            onOpenChange={onSearchTypeMenuOpenChange}
-          >
+          <Popover>
             <Tooltip>
               <TooltipTrigger asChild>
                 <span className="inline-flex">
-                  <DropdownMenuTrigger asChild>
+                  <PopoverTrigger asChild>
                     <InputGroupButton
-                      variant={hasMatchTypeEnabled ? "ghost" : "secondary"}
+                      variant={allMatchTypesEnabled ? "ghost" : "secondary"}
                       size="icon-xs"
-                      aria-label="Filter search types"
+                      aria-label="Search match types"
                     >
-                      <ListFilter className="size-3.5" />
+                      <HugeIcon
+                        icon={ListFilter}
+                        className="size-3.5"
+                        strokeWidth={2}
+                        aria-hidden
+                      />
                     </InputGroupButton>
-                  </DropdownMenuTrigger>
+                  </PopoverTrigger>
                 </span>
               </TooltipTrigger>
-              <TooltipContent side="bottom">Filter search types</TooltipContent>
+              <TooltipContent side="bottom">
+                Match types: OCR, text, semantic
+              </TooltipContent>
             </Tooltip>
-            <DropdownMenuContent
-              align="end"
-              onPointerLeave={() => onSearchTypeMenuOpenChange(false)}
-            >
-              <DropdownMenuGroup>
-                <DropdownMenuCheckboxItem
-                  checked={matchTypeFilter.textMatch}
-                  onSelect={(event) => event.preventDefault()}
-                  onCheckedChange={(checked) => {
-                    if (checked !== true && !matchTypeFilter.semantic) return;
-                    onMatchTypeFilterChange({
-                      ...matchTypeFilter,
-                      textMatch: checked === true,
-                    });
-                  }}
-                >
-                  Text match
-                </DropdownMenuCheckboxItem>
-                <DropdownMenuCheckboxItem
-                  checked={matchTypeFilter.semantic}
-                  onSelect={(event) => event.preventDefault()}
-                  onCheckedChange={(checked) => {
-                    if (checked !== true && !matchTypeFilter.textMatch) return;
-                    onMatchTypeFilterChange({
-                      ...matchTypeFilter,
-                      semantic: checked === true,
-                    });
-                  }}
-                >
-                  Semantic
-                </DropdownMenuCheckboxItem>
-              </DropdownMenuGroup>
-            </DropdownMenuContent>
-          </DropdownMenu>
+            <PopoverContent align="end" side="bottom" sideOffset={6} className="w-auto p-1">
+              <ToggleGroup
+                type="multiple"
+                variant="segmented"
+                spacing={0}
+                value={activeMatchTypes}
+                onValueChange={(next) => {
+                  const ocr = next.includes("ocr");
+                  const text = next.includes("text");
+                  const semantic = next.includes("semantic");
+                  if (!ocr && !text && !semantic) return;
+                  onMatchTypeFilterChange({ ocr, text, semantic });
+                }}
+                aria-label="Search match types"
+              >
+                {MATCH_TYPE_OPTIONS.map((option) => (
+                  <ToggleGroupItem
+                    key={option.value}
+                    value={option.value}
+                    title={option.title}
+                    className="px-2.5"
+                  >
+                    {option.label}
+                  </ToggleGroupItem>
+                ))}
+              </ToggleGroup>
+            </PopoverContent>
+          </Popover>
           {isSearching ? <Spinner className="size-3.5" /> : null}
         </InputGroupAddon>
       </InputGroup>

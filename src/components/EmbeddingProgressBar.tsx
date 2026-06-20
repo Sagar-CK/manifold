@@ -1,6 +1,12 @@
-import { Check, Pause, Play, X } from "lucide-react";
+import {
+  Cancel01Icon,
+  PauseIcon,
+  PlayIcon,
+  Tick01Icon,
+} from "@hugeicons/core-free-icons";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "./ui/button";
+import { HugeIcon } from "./ui/huge-icon";
 import { Progress } from "./ui/progress";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
@@ -123,9 +129,10 @@ export function EmbeddingProgressBar({
           />
         )}
         {isComplete ? (
-          <Check
+          <HugeIcon
+            icon={Tick01Icon}
             className="h-3.5 w-3.5 text-muted-foreground"
-            aria-hidden="true"
+            aria-hidden
           />
         ) : null}
         {showControls && embedding ? (
@@ -140,7 +147,7 @@ export function EmbeddingProgressBar({
                     aria-label="Resume indexing"
                     onClick={() => void onResume?.()}
                   >
-                    <Play className="h-4 w-4" aria-hidden="true" />
+                    <HugeIcon icon={PlayIcon} className="h-4 w-4" aria-hidden />
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent side="top">Resume</TooltipContent>
@@ -159,7 +166,11 @@ export function EmbeddingProgressBar({
                     aria-label="Pause indexing"
                     onClick={() => void onPause?.()}
                   >
-                    <Pause className="h-4 w-4" aria-hidden="true" />
+                    <HugeIcon
+                      icon={PauseIcon}
+                      className="h-4 w-4"
+                      aria-hidden
+                    />
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent side="top">Pause</TooltipContent>
@@ -178,7 +189,11 @@ export function EmbeddingProgressBar({
                   aria-label="Cancel indexing"
                   onClick={() => void onCancel?.()}
                 >
-                  <X className="h-4 w-4" aria-hidden="true" />
+                  <HugeIcon
+                    icon={Cancel01Icon}
+                    className="h-4 w-4"
+                    aria-hidden
+                  />
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="top">Cancel</TooltipContent>

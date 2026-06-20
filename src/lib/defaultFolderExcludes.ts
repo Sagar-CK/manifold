@@ -1,6 +1,6 @@
-import defaultFolderExcludeSegments from "../../shared/default-folder-excludes.json";
+import defaultFolderExcludeSegments from "../../config/default-folder-excludes.json";
 
-export const DEFAULT_FOLDER_EXCLUDE_SEGMENTS: readonly string[] =
+const DEFAULT_FOLDER_EXCLUDE_SEGMENTS: readonly string[] =
   defaultFolderExcludeSegments;
 
 const segmentSet = new Set(

@@ -1,7 +1,8 @@
-import { XIcon } from "lucide-react";
+import { Cancel01Icon } from "@hugeicons/core-free-icons";
 import { Dialog as DialogPrimitive } from "radix-ui";
 import type * as React from "react";
 import { Button } from "@/components/ui/button";
+import { HugeIcon } from "@/components/ui/huge-icon";
 import { cn } from "@/lib/utils";
 
 function Dialog({
@@ -71,7 +72,7 @@ function DialogContent({
               className="absolute top-4 right-4"
               size="icon-sm"
             >
-              <XIcon />
+              <HugeIcon icon={Cancel01Icon} size={18} aria-hidden />
               <span className="sr-only">Close</span>
             </Button>
           </DialogPrimitive.Close>

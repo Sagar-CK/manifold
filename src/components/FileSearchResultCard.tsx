@@ -1,6 +1,7 @@
 import type { MouseEvent, ReactNode } from "react";
 import { fileExtension, fileTypeLabel } from "@/lib/files";
 import { Button } from "./ui/button";
+import { ImgReveal } from "./ui/img-reveal";
 import { Skeleton } from "./ui/skeleton";
 
 export type FileSearchResultCardProps = {
@@ -38,7 +39,7 @@ export function FileSearchResultCard({
       variant="ghost"
       onClick={(e) => onClick(e)}
       onMouseEnter={onMouseEnter}
-      className="group relative h-auto min-h-0 w-full min-w-0 flex-col gap-2 rounded-xl border border-transparent p-2 font-normal transition-colors hover:border-border/70 hover:bg-muted/20"
+      className="group relative h-auto min-h-0 w-full min-w-0 flex-col gap-2 rounded-xl border border-border/50 bg-card/40 p-2 font-normal shadow-sm transition-colors hover:border-border hover:bg-muted/25"
     >
       {showChip ? (
         <div className="pointer-events-none absolute left-1/2 top-2 z-[2] w-max -translate-x-1/2 rounded-full border border-border/70 bg-card/95 px-2.5 py-1 text-[10px] font-medium leading-none tracking-wide text-muted-foreground opacity-0 shadow-xs transition-opacity group-hover:opacity-100">
@@ -64,7 +65,7 @@ export function FileSearchResultCard({
         ) : null}
         {thumbUrl ? (
           <div className="mx-auto flex h-16 w-28 items-center justify-center">
-            <img
+            <ImgReveal
               src={thumbUrl}
               alt=""
               className="block max-h-full max-w-full rounded-lg object-contain"

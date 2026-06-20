@@ -1,22 +1,23 @@
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  Combobox,
-  ComboboxContent,
-  ComboboxInput,
-  ComboboxItem,
-  ComboboxList,
-} from "@/components/ui/combobox";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Separator } from "@/components/ui/separator";
+import {
+  Field,
+  FieldContent,
+  FieldDescription,
+  FieldGroup,
+  FieldLabel,
+} from "@/components/ui/field";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
-import { Toggle } from "@/components/ui/toggle";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import type { LocalConfig, SupportedExt } from "@/lib/localConfig";
-import {
-  SEARCH_MODE_OPTIONS,
-  type SearchModeOption,
-} from "./searchModeOptions";
+import { SEARCH_MODE_OPTIONS } from "./searchModeOptions";
 
 export function SettingsSearchPreferencesCard({
   cfg,
@@ -24,152 +25,136 @@ export function SettingsSearchPreferencesCard({
   extOptions,
   topKDraft,
   setTopKDraft,
-  selectedSearchModeOption,
 }: {
   cfg: LocalConfig;
   updateConfig: (next: LocalConfig) => void;
   extOptions: SupportedExt[];
   topKDraft: string;
   setTopKDraft: (v: string) => void;
-  selectedSearchModeOption: SearchModeOption | null;
 }) {
   return (
-    <Card size="sm" className="shadow-xs">
-      <CardHeader>
-        <CardTitle className="app-section-title">Search</CardTitle>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-4">
-        <div className="flex flex-col gap-2">
-          <Label className="text-muted-foreground">File types</Label>
-          <div className="flex flex-wrap gap-2">
-            {extOptions.map((ext) => (
-              <Toggle
-                key={ext}
-                pressed={cfg.extensions.includes(ext)}
-                onPressedChange={(pressed) => {
-                  if (pressed === undefined) return;
-                  const next = pressed
-                    ? Array.from(new Set([...cfg.extensions, ext]))
-                    : cfg.extensions.filter((x) => x !== ext);
-                  updateConfig({ ...cfg, extensions: next });
-                }}
-                variant="outline"
-                size="sm"
-                className="h-auto min-w-0 border-border/70 px-3 py-1.5 font-normal data-[state=on]:border-border data-[state=on]:bg-muted data-[state=on]:text-foreground data-[state=off]:text-muted-foreground"
-              >
-                {ext}
-              </Toggle>
+    <FieldGroup>
+      <Field>
+        <FieldLabel>File types</FieldLabel>
+        <FieldDescription>
+          Extensions included when scanning folders.
+        </FieldDescription>
+        <ToggleGroup
+          type="multiple"
+          value={cfg.extensions}
+          onValueChange={(next) => {
+            updateConfig({ ...cfg, extensions: next as SupportedExt[] });
+          }}
+          variant="segmented"
+          spacing={0}
+          className="h-auto w-full flex-wrap gap-2 p-1.5 sm:w-fit"
+          aria-label="Indexed file extensions"
+        >
+          {extOptions.map((ext) => (
+            <ToggleGroupItem key={ext} value={ext} className="lowercase">
+              {ext}
+            </ToggleGroupItem>
+          ))}
+        </ToggleGroup>
+      </Field>
+
+      <Field>
+        <FieldLabel htmlFor="search-mode">Ranking</FieldLabel>
+        <FieldDescription>How results are ordered and filtered.</FieldDescription>
+        <Select
+          value={cfg.searchMode}
+          onValueChange={(value) => {
+            updateConfig({
+              ...cfg,
+              searchMode: value as LocalConfig["searchMode"],
+            });
+          }}
+        >
+          <SelectTrigger id="search-mode" className="w-full sm:w-48">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {SEARCH_MODE_OPTIONS.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                {option.label}
+              </SelectItem>
             ))}
+          </SelectContent>
+        </Select>
+      </Field>
+
+      {cfg.searchMode === "topK" ? (
+        <Field>
+          <FieldLabel htmlFor="topk">Result limit</FieldLabel>
+          <FieldDescription>
+            Maximum number of matches returned per search.
+          </FieldDescription>
+          <Input
+            id="topk"
+            type="text"
+            inputMode="numeric"
+            autoComplete="off"
+            value={topKDraft}
+            className="w-full tabular-nums sm:w-24"
+            onChange={(e) => setTopKDraft(e.target.value)}
+            onBlur={() => {
+              const n = Number.parseInt(topKDraft.trim(), 10);
+              const next = Number.isNaN(n)
+                ? cfg.topK
+                : Math.max(1, Math.min(256, n));
+              updateConfig({ ...cfg, topK: next });
+              setTopKDraft(String(next));
+            }}
+          />
+        </Field>
+      ) : (
+        <Field>
+          <div className="flex items-center justify-between gap-3">
+            <FieldLabel>Minimum score</FieldLabel>
+            <span className="text-sm tabular-nums font-medium">
+              {Math.round(cfg.scoreThreshold * 100)}%
+            </span>
           </div>
-        </div>
-
-        <Separator />
-
-        <div className="flex flex-col gap-3">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <Label className="text-muted-foreground">Ranking</Label>
-            <Combobox<SearchModeOption>
-              value={selectedSearchModeOption}
-              onValueChange={(value) => {
-                if (!value) return;
-                updateConfig({
-                  ...cfg,
-                  searchMode: value.value,
-                });
-              }}
-            >
-              <ComboboxInput
-                readOnly
-                showClear={false}
-                className="w-44"
-                aria-label="Similarity mode"
-              />
-              <ComboboxContent>
-                <ComboboxList>
-                  {SEARCH_MODE_OPTIONS.map((option) => (
-                    <ComboboxItem key={option.value} value={option}>
-                      {option.label}
-                    </ComboboxItem>
-                  ))}
-                </ComboboxList>
-              </ComboboxContent>
-            </Combobox>
-          </div>
-
-          <div className="flex flex-col gap-2">
-            {cfg.searchMode === "topK" ? (
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <Label
-                  htmlFor="topk"
-                  className="shrink-0 text-muted-foreground"
-                >
-                  Result limit
-                </Label>
-                <Input
-                  id="topk"
-                  type="text"
-                  inputMode="numeric"
-                  autoComplete="off"
-                  value={topKDraft}
-                  className="h-9 w-20 text-right tabular-nums"
-                  onChange={(e) => setTopKDraft(e.target.value)}
-                  onBlur={() => {
-                    const n = Number.parseInt(topKDraft.trim(), 10);
-                    const next = Number.isNaN(n)
-                      ? cfg.topK
-                      : Math.max(1, Math.min(256, n));
-                    updateConfig({ ...cfg, topK: next });
-                    setTopKDraft(String(next));
-                  }}
-                />
-              </div>
-            ) : (
-              <div className="flex flex-col gap-2">
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-muted-foreground">Min score</span>
-                  <span className="tabular-nums font-medium">
-                    {Math.round(cfg.scoreThreshold * 100)}%
-                  </span>
-                </div>
-                <Slider
-                  min={0}
-                  max={100}
-                  step={1}
-                  value={[Math.round(cfg.scoreThreshold * 100)]}
-                  onValueChange={(value) => {
-                    const next = value?.[0];
-                    if (typeof next !== "number" || Number.isNaN(next)) return;
-                    updateConfig({
-                      ...cfg,
-                      scoreThreshold: Math.max(0, Math.min(1, next / 100)),
-                    });
-                  }}
-                  className="w-full"
-                />
-              </div>
-            )}
-          </div>
-        </div>
-
-        <Separator />
-
-        <div className="flex items-center justify-between gap-4">
-          <Label htmlFor="sim-hover" className="text-muted-foreground">
-            Similarity on hover
-          </Label>
-          <Switch
-            id="sim-hover"
-            checked={cfg.showSimilarityOnHover}
-            onCheckedChange={(checked) => {
+          <FieldDescription>
+            Only show results at or above this similarity.
+          </FieldDescription>
+          <Slider
+            min={0}
+            max={100}
+            step={1}
+            value={[Math.round(cfg.scoreThreshold * 100)]}
+            onValueChange={(value) => {
+              const next = value?.[0];
+              if (typeof next !== "number" || Number.isNaN(next)) return;
               updateConfig({
                 ...cfg,
-                showSimilarityOnHover: checked,
+                scoreThreshold: Math.max(0, Math.min(1, next / 100)),
               });
             }}
-            aria-label="Toggle similarity badge on hover"
+            className="w-full"
           />
-        </div>
-      </CardContent>
-    </Card>
+        </Field>
+      )}
+
+      <Field orientation="horizontal">
+        <FieldContent>
+          <FieldLabel htmlFor="sim-hover">Similarity on hover</FieldLabel>
+          <FieldDescription>
+            Show match strength when hovering results.
+          </FieldDescription>
+        </FieldContent>
+        <Switch
+          id="sim-hover"
+          checked={cfg.showSimilarityOnHover}
+          onCheckedChange={(checked) => {
+            updateConfig({
+              ...cfg,
+              showSimilarityOnHover: checked,
+            });
+          }}
+          aria-label="Toggle similarity badge on hover"
+        />
+      </Field>
+    </FieldGroup>
   );
 }

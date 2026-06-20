@@ -1,0 +1,36 @@
+/* Image load reveal (used by ImgReveal) */
+:root {
+  --img-reveal-dur: 400ms;
+  --img-reveal-blur: 6px;
+  --img-reveal-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.t-img-reveal {
+  opacity: 0;
+  filter: blur(var(--img-reveal-blur));
+  transition:
+    opacity var(--img-reveal-dur) var(--img-reveal-ease),
+    filter var(--img-reveal-dur) var(--img-reveal-ease);
+  will-change: opacity, filter;
+}
+
+.t-img-reveal.t-img-reveal--loaded {
+  opacity: 1;
+  filter: blur(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .t-img-reveal {
+    transition-duration: 0.01ms;
+    transition-delay: 0ms;
+    filter: none;
+  }
+
+  .t-img-reveal:not(.t-img-reveal--loaded) {
+    opacity: 0.85;
+  }
+
+  .t-img-reveal.t-img-reveal--loaded {
+    opacity: 1;
+  }
+}

@@ -1,4 +1,4 @@
-import manifoldLogo from "../../src-tauri/icons/128x128.png";
+import { ImgReveal } from "./ui/img-reveal";
 
 export function PageHeader({
   heading,
@@ -10,8 +10,8 @@ export function PageHeader({
   return (
     <div className="mb-7 flex flex-col items-center justify-center gap-2.5 text-center">
       <div className="flex items-center justify-center gap-3">
-        <img
-          src={manifoldLogo}
+        <ImgReveal
+          src="/manifold-icon-128.png"
           alt="Manifold logo"
           className="size-9 rounded-xl object-contain ring-1 ring-border/60"
         />

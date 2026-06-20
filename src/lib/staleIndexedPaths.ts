@@ -1,7 +1,7 @@
 import {
   pruneMissingIndexedPaths,
   qdrantDeletePointsForPaths,
-} from "@/lib/api/tauri";
+} from "@/lib/api/desktop";
 import { invokeErrorText } from "@/lib/errors";
 import { setTagSnapshot } from "@/lib/stores/tagStore";
 import { removePathEverywhere } from "@/lib/tags";

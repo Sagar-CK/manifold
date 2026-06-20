@@ -1,4 +1,4 @@
-import { Tags } from "lucide-react";
+import { TagsIcon } from "@hugeicons/core-free-icons";
 import { useNavigate } from "react-router-dom";
 import { TagDefLabel } from "@/components/TagDefBadge";
 import { Button } from "@/components/ui/button";
@@ -9,6 +9,7 @@ import {
   DropdownMenuGroup,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { HugeIcon } from "@/components/ui/huge-icon";
 import type { LocalConfig } from "@/lib/localConfig";
 import { toggleTagForPath } from "@/lib/tagActions";
 import type { TagsState } from "@/lib/tags";
@@ -40,7 +41,7 @@ export function TagsPathDropdown({
             onClick={(event) => event.stopPropagation()}
             onPointerDown={(event) => event.stopPropagation()}
           >
-            <Tags className="size-2.5" aria-hidden="true" />
+            <HugeIcon icon={TagsIcon} className="size-2.5" aria-hidden />
           </Button>
         </DropdownMenuTrigger>
       </span>

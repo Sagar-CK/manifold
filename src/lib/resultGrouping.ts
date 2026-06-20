@@ -1,4 +1,4 @@
-export type ContentHashGroup<T> = {
+type ContentHashGroup<T> = {
   key: string;
   primary: T;
   variants: T[];

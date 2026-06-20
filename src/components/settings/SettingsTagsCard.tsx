@@ -1,13 +1,6 @@
-import { Plus } from "lucide-react";
+import { PlusSignIcon } from "@hugeicons/core-free-icons";
 import { TagDefBadge } from "@/components/TagDefBadge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardAction,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -16,13 +9,21 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  Field,
+  FieldContent,
+  FieldDescription,
+  FieldGroup,
+  FieldLabel,
+} from "@/components/ui/field";
+import { HugeIcon } from "@/components/ui/huge-icon";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import type { LocalConfig } from "@/lib/localConfig";
 import { createTagDefinition, removeTagDefinition } from "@/lib/tagActions";
 import type { TagsState } from "@/lib/tags";
+import { TagColorPicker } from "./TagColorPicker";
+import { TAG_COLOR_DEFAULT } from "./tagColorPresets";
 
 export function SettingsTagsCard({
   cfg,
@@ -47,31 +48,39 @@ export function SettingsTagsCard({
 }) {
   return (
     <>
-      <Card size="sm" className="shadow-xs">
-        <CardHeader className="items-center">
-          <CardTitle className="app-section-title">Tags</CardTitle>
-          <CardAction className="self-center">
+      <FieldGroup>
+        <Field>
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <FieldLabel>Tags</FieldLabel>
+              <FieldDescription>
+                Labels for organizing and filtering search results.
+              </FieldDescription>
+            </div>
             <Button
               type="button"
               variant="outline"
               size="sm"
+              className="shrink-0"
               onClick={() => {
                 setTagNameDraft("");
-                setTagColorDraft("#6366f1");
+                setTagColorDraft(TAG_COLOR_DEFAULT);
                 setTagCreateOpen(true);
               }}
             >
-              <Plus className="h-4 w-4" aria-hidden="true" />
+              <HugeIcon icon={PlusSignIcon} data-icon="inline-start" aria-hidden />
               Add tag
             </Button>
-          </CardAction>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-4">
-          <div className="flex flex-wrap items-center gap-2">
-            {tagsState.tags.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No tags</p>
-            ) : (
-              tagsState.tags.map((t) => (
+          </div>
+
+          {tagsState.tags.length === 0 ? (
+            <FieldDescription>
+              No tags yet. Create one to mark files for review or other
+              workflows.
+            </FieldDescription>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {tagsState.tags.map((t) => (
                 <TagDefBadge
                   key={t.id}
                   tag={t}
@@ -79,28 +88,28 @@ export function SettingsTagsCard({
                     removeTagDefinition(t.id, cfg.sourceId);
                   }}
                 />
-              ))
-            )}
-          </div>
+              ))}
+            </div>
+          )}
+        </Field>
 
-          <Separator />
-
-          <div className="flex items-center justify-between gap-4">
-            <Label htmlFor="auto-tagging" className="min-w-0">
-              Automatic Tagging
-            </Label>
-            <Switch
-              id="auto-tagging"
-              checked={cfg.autoTaggingEnabled}
-              onCheckedChange={(checked) => {
-                updateConfig({ ...cfg, autoTaggingEnabled: checked });
-              }}
-              aria-label="Toggle automatic tagging"
-              className="shrink-0"
-            />
-          </div>
-        </CardContent>
-      </Card>
+        <Field orientation="horizontal">
+          <FieldContent>
+            <FieldLabel htmlFor="auto-tagging">Automatic tagging</FieldLabel>
+            <FieldDescription>
+              Suggest tags from file content when indexing.
+            </FieldDescription>
+          </FieldContent>
+          <Switch
+            id="auto-tagging"
+            checked={cfg.autoTaggingEnabled}
+            onCheckedChange={(checked) => {
+              updateConfig({ ...cfg, autoTaggingEnabled: checked });
+            }}
+            aria-label="Toggle automatic tagging"
+          />
+        </Field>
+      </FieldGroup>
 
       <Dialog
         open={tagCreateOpen}
@@ -108,7 +117,7 @@ export function SettingsTagsCard({
           setTagCreateOpen(open);
           if (!open) {
             setTagNameDraft("");
-            setTagColorDraft("#6366f1");
+            setTagColorDraft(TAG_COLOR_DEFAULT);
           }
         }}
       >
@@ -120,8 +129,8 @@ export function SettingsTagsCard({
             </DialogDescription>
           </DialogHeader>
           <div className="flex flex-col gap-4">
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="tag-create-name">Name</Label>
+            <Field>
+              <FieldLabel htmlFor="tag-create-name">Name</FieldLabel>
               <Input
                 id="tag-create-name"
                 type="text"
@@ -141,23 +150,11 @@ export function SettingsTagsCard({
                 autoFocus
                 aria-label="Tag name"
               />
-            </div>
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="tag-create-color">Color</Label>
-              <div className="flex items-center gap-3">
-                <input
-                  id="tag-create-color"
-                  type="color"
-                  value={tagColorDraft}
-                  onChange={(e) => setTagColorDraft(e.target.value)}
-                  className="size-10 shrink-0 cursor-pointer rounded-xl border border-input bg-background p-1 shadow-xs"
-                  aria-label="Tag color"
-                />
-                <div className="min-w-0 text-sm text-muted-foreground">
-                  Used as a small accent dot and tag marker.
-                </div>
-              </div>
-            </div>
+            </Field>
+            <TagColorPicker
+              value={tagColorDraft}
+              onChange={setTagColorDraft}
+            />
           </div>
           <DialogFooter>
             <Button

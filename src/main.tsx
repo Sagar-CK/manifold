@@ -2,9 +2,11 @@ import { ThemeProvider } from "next-themes";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { HashRouter } from "react-router-dom";
+import { DirectionProvider } from "@/components/ui/direction";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { reportFatalError } from "@/lib/log";
+import { DesktopApiUnavailableError } from "@/lib/api/desktop";
 import RouterApp from "./RouterApp";
 
 function installGlobalErrorHandlers() {
@@ -51,6 +53,10 @@ function installGlobalErrorHandlers() {
 
   window.addEventListener("unhandledrejection", (e) => {
     const reason = (e as PromiseRejectionEvent).reason;
+    if (reason instanceof DesktopApiUnavailableError) {
+      e.preventDefault();
+      return;
+    }
     const detail =
       reason instanceof Error
         ? `${reason.name}: ${reason.message}\n${reason.stack ?? ""}`
@@ -64,17 +70,19 @@ installGlobalErrorHandlers();
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <HashRouter>
-      <ThemeProvider
-        attribute="class"
-        defaultTheme="light"
-        enableSystem
-        storageKey="manifold-theme"
-      >
-        <TooltipProvider delayDuration={300}>
-          <RouterApp />
-          <Toaster />
-        </TooltipProvider>
-      </ThemeProvider>
+      <DirectionProvider direction="ltr" dir="ltr">
+        <ThemeProvider
+          attribute="class"
+          defaultTheme="dark"
+          enableSystem
+          storageKey="manifold-theme"
+        >
+          <TooltipProvider delayDuration={300}>
+            <RouterApp />
+            <Toaster />
+          </TooltipProvider>
+        </ThemeProvider>
+      </DirectionProvider>
     </HashRouter>
   </React.StrictMode>,
 );

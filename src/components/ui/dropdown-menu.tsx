@@ -1,9 +1,14 @@
 "use client";
 
+import {
+  ArrowRight01Icon,
+  Tick02Icon,
+  CircleIcon,
+} from "@hugeicons/core-free-icons";
 import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu";
-import { Check, ChevronRight, Circle } from "lucide-react";
 import type * as React from "react";
 
+import { HugeIcon } from "@/components/ui/huge-icon";
 import { cn } from "@/lib/utils";
 
 function DropdownMenu({
@@ -75,7 +80,7 @@ function DropdownMenuSubTrigger({
       {...props}
     >
       {children}
-      <ChevronRight className="ml-auto h-4 w-4" />
+      <HugeIcon icon={ArrowRight01Icon} className="ml-auto h-4 w-4" />
     </DropdownMenuPrimitive.SubTrigger>
   );
 }
@@ -149,15 +154,15 @@ function DropdownMenuCheckboxItem({
     <DropdownMenuPrimitive.CheckboxItem
       data-slot="dropdown-menu-checkbox-item"
       className={cn(
-        "focus:bg-accent focus:text-accent-foreground relative flex cursor-default items-center rounded-sm py-1.5 pr-2 pl-8 text-sm outline-none select-none data-disabled:pointer-events-none data-disabled:opacity-50",
+        "focus:bg-accent focus:text-accent-foreground relative flex cursor-default items-center rounded-sm py-1 pr-2 pl-7 text-xs outline-none select-none data-disabled:pointer-events-none data-disabled:opacity-50",
         className,
       )}
       checked={checked}
       {...props}
     >
-      <span className="pointer-events-none absolute left-2 flex h-3.5 w-3.5 items-center justify-center">
+      <span className="pointer-events-none absolute left-2 flex size-3.5 items-center justify-center">
         <DropdownMenuPrimitive.ItemIndicator>
-          <Check className="h-4 w-4" />
+          <HugeIcon icon={Tick02Icon} className="size-3.5" aria-hidden />
         </DropdownMenuPrimitive.ItemIndicator>
       </span>
       {children}
@@ -181,7 +186,11 @@ function DropdownMenuRadioItem({
     >
       <span className="pointer-events-none absolute left-2 flex h-3.5 w-3.5 items-center justify-center">
         <DropdownMenuPrimitive.ItemIndicator>
-          <Circle className="h-2 w-2 fill-current" />
+          <HugeIcon
+            icon={CircleIcon}
+            className="h-2 w-2 fill-current"
+            size={8}
+          />
         </DropdownMenuPrimitive.ItemIndicator>
       </span>
       {children}

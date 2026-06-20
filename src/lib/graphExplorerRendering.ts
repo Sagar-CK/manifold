@@ -6,7 +6,7 @@ type LayoutPointLike = {
 
 export type GraphLodMode = "markers" | "placeholders" | "thumbnails";
 
-export type GraphViewportMetrics = {
+type GraphViewportMetrics = {
   width: number;
   height: number;
   innerW: number;

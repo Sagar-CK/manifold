@@ -1,5 +1,5 @@
-import { Trash2 } from "lucide-react";
-import { ErrorMessage } from "@/components/ErrorMessage";
+import { Delete02Icon } from "@hugeicons/core-free-icons";
+import { AppAlert } from "@/components/AppAlert";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -13,17 +13,12 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardTitle,
-} from "@/components/ui/card";
+  Field,
+  FieldDescription,
+  FieldLabel,
+} from "@/components/ui/field";
+import { HugeIcon } from "@/components/ui/huge-icon";
 import { Spinner } from "@/components/ui/spinner";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
 
 export function SettingsClearIndexCard({
   liveIndexedCount,
@@ -41,93 +36,68 @@ export function SettingsClearIndexCard({
   deleteAllVectors: () => Promise<void>;
 }) {
   return (
-    <Card size="sm" className="overflow-visible">
-      <CardContent className="flex min-w-0 flex-col gap-4 text-left sm:flex-row sm:items-start sm:justify-between sm:gap-8">
-        <div className="min-w-0 flex-1 flex flex-col gap-1.5 text-pretty">
-          <CardTitle className="app-section-title text-left leading-snug">
-            Clear index
-          </CardTitle>
-          <CardDescription className="text-left">
-            Drops embeddings in the local index ({liveIndexedCount ?? "—"}{" "}
-            files). Files on disk are unchanged.
-          </CardDescription>
-          <ErrorMessage variant="inline" message={clearIndexError} />
+    <Field className="rounded-lg border border-destructive/20 bg-destructive/5 p-4">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <FieldLabel>Clear index</FieldLabel>
+          <FieldDescription>
+            Remove all {liveIndexedCount ?? "—"} indexed embeddings. Files on
+            disk are not affected.
+          </FieldDescription>
+          <AppAlert variant="inline" message={clearIndexError} />
         </div>
-        <div className="flex shrink-0 items-start sm:pt-0.5">
-          <AlertDialog
-            open={confirmClearOpen}
-            onOpenChange={setConfirmClearOpen}
-          >
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <span className="inline-flex shrink-0">
-                  <AlertDialogTrigger asChild>
-                    <Button
-                      variant="destructive"
-                      size="default"
-                      className="h-9 min-w-9 px-3"
-                      disabled={clearingIndex || liveIndexedCount === 0}
-                      aria-label="Delete all vectors"
-                    >
-                      {clearingIndex ? (
-                        <Spinner
-                          className="h-4 w-4 shrink-0"
-                          aria-hidden="true"
-                        />
-                      ) : (
-                        <Trash2
-                          className="h-4 w-4 shrink-0"
-                          aria-hidden="true"
-                        />
-                      )}
-                    </Button>
-                  </AlertDialogTrigger>
-                </span>
-              </TooltipTrigger>
-              <TooltipContent side="top">Delete all vectors</TooltipContent>
-            </Tooltip>
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle className="text-foreground">
-                  Delete all {liveIndexedCount} vectors?
-                </AlertDialogTitle>
-                <AlertDialogDescription>
-                  Clears all indexed vectors for this profile. Files are not
-                  deleted.
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel
-                  disabled={clearingIndex}
-                  className="h-auto min-h-9 px-3 py-2"
-                  aria-label="Cancel deletion"
-                >
-                  Cancel
-                </AlertDialogCancel>
-                <AlertDialogAction
-                  variant="destructive"
-                  disabled={clearingIndex}
-                  className="h-auto min-h-9 px-3 py-2"
-                  aria-label="Delete vectors"
-                  onClick={async (e) => {
-                    e.preventDefault();
-                    await deleteAllVectors();
-                  }}
-                >
-                  {clearingIndex ? (
-                    <>
-                      <Spinner className="h-4 w-4" aria-hidden="true" />
-                      Deleting...
-                    </>
-                  ) : (
-                    "Delete"
-                  )}
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
-        </div>
-      </CardContent>
-    </Card>
+
+        <AlertDialog open={confirmClearOpen} onOpenChange={setConfirmClearOpen}>
+          <AlertDialogTrigger asChild>
+            <Button
+              variant="destructive"
+              size="sm"
+              className="shrink-0"
+              disabled={clearingIndex || liveIndexedCount === 0}
+            >
+              {clearingIndex ? (
+                <Spinner data-icon="inline-start" aria-hidden="true" />
+              ) : (
+                <HugeIcon icon={Delete02Icon} data-icon="inline-start" aria-hidden />
+              )}
+              Clear index
+            </Button>
+          </AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>
+                Delete all {liveIndexedCount} vectors?
+              </AlertDialogTitle>
+              <AlertDialogDescription>
+                Clears all indexed vectors for this profile. Files are not
+                deleted.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel disabled={clearingIndex}>
+                Cancel
+              </AlertDialogCancel>
+              <AlertDialogAction
+                variant="destructive"
+                disabled={clearingIndex}
+                onClick={async (e) => {
+                  e.preventDefault();
+                  await deleteAllVectors();
+                }}
+              >
+                {clearingIndex ? (
+                  <>
+                    <Spinner data-icon="inline-start" aria-hidden="true" />
+                    Deleting…
+                  </>
+                ) : (
+                  "Delete"
+                )}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </div>
+    </Field>
   );
 }

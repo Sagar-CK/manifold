@@ -1,11 +1,12 @@
-import { ArrowLeft, ExternalLink } from "lucide-react";
+import { ArrowLeft01Icon, LinkSquare01Icon } from "@hugeicons/core-free-icons";
 import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
+import { ImgReveal } from "@/components/ui/img-reveal";
 import {
   qdrantSimilarByPath,
   type SimilarHit,
   thumbnailImageBase64Png,
-} from "@/lib/api/tauri";
+} from "@/lib/api/desktop";
 import { invokeErrorText } from "@/lib/errors";
 import {
   fileExtension,
@@ -17,11 +18,13 @@ import { groupByContentHash } from "@/lib/resultGrouping";
 import { pruneIndexedPathIfMissing } from "@/lib/staleIndexedPaths";
 import { toggleTagForPath } from "@/lib/tagActions";
 import { ContentHashPathPickerDialog } from "../components/ContentHashPathPickerDialog";
-import { ErrorMessage } from "../components/ErrorMessage";
+import { AppAlert } from "../components/AppAlert";
 import { FileSearchResultCard } from "../components/FileSearchResultCard";
+import { PdfTextMatchPreview } from "../components/PdfTextMatchPreview";
 import { TagsPathDropdown } from "../components/TagsPathDropdown";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
+import { HugeIcon } from "../components/ui/huge-icon";
 import { Label } from "../components/ui/label";
 import { ScrollArea } from "../components/ui/scroll-area";
 import { Skeleton } from "../components/ui/skeleton";
@@ -55,6 +58,11 @@ export type FileResultLocationState = {
   sameContentPaths?: string[];
   /** Route to open when leaving file view at stack root (set by search / graph / review). */
   returnTo?: string;
+  /** When opening a PDF from hybrid text/OCR search, drive in-app match preview. */
+  pdfTextMatch?: {
+    searchQuery: string;
+    matchKind: "text" | "ocr";
+  };
 };
 
 export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
@@ -85,6 +93,11 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
   const [tagsState] = useTagsState();
 
   const canThumb = filePath ? isPreviewablePath(filePath) : false;
+  const ext = filePath ? fileExtension(filePath) : "";
+  const pdfMatch =
+    ext === "pdf" && locState?.pdfTextMatch?.searchQuery?.trim()
+      ? locState.pdfTextMatch
+      : null;
 
   useEffect(() => {
     if (!filePath) {
@@ -271,7 +284,7 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
               aria-label="Back"
               onClick={leaveFileView}
             >
-              <ArrowLeft className="size-4" aria-hidden />
+              <HugeIcon icon={ArrowLeft01Icon} className="size-4" aria-hidden />
               Back
             </Button>
           </TooltipTrigger>
@@ -294,7 +307,7 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
             aria-label={trail.length > 1 ? "Back to previous file" : "Back"}
             onClick={goBackFromFileResult}
           >
-            <ArrowLeft className="size-4" aria-hidden />
+            <HugeIcon icon={ArrowLeft01Icon} className="size-4" aria-hidden />
             Back
           </Button>
         </TooltipTrigger>
@@ -307,7 +320,7 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
         <div className="flex h-24 w-28 shrink-0 items-center justify-center rounded-xl border border-border/70 bg-muted/15 shadow-none">
           {canThumb ? (
             thumbDataUrl ? (
-              <img
+              <ImgReveal
                 src={thumbDataUrl}
                 alt=""
                 className="max-h-[5.25rem] max-w-full rounded-md object-contain"
@@ -352,7 +365,11 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
                       setOpenError(await openPathInDefaultApp(p));
                     }}
                   >
-                    <ExternalLink className="h-4 w-4" aria-hidden />
+                    <HugeIcon
+                      icon={LinkSquare01Icon}
+                      className="h-4 w-4"
+                      aria-hidden
+                    />
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent side="bottom">
@@ -361,16 +378,25 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
               </Tooltip>
             </div>
           ))}
-          <ErrorMessage
+          <AppAlert
             variant="inline"
             className="text-xs"
             message={openError}
           />
-          <ErrorMessage
+          <AppAlert
             variant="inline"
             className="text-xs"
             message={staleCleanupMessage}
           />
+
+          {pdfMatch && filePath ? (
+            <PdfTextMatchPreview
+              filePath={filePath}
+              searchQuery={pdfMatch.searchQuery}
+              matchKind={pdfMatch.matchKind}
+              className="mt-4 w-full max-w-4xl"
+            />
+          ) : null}
 
           <div className="mt-3 flex flex-col gap-2.5">
             <Label className="app-section-title text-sm">Tags</Label>
@@ -429,7 +455,7 @@ export function FileResultPage({ cfg }: { cfg: LocalConfig }) {
           {similarLoading ? (
             <p className="app-muted text-sm">Loading…</p>
           ) : similarError ? (
-            <ErrorMessage
+            <AppAlert
               variant="inline"
               className="text-sm"
               message={similarError}

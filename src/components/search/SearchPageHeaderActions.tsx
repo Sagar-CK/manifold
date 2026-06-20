@@ -1,7 +1,12 @@
-import { ChartScatter, ListChecks, Settings } from "lucide-react";
+import {
+  ChartScatterIcon,
+  Settings01Icon,
+  TaskDone01Icon,
+} from "@hugeicons/core-free-icons";
 import { Link } from "react-router-dom";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { HugeIcon } from "@/components/ui/huge-icon";
 import {
   Tooltip,
   TooltipContent,
@@ -31,7 +36,7 @@ export function SearchPageHeaderActions({
                   : "Review suggested tags"
               }
             >
-              <ListChecks className="h-5 w-5" aria-hidden="true" />
+              <HugeIcon icon={TaskDone01Icon} className="h-5 w-5" aria-hidden />
               {pendingReviewCount > 0 ? (
                 <Badge
                   variant="outline"
@@ -54,7 +59,11 @@ export function SearchPageHeaderActions({
             asChild
           >
             <Link to="/graph" aria-label="Open graph explorer">
-              <ChartScatter className="h-5 w-5" aria-hidden="true" />
+              <HugeIcon
+                icon={ChartScatterIcon}
+                className="h-5 w-5"
+                aria-hidden
+              />
             </Link>
           </Button>
         </TooltipTrigger>
@@ -69,7 +78,7 @@ export function SearchPageHeaderActions({
             asChild
           >
             <Link to="/settings" aria-label="Open settings">
-              <Settings className="h-5 w-5" aria-hidden="true" />
+              <HugeIcon icon={Settings01Icon} className="h-5 w-5" aria-hidden />
             </Link>
           </Button>
         </TooltipTrigger>

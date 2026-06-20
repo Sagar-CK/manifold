@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { thumbnailImageBase64Png } from "@/lib/api/tauri";
+import { thumbnailImageBase64Png } from "@/lib/api/desktop";
 
 const DEFAULT_THUMBNAIL_CONCURRENCY = 4;
 

@@ -1,6 +1,10 @@
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import {
+  Field,
+  FieldDescription,
+  FieldLabel,
+} from "@/components/ui/field";
 
 export function SettingsAppearanceCard({
   themeMounted,
@@ -12,27 +16,29 @@ export function SettingsAppearanceCard({
   setTheme: (t: "light" | "dark" | "system") => void;
 }) {
   return (
-    <Card size="sm" className="shadow-xs">
-      <CardHeader>
-        <CardTitle className="app-section-title">Appearance</CardTitle>
-      </CardHeader>
-      <CardContent className="flex flex-wrap gap-2">
-        {themeMounted ? (
-          (["light", "dark", "system"] as const).map((t) => (
-            <Button
-              key={t}
-              type="button"
-              size="sm"
-              variant={theme === t ? "secondary" : "outline"}
-              onClick={() => setTheme(t)}
-            >
-              {t === "system" ? "System" : t === "light" ? "Light" : "Dark"}
-            </Button>
-          ))
-        ) : (
-          <Skeleton className="h-9 w-full max-w-xs" aria-hidden />
-        )}
-      </CardContent>
-    </Card>
+    <Field>
+      <FieldLabel>Theme</FieldLabel>
+      <FieldDescription>Color theme for the app window.</FieldDescription>
+      {themeMounted ? (
+        <ToggleGroup
+          type="single"
+          value={theme ?? "system"}
+          onValueChange={(v) => {
+            const next = (v || "system") as "light" | "dark" | "system";
+            setTheme(next);
+          }}
+          variant="segmented"
+          spacing={0}
+          className="w-full sm:w-fit"
+          aria-label="Theme"
+        >
+          <ToggleGroupItem value="light">Light</ToggleGroupItem>
+          <ToggleGroupItem value="dark">Dark</ToggleGroupItem>
+          <ToggleGroupItem value="system">System</ToggleGroupItem>
+        </ToggleGroup>
+      ) : (
+        <Skeleton className="h-8 w-full max-w-xs rounded-lg" aria-hidden />
+      )}
+    </Field>
   );
 }

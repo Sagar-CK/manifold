@@ -1,4 +1,4 @@
-import { openPath } from "@tauri-apps/plugin-opener";
+import { shellOpenPath } from "@/lib/api/desktop";
 import { invokeErrorText } from "@/lib/errors";
 
 export function fileExtension(path: string): string {
@@ -24,8 +24,8 @@ export async function openPathInDefaultApp(
   path: string,
 ): Promise<string | null> {
   try {
-    await openPath(path);
-    return null;
+    const err = await shellOpenPath(path);
+    return err && err.length > 0 ? err : null;
   } catch (error) {
     return invokeErrorText(error);
   }

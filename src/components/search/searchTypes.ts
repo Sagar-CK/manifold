@@ -1,4 +1,5 @@
 export type MatchTypeFilter = {
-  textMatch: boolean;
+  text: boolean;
+  ocr: boolean;
   semantic: boolean;
 };

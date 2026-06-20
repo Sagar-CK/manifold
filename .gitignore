@@ -8,12 +8,15 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
+.pnpm-store
 dist
 dist-ssr
 *.local
+.env.local
 
-# Rust / Cargo (any crate in the repo, e.g. src-tauri/)
-target/
+# Electron build output
+dist-electron/
+build/
 
 # AI / editor assistant tooling (local only)
 .agents/
@@ -41,12 +44,14 @@ qdrant_storage_dev/
 
 # Runtime binaries from scripts/setup-binaries.mjs (pinned in binaries-manifest.json).
 # Keep out of Git to avoid huge objects and Git LFS / host size limits.
-src-tauri/resources/qdrant/qdrant
-src-tauri/resources/qdrant/qdrant.exe
-src-tauri/resources/pdfium/libpdfium.dylib
-src-tauri/resources/pdfium/libpdfium.so
-src-tauri/resources/pdfium/pdfium.dll
-src-tauri/resources/ffmpeg/ffmpeg
-src-tauri/resources/ffmpeg/ffprobe
-src-tauri/resources/ffmpeg/ffmpeg.exe
-src-tauri/resources/ffmpeg/ffprobe.exe
+resources/qdrant/qdrant
+resources/qdrant/qdrant.exe
+resources/pdfium/libpdfium.dylib
+resources/pdfium/libpdfium.so
+resources/pdfium/pdfium.dll
+resources/ffmpeg/ffmpeg
+resources/ffmpeg/ffprobe
+resources/ffmpeg/ffmpeg.exe
+resources/ffmpeg/ffprobe.exe
+
+release/

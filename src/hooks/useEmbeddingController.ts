@@ -4,18 +4,25 @@ import {
   type EmbeddingFileFailure,
   type EmbeddingJobPhase,
   embeddingJobStatus,
+  isDesktopAvailable,
   qdrantStatus,
   startEmbeddingJob,
   subscribeEmbeddingDone,
   subscribeEmbeddingError,
   subscribeEmbeddingFileFailed,
   subscribeEmbeddingStatus,
-} from "@/lib/api/tauri";
+} from "@/lib/api/desktop";
 import { invokeErrorText } from "@/lib/errors";
 import {
   embeddingImageRasterOptions,
   type LocalConfig,
 } from "@/lib/localConfig";
+import {
+  filterIgnoredEmbedFailures,
+  ignoredEmbedFailuresStore,
+  ignoreEmbedFailurePath,
+  isEmbedFailureIgnored,
+} from "@/lib/stores/ignoredEmbedFailuresStore";
 
 function embedAutoKeyFromCfg(cfg: LocalConfig): string {
   return JSON.stringify({
@@ -46,6 +53,18 @@ export function useEmbeddingController(cfg: LocalConfig) {
   const lastAutoEmbedKeyRef = useRef<string>("");
   const embedStartInFlightRef = useRef(false);
   const lastReportedEmbedErrorRef = useRef<string | null>(null);
+
+  const [ignoredEmbedPaths] = ignoredEmbedFailuresStore.useStore();
+
+  const visibleEmbedFailures = useMemo(
+    () => filterIgnoredEmbedFailures(embedFailures),
+    [embedFailures, ignoredEmbedPaths],
+  );
+
+  const ignoreEmbedFailure = useCallback((path: string) => {
+    ignoreEmbedFailurePath(path);
+    setEmbedFailures((prev) => prev.filter((f) => f.path !== path));
+  }, []);
 
   const autoEmbedKey = useMemo(
     () => embedAutoKeyFromCfg(cfg),
@@ -80,10 +99,8 @@ export function useEmbeddingController(cfg: LocalConfig) {
     try {
       try {
         await qdrantStatus();
-      } catch (error) {
-        const message = `Qdrant is not configured or reachable: ${invokeErrorText(error)}`;
-        lastReportedEmbedErrorRef.current = message;
-        setLastEmbedError(message);
+      } catch {
+        // Setup onboarding surfaces Qdrant and Gemini configuration issues.
         return;
       }
 
@@ -161,32 +178,38 @@ export function useEmbeddingController(cfg: LocalConfig) {
     let cancelled = false;
 
     async function subscribe() {
-      unlistenStatus = await subscribeEmbeddingStatus((status) => {
-        setEmbeddingPhase(status.phase);
-        setEmbedProgress({
-          processed: status.processed,
-          total: status.total,
-          status: status.message,
-        });
-      });
-      unlistenDone = await subscribeEmbeddingDone(() => {
-        setEmbeddingPhase("done");
-      });
-      unlistenError = await subscribeEmbeddingError(({ message }) => {
-        if (
-          isBenignConcurrentEmbedStartError(message) ||
-          lastReportedEmbedErrorRef.current === message
-        ) {
-          return;
-        }
-        lastReportedEmbedErrorRef.current = message;
-        setLastEmbedError(message);
-      });
-      unlistenFileFailed = await subscribeEmbeddingFileFailed((failure) => {
-        setEmbedFailures((prev) => [failure, ...prev].slice(0, 8));
-      });
+      if (!isDesktopAvailable()) return;
 
       try {
+        unlistenStatus = await subscribeEmbeddingStatus((status) => {
+          setEmbeddingPhase(status.phase);
+          setEmbedProgress({
+            processed: status.processed,
+            total: status.total,
+            status: status.message,
+          });
+        });
+        unlistenDone = await subscribeEmbeddingDone(() => {
+          setEmbeddingPhase("done");
+        });
+        unlistenError = await subscribeEmbeddingError(({ message }) => {
+          if (
+            isBenignConcurrentEmbedStartError(message) ||
+            lastReportedEmbedErrorRef.current === message
+          ) {
+            return;
+          }
+          lastReportedEmbedErrorRef.current = message;
+          setLastEmbedError(message);
+        });
+        unlistenFileFailed = await subscribeEmbeddingFileFailed((failure) => {
+          if (isEmbedFailureIgnored(failure.path)) return;
+          setEmbedFailures((prev) => {
+            const without = prev.filter((f) => f.path !== failure.path);
+            return [...without, failure].slice(0, 128);
+          });
+        });
+
         const status = await embeddingJobStatus();
         if (cancelled) {
           return;
@@ -198,7 +221,7 @@ export function useEmbeddingController(cfg: LocalConfig) {
           status: status.message,
         });
       } catch {
-        // ignore initial status fetch failures
+        // Preload/desktop API not ready yet.
       }
     }
 
@@ -218,7 +241,8 @@ export function useEmbeddingController(cfg: LocalConfig) {
     embeddingPhase,
     embedProgress,
     lastEmbedError,
-    embedFailures,
+    embedFailures: visibleEmbedFailures,
+    ignoreEmbedFailure,
     cancelEmbedding,
     clearGeminiEmbedError,
     onGeminiApiKeySaved,

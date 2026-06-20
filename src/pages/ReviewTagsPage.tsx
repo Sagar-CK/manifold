@@ -1,4 +1,4 @@
-import { ArrowLeft, Check } from "lucide-react";
+import { ArrowLeft01Icon, Tick01Icon } from "@hugeicons/core-free-icons";
 import { useEffect, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { openPathInDefaultApp as tryOpenPathInDefaultApp } from "@/lib/files";
@@ -20,6 +20,7 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "../components/ui/empty";
+import { HugeIcon } from "../components/ui/huge-icon";
 import { ScrollArea } from "../components/ui/scroll-area";
 import {
   Tooltip,
@@ -140,31 +141,36 @@ export function ReviewTagsPage({ sourceId }: { sourceId: string }) {
 
   return (
     <section className="flex min-h-0 flex-1 flex-col">
-      <div className="relative shrink-0 flex flex-col items-center gap-2 text-center">
+      <header className="relative shrink-0 px-4 pb-4 sm:px-5">
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
               type="button"
               variant="ghost"
               size="icon"
-              className="absolute left-0 top-0 text-muted-foreground"
+              className="absolute left-4 top-0 text-muted-foreground sm:left-5"
               aria-label="Back"
               onClick={() => navigateBackOrFallback(navigate)}
             >
-              <ArrowLeft className="h-4 w-4" aria-hidden="true" />
+              <HugeIcon
+                icon={ArrowLeft01Icon}
+                className="h-4 w-4"
+                aria-hidden
+              />
             </Button>
           </TooltipTrigger>
           <TooltipContent side="bottom">Back</TooltipContent>
         </Tooltip>
         <PageHeader heading="Review tags" />
-      </div>
+      </header>
 
-      <div className="min-h-0 flex-1">
+      <div className="min-h-0 flex-1 px-4 sm:px-5">
         {!hasPending ? (
-          <Empty className="min-h-full border-border/60 bg-muted/10 py-24">
+          <Empty className="min-h-[15rem] border-border/60 bg-muted/10 py-16">
             <EmptyHeader>
               <EmptyMedia variant="icon">
-                <Check
+                <HugeIcon
+                  icon={Tick01Icon}
                   className="text-muted-foreground"
                   strokeWidth={1.75}
                   aria-hidden
@@ -175,16 +181,15 @@ export function ReviewTagsPage({ sourceId }: { sourceId: string }) {
             </EmptyHeader>
           </Empty>
         ) : (
-          <ScrollArea className="h-full pr-3">
-            <div className="flex flex-col gap-8 pb-8">
+          <ScrollArea className="h-full">
+            <div className="flex flex-col gap-6 pb-8 pr-3">
               {sections.map(({ tagId, tagDef, rows }) => (
                 <section key={tagId} className="flex flex-col gap-3">
-                  <div className="flex flex-col gap-2 border-b border-border pb-3 sm:flex-row sm:items-center sm:justify-between">
-                    <div className="min-w-0">
-                      <TagDefLabel tag={tagDef} className="text-sm" />
-                    </div>
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <TagDefLabel tag={tagDef} />
                     <div className="flex flex-wrap gap-2 sm:justify-end">
                       <Button
+                        type="button"
                         onClick={() => handleRejectAllForTag(tagId)}
                         variant="outline"
                         size="sm"
@@ -192,15 +197,15 @@ export function ReviewTagsPage({ sourceId }: { sourceId: string }) {
                         Reject all
                       </Button>
                       <Button
+                        type="button"
                         onClick={() => handleAcceptAllForTag(tagId)}
-                        variant="secondary"
                         size="sm"
                       >
                         Accept all
                       </Button>
                     </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+                  <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
                     {rows.map(
                       ({ path, tagId: rowTagId, key, tagDef: rowTag }) => {
                         const preview = isPreviewablePath(path);

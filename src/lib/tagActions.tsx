@@ -4,7 +4,7 @@ import {
   geminiJudgeTag,
   qdrantSetPathTagIds,
   qdrantSimilarByPath,
-} from "@/lib/api/tauri";
+} from "@/lib/api/desktop";
 import {
   embeddingImageRasterOptions,
   type LocalConfig,
@@ -12,6 +12,7 @@ import {
 import { autoTagLog, formatError } from "@/lib/log";
 import { isPathSelected } from "@/lib/pathSelection";
 import { getTagSnapshot, setTagSnapshot } from "@/lib/stores/tagStore";
+import type { TagDef } from "@/lib/tags";
 import {
   acceptAllPendingForTag,
   acceptPendingAutoTag,
@@ -28,6 +29,26 @@ import {
 } from "@/lib/tags";
 
 type NavigateToReviewTags = (() => void) | undefined;
+
+function AutoTagLoadingToast({ tag }: { tag: TagDef }) {
+  return (
+    <span className="inline-flex min-w-0 flex-wrap items-center gap-1.5 text-xs/relaxed text-muted-foreground">
+      <span>Finding similar files for</span>
+      <TagDefLabel tag={tag} />
+    </span>
+  );
+}
+
+function AutoTagReviewToast({ tag, count }: { tag: TagDef; count: number }) {
+  return (
+    <div className="flex min-w-0 flex-col gap-1.5">
+      <TagDefLabel tag={tag} />
+      <p className="text-xs/relaxed text-muted-foreground">
+        {count} {count === 1 ? "suggestion" : "suggestions"} to review
+      </p>
+    </div>
+  );
+}
 
 async function syncPathTagIds(sourceId: string, path: string): Promise<void> {
   const snapshot = getTagSnapshot();
@@ -46,12 +67,7 @@ async function runAutoTagSuggestions(
     return;
   }
 
-  const toastId = toast.loading(
-    <span className="inline-flex flex-wrap items-center gap-1.5">
-      <span>Finding similar files for</span>
-      <TagDefLabel tag={tagDef} />
-    </span>,
-  );
+  const toastId = toast.loading(<AutoTagLoadingToast tag={tagDef} />);
 
   try {
     const rawHits = await qdrantSimilarByPath(
@@ -136,24 +152,20 @@ async function runAutoTagSuggestions(
     setTagSnapshot(next);
 
     const totalPending = countPendingSuggestionPairs(next);
-    toast.success(
-      <span className="inline-flex flex-wrap items-center gap-1.5">
-        <TagDefLabel tag={tagDef} />
-        <span>
-          {totalPending} {totalPending === 1 ? "suggestion" : "suggestions"} to
-          review.
-        </span>
-      </span>,
-      navigateToReviewTags
+    toast.success(<AutoTagReviewToast tag={tagDef} count={totalPending} />, {
+      id: `auto-tag-${sourcePath}-${tagId}`,
+      classNames: {
+        toast: "!w-[min(100vw-2rem,18rem)]",
+      },
+      ...(navigateToReviewTags
         ? {
-            id: `auto-tag-${sourcePath}-${tagId}`,
             action: {
               label: "Review",
               onClick: navigateToReviewTags,
             },
           }
-        : { id: `auto-tag-${sourcePath}-${tagId}` },
-    );
+        : {}),
+    });
   } catch (error) {
     autoTagLog.error("Auto-tagging failed", { error: formatError(error) });
     toast.error(`Auto-tagging failed: ${String(error)}`, { id: toastId });

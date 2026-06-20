@@ -5,22 +5,25 @@ import {
   hybridSearch,
   type SearchHit,
   textIndexFullTextForPath,
-} from "@/lib/api/tauri";
+} from "@/lib/api/desktop";
 import { invokeErrorText } from "@/lib/errors";
 import { formatSimilarityScore, openPathInDefaultApp } from "@/lib/files";
-import { isSearchDebugEnabled, logSearchRun, searchLog } from "@/lib/log";
+import {
+  formatSearchResultsForLog,
+  logSearchRun,
+  searchLog,
+} from "@/lib/log";
 import { useIndexedPointCount } from "@/lib/qdrantPointCount";
 import { groupByContentHash } from "@/lib/resultGrouping";
 import { pruneIndexedPathIfMissing } from "@/lib/staleIndexedPaths";
 import { useHomeDir } from "@/lib/useHomeDir";
 import { useTagsState } from "@/lib/useTagsState";
 import {
-  isPreviewablePath,
   useThumbnailsForPaths,
 } from "@/lib/useThumbnailsForPaths";
 import { ContentHashPathPickerDialog } from "../components/ContentHashPathPickerDialog";
 import { EmbeddingStatusPanel } from "../components/EmbeddingStatusPanel";
-import { ErrorMessage } from "../components/ErrorMessage";
+import { AppAlert } from "../components/AppAlert";
 import { FileSearchResultCard } from "../components/FileSearchResultCard";
 import { PageHeader } from "../components/PageHeader";
 import { SearchNoResults } from "../components/SearchNoResults";
@@ -50,10 +53,23 @@ type SearchResultGroup = {
   variants: SearchResult[];
 };
 
-function choosePrimaryResult(a: SearchResult, b: SearchResult): SearchResult {
-  if (a.matchType !== b.matchType) {
-    return a.matchType === "textMatch" ? a : b;
+function matchTypeRank(m: SearchResult["matchType"]): number {
+  switch (m) {
+    case "text":
+      return 3;
+    case "ocr":
+      return 2;
+    case "semantic":
+      return 1;
+    default:
+      return 0;
   }
+}
+
+function choosePrimaryResult(a: SearchResult, b: SearchResult): SearchResult {
+  const ra = matchTypeRank(a.matchType);
+  const rb = matchTypeRank(b.matchType);
+  if (ra !== rb) return ra > rb ? a : b;
   return a.score >= b.score ? a : b;
 }
 
@@ -65,9 +81,9 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
     embedProgress,
     lastEmbedError,
     embedFailures,
+    ignoreEmbedFailure,
   } = useEmbeddingStatus();
   const [query, setQuery] = useState("");
-  const [searchTypeMenuOpen, setSearchTypeMenuOpen] = useState(false);
   const { matchTypeFilter, setMatchTypeFilter, tagFilterIds, setTagFilterIds } =
     useStoredSearchFilters();
   const [isSearching, setIsSearching] = useState(false);
@@ -126,7 +142,8 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
         exclude: [...cfg.exclude].sort(),
         useDefaultFolderExcludes: cfg.useDefaultFolderExcludes,
         extensions: [...cfg.extensions].sort(),
-        textMatch: matchTypeFilter.textMatch,
+        text: matchTypeFilter.text,
+        ocr: matchTypeFilter.ocr,
         semantic: matchTypeFilter.semantic,
       }),
     [
@@ -138,7 +155,8 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
       cfg.exclude,
       cfg.useDefaultFolderExcludes,
       cfg.extensions,
-      matchTypeFilter.textMatch,
+      matchTypeFilter.text,
+      matchTypeFilter.ocr,
       matchTypeFilter.semantic,
     ],
   );
@@ -147,17 +165,6 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
     const runId = ++searchRunSeqRef.current;
     latestRunRef.current = runId;
     runStartMsRef.current = performance.now();
-    let stageStartMs = performance.now();
-    logSearchRun(runId, "started", {
-      queryLength: queryText.length,
-      sourceId: cfg.sourceId,
-      searchMode: cfg.searchMode,
-      topK: cfg.topK,
-      scoreThreshold: cfg.scoreThreshold,
-      includeCount: cfg.include.length,
-      excludeCount: cfg.exclude.length,
-      extensionCount: cfg.extensions.length,
-    });
 
     setIsSearching(true);
     setSearchError(null);
@@ -170,22 +177,17 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
         queryText,
         limit: searchLimit,
         searchTypes: [
-          ...(matchTypeFilter.textMatch ? ["text"] : []),
+          ...(matchTypeFilter.text ? ["text"] : []),
+          ...(matchTypeFilter.ocr ? ["ocr"] : []),
           ...(matchTypeFilter.semantic ? ["semantic"] : []),
         ],
       });
-      logSearchRun(runId, "semantic search resolved", {
-        elapsedMs: Math.round(performance.now() - stageStartMs),
-        rawResultCount: res.length,
-        limit: searchLimit,
-      });
-      stageStartMs = performance.now();
     } catch (e) {
       logSearchRun(
         runId,
-        "semantic search failed",
+        `"${queryText}" failed`,
         {
-          elapsedMs: Math.round(performance.now() - stageStartMs),
+          elapsedMs: Math.round(performance.now() - runStartMsRef.current),
           error: invokeErrorText(e),
         },
         "error",
@@ -216,13 +218,6 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
     const selectedOnly = filtered.filter((r) =>
       isPathSelected(r.file.path, cfg),
     );
-    logSearchRun(runId, "post-filter completed", {
-      elapsedMs: Math.round(performance.now() - stageStartMs),
-      afterModeFilterCount: filtered.length,
-      selectedOnlyCount: selectedOnly.length,
-      droppedByPathOrExt: filtered.length - selectedOnly.length,
-    });
-    stageStartMs = performance.now();
     if (latestRunRef.current !== runId) return;
     setHasSearched(true);
     setResults(selectedOnly);
@@ -231,13 +226,17 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
     );
     setIsSearching(false);
 
-    const thumbnailsQueued = selectedOnly.filter((r) =>
-      isPreviewablePath(r.file.path),
-    ).length;
-    logSearchRun(runId, "search completed", {
-      totalElapsedMs: Math.round(performance.now() - runStartMsRef.current),
-      totalResults: selectedOnly.length,
-      thumbnailsQueued,
+    logSearchRun(runId, `"${queryText}" → ${selectedOnly.length} results`, {
+      elapsedMs: Math.round(performance.now() - runStartMsRef.current),
+      searchMode: cfg.searchMode,
+      limit: searchLimit,
+      rawCount: res.length,
+      afterModeFilter: filtered.length,
+      droppedByPathOrExt: filtered.length - selectedOnly.length,
+      results: formatSearchResultsForLog(selectedOnly, {
+        homePath,
+        includeRoots: cfg.include,
+      }),
     });
   }
 
@@ -253,11 +252,6 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
 
     setIsSearching(true);
     const timer = window.setTimeout(() => {
-      searchLog.debug("debounce fired", {
-        queryLength: trimmed.length,
-        debounceMs: 250,
-        queuedRuns: searchRunSeqRef.current,
-      });
       void runSearch(trimmed);
     }, 250);
     return () => window.clearTimeout(timer);
@@ -332,16 +326,6 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
     },
   );
 
-  useEffect(() => {
-    if (!isSearchDebugEnabled() || latestRunRef.current === 0) return;
-    const runId = latestRunRef.current;
-    logSearchRun(runId, "results state committed", {
-      elapsedMs: Math.round(performance.now() - runStartMsRef.current),
-      resultsCount: results.length,
-      thumbnailCount: Object.keys(thumbByPath).length,
-    });
-  }, [results, thumbByPath]);
-
   const sourceResults = showingTagBrowse ? tagBrowseResults : results;
   const typeFilteredResults = showingTagBrowse
     ? sourceResults
@@ -363,7 +347,7 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
     variants: group.variants,
   }));
   const hasMatchTypeEnabled =
-    matchTypeFilter.textMatch || matchTypeFilter.semantic;
+    matchTypeFilter.text || matchTypeFilter.ocr || matchTypeFilter.semantic;
   const hasTagFilterButNoMatches =
     hasSearched &&
     tagFilterSet.size > 0 &&
@@ -386,8 +370,6 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
       <SearchQueryBar
         query={query}
         onQueryChange={setQuery}
-        searchTypeMenuOpen={searchTypeMenuOpen}
-        onSearchTypeMenuOpenChange={setSearchTypeMenuOpen}
         matchTypeFilter={matchTypeFilter}
         onMatchTypeFilterChange={setMatchTypeFilter}
         isSearching={isSearching}
@@ -423,14 +405,15 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
                 </Empty>
               ) : null
             ) : searchError ? (
-              <ErrorMessage
-                variant="centered"
+              <AppAlert
+                variant="banner"
                 title="Search error"
+                className="mx-auto max-w-md"
                 message={searchError}
               />
             ) : !hasMatchTypeEnabled ? (
               <div className="app-muted text-center">
-                Enable at least one search type (Text or Semantic).
+                Enable at least one search type (OCR, Text, or Semantic).
               </div>
             ) : hasTagFilterButNoMatches ? (
               <SearchNoResults variant="tag-filters" />
@@ -451,7 +434,8 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
                     key={group.key}
                     path={r.file.path}
                     onMouseEnter={() => {
-                      if (r.matchType !== "textMatch") return;
+                      if (r.matchType !== "text" && r.matchType !== "ocr")
+                        return;
                       const cached = fullTextCacheRef.current[r.file.path];
                       if (cached) {
                         searchLog.debug("text-match:hover:full-text", {
@@ -504,6 +488,17 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
                                   ),
                                 }
                               : {}),
+                            ...((r.matchType === "text" ||
+                              r.matchType === "ocr") &&
+                            ext === "pdf" &&
+                            query.trim()
+                              ? {
+                                  pdfTextMatch: {
+                                    searchQuery: query.trim(),
+                                    matchKind: r.matchType,
+                                  },
+                                }
+                              : {}),
                           } satisfies FileResultLocationState,
                         },
                       );
@@ -517,9 +512,11 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
                       showingTagBrowse
                         ? null
                         : cfg.showSimilarityOnHover
-                          ? r.matchType === "textMatch"
-                            ? "Text match"
-                            : `Similarity ${formatSimilarityScore(r.score)}`
+                          ? r.matchType === "semantic"
+                            ? `Similarity ${formatSimilarityScore(r.score)}`
+                            : r.matchType === "ocr"
+                              ? "OCR"
+                              : "Text"
                           : null
                     }
                     tagDots={tagsForPath(tagsState, r.file.path)}
@@ -569,6 +566,7 @@ export function SearchPage({ cfg }: { cfg: LocalConfig }) {
             total={embedProgress.total}
             lastEmbedError={lastEmbedError}
             embedFailures={embedFailures}
+            onIgnoreEmbedFailure={ignoreEmbedFailure}
             indexedCount={liveIndexedCount}
           />
         </div>

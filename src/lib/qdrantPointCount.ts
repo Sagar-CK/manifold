@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { qdrantCountPoints } from "@/lib/api/tauri";
+import { qdrantCountPoints } from "@/lib/api/desktop";
 
 async function fetchQdrantPointCount(sourceId: string): Promise<number | null> {
   try {

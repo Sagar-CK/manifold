@@ -1,4 +1,5 @@
-import { ErrorMessage } from "@/components/ErrorMessage";
+import { Fragment } from "react";
+import { AppAlert } from "@/components/AppAlert";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -9,6 +10,16 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { FieldDescription } from "@/components/ui/field";
 import { Spinner } from "@/components/ui/spinner";
 import type { LocalConfig } from "@/lib/localConfig";
 
@@ -19,6 +30,41 @@ export type IncludeFolderBreakdown = {
   audio: number;
   video: number;
 };
+
+function FolderBreakdownRows({
+  breakdown,
+}: {
+  breakdown: IncludeFolderBreakdown;
+}) {
+  const rows: Array<{ label: string; count: number }> = [];
+  if (breakdown.textLike > 0) {
+    rows.push({ label: "Text / PDF", count: breakdown.textLike });
+  }
+  if (breakdown.image > 0) {
+    rows.push({ label: "Images", count: breakdown.image });
+  }
+  if (breakdown.audio > 0) {
+    rows.push({ label: "Audio", count: breakdown.audio });
+  }
+  if (breakdown.video > 0) {
+    rows.push({ label: "Video", count: breakdown.video });
+  }
+
+  if (rows.length === 0) return null;
+
+  return (
+    <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-1 text-xs/relaxed text-muted-foreground">
+      {rows.map((row) => (
+        <Fragment key={row.label}>
+          <dt>{row.label}</dt>
+          <dd className="text-right tabular-nums">
+            {row.count.toLocaleString()}
+          </dd>
+        </Fragment>
+      ))}
+    </dl>
+  );
+}
 
 export function SettingsFolderDialogs({
   cfg,
@@ -59,111 +105,75 @@ export function SettingsFolderDialogs({
 }) {
   return (
     <>
-      <AlertDialog
-        open={confirmAddIncludeOpen}
-        onOpenChange={onAddIncludeOpenChange}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle className="text-foreground">
-              Add folder
-            </AlertDialogTitle>
-            <AlertDialogDescription asChild>
-              <div className="flex flex-col gap-3 text-muted-foreground">
-                <p className="tabular-nums">
-                  {addIncludeLoading
-                    ? "Counting files…"
-                    : includeAddBreakdown !== null
-                      ? `${includeAddBreakdown.total.toLocaleString()} file${includeAddBreakdown.total === 1 ? "" : "s"}`
-                      : "—"}
-                </p>
-                {!addIncludeLoading &&
-                includeAddBreakdown !== null &&
-                includeAddBreakdown.total > 0 ? (
-                  <div className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-0.5 text-sm tabular-nums">
-                    {includeAddBreakdown.textLike > 0 ? (
-                      <>
-                        <span>Text / PDF</span>
-                        <span className="text-right">
-                          {includeAddBreakdown.textLike.toLocaleString()}
-                        </span>
-                      </>
-                    ) : null}
-                    {includeAddBreakdown.image > 0 ? (
-                      <>
-                        <span>Images</span>
-                        <span className="text-right">
-                          {includeAddBreakdown.image.toLocaleString()}
-                        </span>
-                      </>
-                    ) : null}
-                    {includeAddBreakdown.audio > 0 ? (
-                      <>
-                        <span>Audio</span>
-                        <span className="text-right">
-                          {includeAddBreakdown.audio.toLocaleString()}
-                        </span>
-                      </>
-                    ) : null}
-                    {includeAddBreakdown.video > 0 ? (
-                      <>
-                        <span>Video</span>
-                        <span className="text-right">
-                          {includeAddBreakdown.video.toLocaleString()}
-                        </span>
-                      </>
-                    ) : null}
-                  </div>
-                ) : null}
-                <p className="text-sm text-muted-foreground">
-                  Bigger folders take longer and tend to use more provider
-                  quota.
-                </p>
-              </div>
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <ErrorMessage
-            variant="callout"
-            title="Error"
-            message={addIncludeError}
-          />
-          <AlertDialogFooter>
-            <AlertDialogCancel
+      <Dialog open={confirmAddIncludeOpen} onOpenChange={onAddIncludeOpenChange}>
+        <DialogContent className="sm:max-w-md" showCloseButton={!addIncludeLoading}>
+          <DialogHeader>
+            <DialogTitle>Add folder</DialogTitle>
+            {includeToAdd ? (
+              <DialogDescription className="truncate font-mono">
+                {includeToAdd}
+              </DialogDescription>
+            ) : null}
+          </DialogHeader>
+
+          <div className="flex flex-col gap-3">
+            <div className="rounded-lg border border-border/70 bg-muted/20 px-3 py-2.5">
+              <p className="text-sm font-medium tabular-nums text-foreground">
+                {addIncludeLoading
+                  ? "Counting files…"
+                  : includeAddBreakdown !== null
+                    ? `${includeAddBreakdown.total.toLocaleString()} file${includeAddBreakdown.total === 1 ? "" : "s"}`
+                    : "—"}
+              </p>
+              {!addIncludeLoading &&
+              includeAddBreakdown !== null &&
+              includeAddBreakdown.total > 0 ? (
+                <div className="mt-2 border-t border-border/60 pt-2">
+                  <FolderBreakdownRows breakdown={includeAddBreakdown} />
+                </div>
+              ) : null}
+            </div>
+            <FieldDescription>
+              Bigger folders take longer and tend to use more provider quota.
+            </FieldDescription>
+          </div>
+
+          <AppAlert variant="inline" message={addIncludeError} />
+
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
               disabled={addIncludeLoading}
-              className="h-auto min-h-9 px-3 py-2"
-              aria-label="Cancel adding include folder"
+              onClick={() => onAddIncludeOpenChange(false)}
             >
               Cancel
-            </AlertDialogCancel>
-            <AlertDialogAction
+            </Button>
+            <Button
+              type="button"
               disabled={addIncludeLoading || includeToAdd === null}
-              className="h-auto min-h-9 px-3 py-2"
-              aria-label="Confirm add include folder"
-              onClick={(e) => {
-                e.preventDefault();
-                confirmAddIncludeFolder();
-              }}
+              onClick={confirmAddIncludeFolder}
             >
               {addIncludeLoading ? (
                 <>
-                  <Spinner className="h-4 w-4" aria-hidden="true" />
-                  Confirming...
+                  <Spinner data-icon="inline-start" aria-hidden />
+                  Confirming…
                 </>
               ) : (
-                "Confirm"
+                "Add folder"
               )}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <AlertDialog
         open={confirmRemoveIncludeOpen}
         onOpenChange={onRemoveIncludeOpenChange}
       >
-        <AlertDialogContent>
+        <AlertDialogContent className="sm:max-w-md">
           <AlertDialogHeader>
-            <AlertDialogTitle className="text-foreground">
+            <AlertDialogTitle>
               Remove this include folder and its vectors?
             </AlertDialogTitle>
             <AlertDialogDescription>
@@ -172,24 +182,14 @@ export function SettingsFolderDialogs({
               not deleted.
             </AlertDialogDescription>
           </AlertDialogHeader>
-          <ErrorMessage
-            variant="callout"
-            title="Error"
-            message={removeIncludeError}
-          />
+          <AppAlert variant="inline" message={removeIncludeError} />
           <AlertDialogFooter>
-            <AlertDialogCancel
-              disabled={removeIncludeLoading}
-              className="h-auto min-h-9 px-3 py-2"
-              aria-label="Cancel removal"
-            >
+            <AlertDialogCancel disabled={removeIncludeLoading}>
               Cancel
             </AlertDialogCancel>
             <AlertDialogAction
               variant="destructive"
               disabled={removeIncludeLoading || includeToRemove === null}
-              className="h-auto min-h-9 px-3 py-2"
-              aria-label="Remove folder and vectors"
               onClick={async (e) => {
                 e.preventDefault();
                 await removeIncludeFolderAndVectors();
@@ -197,8 +197,8 @@ export function SettingsFolderDialogs({
             >
               {removeIncludeLoading ? (
                 <>
-                  <Spinner className="h-4 w-4" aria-hidden="true" />
-                  Deleting...
+                  <Spinner data-icon="inline-start" aria-hidden />
+                  Deleting…
                 </>
               ) : (
                 "Delete"
@@ -212,9 +212,9 @@ export function SettingsFolderDialogs({
         open={confirmDisableDefaultExcludesOpen}
         onOpenChange={setConfirmDisableDefaultExcludesOpen}
       >
-        <AlertDialogContent>
+        <AlertDialogContent className="sm:max-w-md">
           <AlertDialogHeader>
-            <AlertDialogTitle className="text-foreground">
+            <AlertDialogTitle>
               Turn off automatic folder skipping?
             </AlertDialogTitle>
             <AlertDialogDescription>
@@ -224,11 +224,8 @@ export function SettingsFolderDialogs({
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel className="h-auto min-h-9 px-3 py-2">
-              Cancel
-            </AlertDialogCancel>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              className="h-auto min-h-9 px-3 py-2"
               onClick={() => {
                 updateConfig({ ...cfg, useDefaultFolderExcludes: false });
               }}

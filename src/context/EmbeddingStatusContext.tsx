@@ -1,13 +1,5 @@
 import { createContext, type ReactNode, useContext, useMemo } from "react";
-
-export type EmbeddingJobPhase =
-  | "idle"
-  | "scanning"
-  | "embedding"
-  | "paused"
-  | "cancelling"
-  | "done"
-  | "error";
+import type { EmbeddingJobPhase } from "@/lib/api/desktop";
 
 export type EmbeddingStatusValue = {
   embedding: boolean;
@@ -16,6 +8,7 @@ export type EmbeddingStatusValue = {
   embedProgress: { processed: number; total: number; status: string };
   lastEmbedError: string | null;
   embedFailures: Array<{ path: string; reason: string }>;
+  ignoreEmbedFailure: (path: string) => void;
   cancelEmbedding: () => Promise<void>;
 };
 
@@ -29,6 +22,7 @@ export function EmbeddingStatusProvider({
   embedProgress,
   lastEmbedError,
   embedFailures,
+  ignoreEmbedFailure,
   cancelEmbedding,
 }: {
   children: ReactNode;
@@ -38,6 +32,7 @@ export function EmbeddingStatusProvider({
   embedProgress: { processed: number; total: number; status: string };
   lastEmbedError: string | null;
   embedFailures: Array<{ path: string; reason: string }>;
+  ignoreEmbedFailure: (path: string) => void;
   cancelEmbedding: () => Promise<void>;
 }) {
   const value = useMemo(
@@ -48,6 +43,7 @@ export function EmbeddingStatusProvider({
       embedProgress,
       lastEmbedError,
       embedFailures,
+      ignoreEmbedFailure,
       cancelEmbedding,
     }),
     [
@@ -57,6 +53,7 @@ export function EmbeddingStatusProvider({
       embedProgress,
       lastEmbedError,
       embedFailures,
+      ignoreEmbedFailure,
       cancelEmbedding,
     ],
   );

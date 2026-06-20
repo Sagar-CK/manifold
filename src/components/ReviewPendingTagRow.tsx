@@ -1,10 +1,17 @@
-import { Check, X } from "lucide-react";
+import { Cancel01Icon, Tick01Icon } from "@hugeicons/core-free-icons";
 import type { MouseEvent } from "react";
 import { fileExtension, fileNameFromPath, fileTypeLabel } from "@/lib/files";
 import type { TagDef } from "../lib/tags";
 import { TagDefLabel } from "./TagDefBadge";
 import { Button } from "./ui/button";
+import { HugeIcon } from "./ui/huge-icon";
+import { ImgReveal } from "./ui/img-reveal";
 import { Skeleton } from "./ui/skeleton";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "./ui/tooltip";
 
 export function ReviewPendingTagRow({
   path,
@@ -31,7 +38,7 @@ export function ReviewPendingTagRow({
   const ext = fileExtension(path);
   const fileName = fileNameFromPath(path);
 
-  const previewBlock = (
+  const preview = (
     <>
       <div className="relative w-full px-1">
         {showTagBadge ? (
@@ -44,7 +51,7 @@ export function ReviewPendingTagRow({
         ) : null}
         {thumbUrl ? (
           <div className="mx-auto flex h-16 w-28 items-center justify-center">
-            <img
+            <ImgReveal
               src={thumbUrl}
               alt=""
               className="block max-h-full max-w-full rounded-lg object-contain"
@@ -65,7 +72,7 @@ export function ReviewPendingTagRow({
         )}
       </div>
       <div
-        className="w-full min-w-0 truncate text-center text-xs font-normal leading-tight text-foreground"
+        className="w-full min-w-0 truncate text-center text-xs font-normal leading-tight text-foreground/90"
         title={path}
       >
         {fileName}
@@ -74,42 +81,52 @@ export function ReviewPendingTagRow({
   );
 
   return (
-    <div className="group relative flex min-w-0 flex-col items-center gap-2">
+    <div className="group flex min-w-0 flex-col items-center gap-1 rounded-xl border border-border/50 bg-card/40 p-2 shadow-sm transition-colors hover:border-border hover:bg-muted/20">
       {onInspectFile ? (
         <Button
           type="button"
           variant="ghost"
-          className="h-auto w-full flex-col gap-2 rounded-xl border border-transparent p-2 text-left font-normal hover:border-border/70 hover:bg-muted/20"
+          className="h-auto w-full min-w-0 flex-col gap-1.5 rounded-lg border-0 bg-transparent p-0 font-normal shadow-none hover:bg-transparent"
           onClick={(e) => onInspectFile(e)}
           title="Click to view · ⌘ or Ctrl-click to open in default app"
           aria-label={`View file ${fileName}. Command or control click opens in default app.`}
         >
-          {previewBlock}
+          {preview}
         </Button>
       ) : (
-        previewBlock
+        preview
       )}
       <div className="flex items-center justify-center gap-0.5">
-        <Button
-          type="button"
-          variant="outline"
-          size="icon-sm"
-          className="size-8 rounded-full border-border/70 text-muted-foreground hover:bg-muted hover:text-foreground"
-          aria-label={`Accept tag ${tag.name} for ${fileName}`}
-          onClick={onAccept}
-        >
-          <Check className="size-4" />
-        </Button>
-        <Button
-          type="button"
-          variant="outline"
-          size="icon-sm"
-          className="size-8 rounded-full border-border/70 text-muted-foreground hover:bg-muted hover:text-foreground"
-          aria-label={`Reject tag ${tag.name} for ${fileName}`}
-          onClick={onReject}
-        >
-          <X className="size-4" />
-        </Button>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="size-7 text-muted-foreground"
+              aria-label={`Reject tag ${tag.name} for ${fileName}`}
+              onClick={onReject}
+            >
+              <HugeIcon icon={Cancel01Icon} className="size-3.5" aria-hidden />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">Reject</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="size-7 text-muted-foreground hover:text-foreground"
+              aria-label={`Accept tag ${tag.name} for ${fileName}`}
+              onClick={onAccept}
+            >
+              <HugeIcon icon={Tick01Icon} className="size-3.5" aria-hidden />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">Accept</TooltipContent>
+        </Tooltip>
       </div>
     </div>
   );

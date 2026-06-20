@@ -1,7 +1,7 @@
-import { ArrowLeft, CircleHelp } from "lucide-react";
+import { ArrowLeft01Icon, HelpCircleIcon } from "@hugeicons/core-free-icons";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ErrorMessage } from "@/components/ErrorMessage";
+import { AppAlert } from "@/components/AppAlert";
 import { PageHeader } from "@/components/PageHeader";
 import { TagFilterPill } from "@/components/TagFilterPill";
 import { Button } from "@/components/ui/button";
@@ -18,6 +18,7 @@ import {
   EmptyHeader,
   EmptyTitle,
 } from "@/components/ui/empty";
+import { HugeIcon } from "@/components/ui/huge-icon";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/ui/spinner";
@@ -26,7 +27,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { qdrantScrollGraph } from "@/lib/api/tauri";
+import { qdrantScrollGraph } from "@/lib/api/desktop";
 import { invokeErrorText } from "@/lib/errors";
 import {
   adjustPanForZoomAtScreenPoint,
@@ -38,7 +39,6 @@ import {
   type GraphLodMode,
 } from "@/lib/graphExplorerRendering";
 import { type GraphLayoutAlgorithm, runGraphLayout } from "@/lib/graphLayout";
-import { graphPerfMark, graphPerfSessionStart } from "@/lib/graphPerfDebug";
 import type { LocalConfig } from "@/lib/localConfig";
 import { navigateBackOrFallback } from "@/lib/navigateBack";
 import { pruneIndexedPathIfMissing } from "@/lib/staleIndexedPaths";
@@ -252,8 +252,6 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
     null,
   );
   const lastThumbPaintAtRef = useRef(0);
-  const firstMarkersMarkRef = useRef(false);
-  const firstThumbnailsMarkRef = useRef(false);
   const dragActiveRef = useRef(false);
   const dragRef = useRef<{
     active: boolean;
@@ -436,11 +434,6 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
     if (key === lastThumbnailDemandKeyRef.current) return;
     lastThumbnailDemandKeyRef.current = key;
     setThumbnailDemand(next);
-    graphPerfMark("visible_snapshot", {
-      visible_point_count: next.visiblePointCount,
-      requested_thumbnail_count: next.requestedPaths.length,
-      lod_mode: next.lodMode,
-    });
   }, [computeThumbnailDemand]);
 
   const refreshThumbnailDemand = useCallback(
@@ -513,13 +506,10 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
     const size = radius * 2;
     const markerRadius = 3 / sc;
     const tagRingExtra = 2.5 / sc;
-    let drewAnyPoint = false;
-    let drewActualThumbnail = false;
 
     for (const visiblePoint of visible) {
       const point = points[visiblePoint.index];
       if (!point) continue;
-      drewAnyPoint = true;
       const isSelected = point.path === selectedPath;
 
       if (lodMode === "markers" && !isSelected) {
@@ -559,10 +549,6 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
         size,
       );
 
-      if (hasLoadedSprite) {
-        drewActualThumbnail = true;
-      }
-
       if (isSelected) {
         ctx.strokeStyle = SELECTED_RING;
         ctx.lineWidth = 2.5 / sc;
@@ -579,25 +565,6 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
     }
 
     ctx.restore();
-
-    if (!firstMarkersMarkRef.current && drewAnyPoint) {
-      firstMarkersMarkRef.current = true;
-      graphPerfMark("time_to_first_markers", {
-        visible_point_count: visible.length,
-        requested_thumbnail_count:
-          thumbnailDemandRef.current.requestedPaths.length,
-        lod_mode: lodMode,
-      });
-    }
-    if (!firstThumbnailsMarkRef.current && drewActualThumbnail) {
-      firstThumbnailsMarkRef.current = true;
-      graphPerfMark("time_to_first_thumbnails", {
-        visible_point_count: visible.length,
-        requested_thumbnail_count:
-          thumbnailDemandRef.current.requestedPaths.length,
-        lod_mode: lodMode,
-      });
-    }
   }, [
     gridIndex,
     points,
@@ -617,6 +584,48 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
       drawRef.current();
     });
   }, []);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      const screenX = e.clientX - rect.left;
+      const screenY = e.clientY - rect.top;
+      const currentScale = scaleRef.current;
+      const delta = e.deltaY > 0 ? 0.92 : 1.08;
+      const nextScale = Math.min(
+        MAX_GRAPH_SCALE,
+        Math.max(MIN_GRAPH_SCALE, currentScale * delta),
+      );
+      if (nextScale === currentScale) return;
+      panRef.current = adjustPanForZoomAtScreenPoint(
+        viewportRef.current,
+        panRef.current.x,
+        panRef.current.y,
+        currentScale,
+        nextScale,
+        screenX,
+        screenY,
+      );
+      scaleRef.current = nextScale;
+      scheduleDraw();
+      refreshThumbnailDemand();
+      if (wheelScaleRafRef.current == null) {
+        wheelScaleRafRef.current = requestAnimationFrame(() => {
+          wheelScaleRafRef.current = null;
+          setPan({ ...panRef.current });
+          setScale(scaleRef.current);
+          refreshThumbnailDemand(true);
+        });
+      }
+    };
+
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", onWheel);
+  }, [refreshThumbnailDemand, scheduleDraw]);
 
   const scheduleDrawAfterThumb = useCallback(() => {
     const now = performance.now();
@@ -719,12 +728,6 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
       effectId: number,
     ) => {
       const gen = ++loadGenerationRef.current;
-      graphPerfSessionStart();
-      graphPerfMark("load_start", {
-        limit,
-        algo,
-        tag_filter_count: tagFilters.length,
-      });
       setLimitInput(String(limit));
       setError(null);
       setNoResults(false);
@@ -736,8 +739,6 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
       setSelectedPath(null);
       setThumbnailDemand(defaultThumbnailDemand());
       lastThumbnailDemandKeyRef.current = "";
-      firstMarkersMarkRef.current = false;
-      firstThumbnailsMarkRef.current = false;
       lastThumbPaintAtRef.current = 0;
       spriteGenerationRef.current += 1;
       if (thumbDrawTimeoutRef.current != null) {
@@ -755,28 +756,13 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
         if (gen !== loadGenerationRef.current) return;
         if (effectId !== graphEffectIdRef.current) return;
 
-        graphPerfMark("invoke_qdrant_scroll_graph_done", {
-          n: res.n,
-          d: res.d,
-          packed_base64_chars: res.packedEmbeddingsF32Base64.length,
-          limit,
-          algo,
-        });
-
         if (res.n === 0) {
-          graphPerfMark("no_results");
           setNoResults(true);
           return;
         }
 
         setPointCount(res.n);
         setLayoutBusy(true);
-        graphPerfMark("worker_decode_start", { algo, n: res.n, d: res.d });
-        graphPerfMark("runGraphLayout_worker_start", {
-          algo,
-          n: res.n,
-          d: res.d,
-        });
         const layout = await runGraphLayout(
           res.packedEmbeddingsF32Base64,
           res.n,
@@ -785,15 +771,6 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
         );
         if (gen !== loadGenerationRef.current) return;
         if (effectId !== graphEffectIdRef.current) return;
-
-        graphPerfMark("worker_decode_done", {
-          decode_ms: Number(layout.metrics.decodeMs.toFixed(2)),
-          row_conversion_ms: Number(layout.metrics.rowConversionMs.toFixed(2)),
-        });
-        graphPerfMark("runGraphLayout_worker_done", {
-          layout_ms: Number(layout.metrics.layoutMs.toFixed(2)),
-          normalize_ms: Number(layout.metrics.normalizeMs.toFixed(2)),
-        });
 
         const next: LayoutPoint[] = res.points.map((point, index) => ({
           path: point.path,
@@ -805,7 +782,6 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
           ny: layout.y[index] ?? 0,
         }));
         setPoints(next);
-        graphPerfMark("setPoints_done", { layout_points: next.length });
         dragActiveRef.current = false;
         setPan({ x: 0, y: 0 });
         setScale(1);
@@ -814,16 +790,11 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
       } catch (e) {
         if (gen !== loadGenerationRef.current) return;
         if (e instanceof Error && e.message === "Graph layout superseded") {
-          graphPerfMark("run_superseded");
           return;
         }
-        graphPerfMark("load_error", {
-          message: e instanceof Error ? e.message : String(e),
-        });
         setError(invokeErrorText(e));
       } finally {
         if (gen === loadGenerationRef.current) {
-          graphPerfMark("load_pipeline_finally_ui_idle");
           setLoading(false);
           setLayoutBusy(false);
         }
@@ -918,7 +889,11 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
               aria-label="Back"
               onClick={() => navigateBackOrFallback(navigate)}
             >
-              <ArrowLeft className="h-4 w-4" aria-hidden="true" />
+              <HugeIcon
+                icon={ArrowLeft01Icon}
+                className="h-4 w-4"
+                aria-hidden
+              />
             </Button>
           </TooltipTrigger>
           <TooltipContent side="bottom">Back</TooltipContent>
@@ -962,7 +937,11 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
                     className="absolute top-1/2 right-0 inline-flex size-3.5 -translate-y-1/2 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
                     aria-label="About layout algorithms"
                   >
-                    <CircleHelp className="size-3.5" aria-hidden="true" />
+                    <HugeIcon
+                      icon={HelpCircleIcon}
+                      className="size-3.5"
+                      aria-hidden
+                    />
                   </button>
                 </TooltipTrigger>
                 <TooltipContent
@@ -1050,7 +1029,7 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
           </div>
         ) : error ? (
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-4">
-            <ErrorMessage
+            <AppAlert
               variant="centered"
               className="max-w-md"
               message={error}
@@ -1108,39 +1087,6 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
             }
             if (dragRef.current?.active) {
               endPanDrag();
-            }
-          }}
-          onWheel={(e) => {
-            e.preventDefault();
-            const rect = e.currentTarget.getBoundingClientRect();
-            const screenX = e.clientX - rect.left;
-            const screenY = e.clientY - rect.top;
-            const currentScale = scaleRef.current;
-            const delta = e.deltaY > 0 ? 0.92 : 1.08;
-            const nextScale = Math.min(
-              MAX_GRAPH_SCALE,
-              Math.max(MIN_GRAPH_SCALE, currentScale * delta),
-            );
-            if (nextScale === currentScale) return;
-            panRef.current = adjustPanForZoomAtScreenPoint(
-              viewportRef.current,
-              panRef.current.x,
-              panRef.current.y,
-              currentScale,
-              nextScale,
-              screenX,
-              screenY,
-            );
-            scaleRef.current = nextScale;
-            scheduleDraw();
-            refreshThumbnailDemand();
-            if (wheelScaleRafRef.current == null) {
-              wheelScaleRafRef.current = requestAnimationFrame(() => {
-                wheelScaleRafRef.current = null;
-                setPan({ ...panRef.current });
-                setScale(scaleRef.current);
-                refreshThumbnailDemand(true);
-              });
             }
           }}
           onClick={(e) => {

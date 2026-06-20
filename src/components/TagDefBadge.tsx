@@ -1,6 +1,7 @@
-import { X } from "lucide-react";
+import { Cancel01Icon } from "@hugeicons/core-free-icons";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { HugeIcon } from "@/components/ui/huge-icon";
 import type { TagDef } from "@/lib/tags";
 import { cn } from "@/lib/utils";
 
@@ -76,7 +77,12 @@ export function TagDefBadge({
             onRemove();
           }}
         >
-          <X data-icon="inline-end" className="size-3" aria-hidden="true" />
+          <HugeIcon
+            data-icon="inline-end"
+            icon={Cancel01Icon}
+            className="size-3"
+            aria-hidden
+          />
         </Button>
       </div>
     </Badge>
