@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
 
 jobs:
-  publish-electron:
+  build-electron:
     permissions:
-      contents: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -43,21 +43,30 @@ jobs:
         with:
           name: manifold-${{ matrix.os }}
           path: release/
+          retention-days: 90
 
-      - name: Upload release assets
-        if: startsWith(github.ref, 'refs/tags/')
+  publish-release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build-electron
+    permissions:
+      actions: read
+      contents: write
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Publish release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            --draft \
-            --title "Manifold ${GITHUB_REF_NAME}" \
-            --notes "See the assets to download this version and install." || true
           assets=()
           while IFS= read -r -d '' asset; do
             assets+=("$asset")
-          done < <(find release -maxdepth 1 -type f \
+          done < <(find release-artifacts -mindepth 2 -maxdepth 2 -type f \
             ! -name 'builder-debug.yml' \
             ! -name 'builder-effective-config.yaml' \
             -print0)
@@ -67,4 +76,11 @@ jobs:
             exit 1
           fi
 
-          gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "Manifold ${GITHUB_REF_NAME}" \
+              --notes "See the assets to download this version and install." \
+              "${assets[@]}"
+          fi
