@@ -1,17 +1,10 @@
 /// <reference types="vite/client" />
 
-declare module "tsne" {
-  export type TsneOptions = {
-    perplexity?: number;
-    dim?: number;
-    epsilon?: number;
-  };
-  export class tSNE {
-    constructor(opt?: TsneOptions);
-    initDataRaw(X: number[][]): void;
-    step(): void;
-    getSolution(): number[][];
-  }
-  const tsnejs: { tSNE: typeof tSNE };
-  export default tsnejs;
+type ManifoldDesktopApi = {
+  invoke: (channel: string, payload?: unknown) => Promise<unknown>;
+  subscribe: (channel: string, listener: (data: unknown) => void) => () => void;
+};
+
+interface Window {
+  desktop?: ManifoldDesktopApi;
 }

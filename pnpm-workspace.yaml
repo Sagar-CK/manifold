@@ -1,0 +1,7 @@
+nodeLinker: hoisted
+allowBuilds:
+  electron: true
+  esbuild: true
+  sharp: true
+  electron-winstaller: false
+  msw: false

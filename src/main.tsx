@@ -2,8 +2,10 @@ import { ThemeProvider } from "next-themes";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { HashRouter } from "react-router-dom";
+import { DirectionProvider } from "@/components/ui/direction";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { DesktopApiUnavailableError } from "@/lib/api/desktop";
 import { reportFatalError } from "@/lib/log";
 import RouterApp from "./RouterApp";
 
@@ -27,7 +29,7 @@ function installGlobalErrorHandlers() {
       el.style.overflow = "auto";
       el.innerHTML = `
         <div style="max-width: 980px; margin: 0 auto;">
-          <div style="font-size: 14px; opacity: 0.85;">manifold frontend crashed</div>
+          <div style="font-size: 14px; opacity: 0.85;">Manifold Frontend Crashed</div>
           <div style="font-size: 18px; font-weight: 700; margin-top: 6px;">${title}</div>
           <pre style="white-space: pre-wrap; line-height: 1.35; margin-top: 12px; background: rgba(255,255,255,0.06); padding: 12px; border-radius: 10px;">${detail}</pre>
           <div style="margin-top: 12px; font-size: 12px; opacity: 0.8;">
@@ -51,6 +53,10 @@ function installGlobalErrorHandlers() {
 
   window.addEventListener("unhandledrejection", (e) => {
     const reason = (e as PromiseRejectionEvent).reason;
+    if (reason instanceof DesktopApiUnavailableError) {
+      e.preventDefault();
+      return;
+    }
     const detail =
       reason instanceof Error
         ? `${reason.name}: ${reason.message}\n${reason.stack ?? ""}`
@@ -64,17 +70,20 @@ installGlobalErrorHandlers();
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <HashRouter>
-      <ThemeProvider
-        attribute="class"
-        defaultTheme="light"
-        enableSystem
-        storageKey="manifold-theme"
-      >
-        <TooltipProvider delayDuration={300}>
-          <RouterApp />
-          <Toaster />
-        </TooltipProvider>
-      </ThemeProvider>
+      <DirectionProvider direction="ltr" dir="ltr">
+        <ThemeProvider
+          attribute="class"
+          defaultTheme="dark"
+          disableTransitionOnChange
+          enableSystem
+          storageKey="manifold-theme"
+        >
+          <TooltipProvider delayDuration={300}>
+            <RouterApp />
+            <Toaster />
+          </TooltipProvider>
+        </ThemeProvider>
+      </DirectionProvider>
     </HashRouter>
   </React.StrictMode>,
 );

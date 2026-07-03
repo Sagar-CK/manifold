@@ -1,28 +1,26 @@
 import "./App.css";
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Route, Routes, useLocation, useNavigate } from "react-router-dom";
-import { EnvIssuesBanner } from "./components/EnvIssuesBanner";
-import { KeyboardShortcutsHelp } from "./components/KeyboardShortcutsHelp";
-import { EmbeddingStatusProvider } from "./context/EmbeddingStatusContext";
-import { useAppHealth } from "./hooks/useAppHealth";
-import { useEmbeddingController } from "./hooks/useEmbeddingController";
-import { subscribeAppShortcut } from "./lib/api/tauri";
+import { KeyboardShortcutsHelp } from "@/components/app/KeyboardShortcutsHelp";
+import { SetupOnboardingDialog } from "@/components/app/SetupOnboardingDialog";
 import {
   type AppShortcutAction,
   SEARCH_QUERY_INPUT_ID,
-} from "./lib/appShortcuts";
-import type { SupportedExt } from "./lib/localConfig";
+} from "@/lib/app/shortcuts";
+import type { SupportedExt } from "@/lib/config/localConfig";
+import {
+  AppHealthProvider,
+  useAppHealthContext,
+} from "./context/AppHealthContext";
+import { EmbeddingStatusProvider } from "./context/EmbeddingStatusContext";
+import { useEmbeddingController } from "./hooks/useEmbeddingController";
+import { isDesktopAvailable, subscribeAppShortcut } from "./lib/api/desktop";
 import { useConfigStore } from "./lib/stores/configStore";
-import { cn } from "./lib/utils";
 import { FileResultPage } from "./pages/FileResultPage";
+import { GraphExplorerPage } from "./pages/GraphExplorerPage";
 import { ReviewTagsPage } from "./pages/ReviewTagsPage";
 import { SearchPage } from "./pages/SearchPage";
 import { SettingsPage } from "./pages/SettingsPage";
-
-const GraphExplorerPage = lazy(async () => {
-  const mod = await import("./pages/GraphExplorerPage");
-  return { default: mod.GraphExplorerPage };
-});
 
 const EXT_OPTIONS: SupportedExt[] = [
   "png",
@@ -46,14 +44,68 @@ function focusSearchInput(attempt: number = 0) {
   window.setTimeout(() => focusSearchInput(attempt + 1), 50);
 }
 
+function RouterAppContent({
+  cfg,
+  setCfg,
+  shortcutsHelpOpen,
+  setShortcutsHelpOpen,
+  clearGeminiEmbedError,
+  onGeminiApiKeySaved,
+}: {
+  cfg: ReturnType<typeof useConfigStore>[0];
+  setCfg: ReturnType<typeof useConfigStore>[1];
+  shortcutsHelpOpen: boolean;
+  setShortcutsHelpOpen: (open: boolean) => void;
+  clearGeminiEmbedError: ReturnType<
+    typeof useEmbeddingController
+  >["clearGeminiEmbedError"];
+  onGeminiApiKeySaved: () => void;
+}) {
+  const { refreshHealth } = useAppHealthContext();
+
+  return (
+    <>
+      <SetupOnboardingDialog includeFolderCount={cfg.include.length} />
+      <div className="flex min-h-0 flex-1 flex-col">
+        <Routes>
+          <Route path="/" element={<SearchPage cfg={cfg} />} />
+          <Route path="/file" element={<FileResultPage cfg={cfg} />} />
+          <Route path="/graph" element={<GraphExplorerPage cfg={cfg} />} />
+          <Route
+            path="/settings"
+            element={
+              <SettingsPage
+                cfg={cfg}
+                setCfg={setCfg}
+                extOptions={EXT_OPTIONS}
+                onGeminiApiKeySaved={() => {
+                  onGeminiApiKeySaved();
+                  void refreshHealth();
+                }}
+                onGeminiStoredKeyCleared={() => {
+                  clearGeminiEmbedError();
+                  void refreshHealth();
+                }}
+              />
+            }
+          />
+          <Route path="/review-tags" element={<ReviewTagsPage cfg={cfg} />} />
+        </Routes>
+      </div>
+      <KeyboardShortcutsHelp
+        open={shortcutsHelpOpen}
+        onOpenChange={setShortcutsHelpOpen}
+      />
+    </>
+  );
+}
+
 export default function RouterApp() {
   const { pathname } = useLocation();
   const navigate = useNavigate();
   const pathnameRef = useRef(pathname);
-  const graphLayout = pathname === "/graph";
   const [cfg, setCfg] = useConfigStore();
   const [shortcutsHelpOpen, setShortcutsHelpOpen] = useState(false);
-  const { envIssues } = useAppHealth();
   const {
     embedding,
     hasPendingEmbeds,
@@ -61,6 +113,8 @@ export default function RouterApp() {
     embedProgress,
     lastEmbedError,
     embedFailures,
+    ignoreEmbedFailure,
+    retryEmbedding,
     cancelEmbedding,
     clearGeminiEmbedError,
     onGeminiApiKeySaved,
@@ -71,6 +125,8 @@ export default function RouterApp() {
   }, [pathname]);
 
   useEffect(() => {
+    if (!isDesktopAvailable()) return;
+
     let unlisten: (() => void) | undefined;
     let disposed = false;
 
@@ -103,13 +159,17 @@ export default function RouterApp() {
       if (action === "settings" && pathnameRef.current !== "/settings") {
         navigate("/settings");
       }
-    }).then((nextUnlisten) => {
-      if (disposed) {
-        nextUnlisten();
-        return;
-      }
-      unlisten = nextUnlisten;
-    });
+    })
+      .then((nextUnlisten) => {
+        if (disposed) {
+          nextUnlisten();
+          return;
+        }
+        unlisten = nextUnlisten;
+      })
+      .catch(() => {
+        // Preload/desktop API not ready yet (e.g. HMR or browser preview).
+      });
 
     return () => {
       disposed = true;
@@ -118,65 +178,31 @@ export default function RouterApp() {
   }, [navigate]);
 
   return (
-    <main className="h-screen w-full overflow-hidden bg-background text-foreground">
-      <div
-        className={cn(
-          "mx-auto flex h-full min-h-0 flex-col px-6 py-8",
-          graphLayout ? "max-w-[min(100%,1400px)]" : "max-w-5xl",
-        )}
-      >
-        <EnvIssuesBanner issues={envIssues} />
-        <EmbeddingStatusProvider
-          embedding={embedding}
-          hasPendingEmbeds={hasPendingEmbeds}
-          embeddingPhase={embeddingPhase}
-          embedProgress={embedProgress}
-          lastEmbedError={lastEmbedError}
-          embedFailures={embedFailures}
-          cancelEmbedding={cancelEmbedding}
-        >
-          <div className="flex min-h-0 flex-1 flex-col">
-            <Routes>
-              <Route path="/" element={<SearchPage cfg={cfg} />} />
-              <Route path="/file" element={<FileResultPage cfg={cfg} />} />
-              <Route
-                path="/graph"
-                element={
-                  <Suspense
-                    fallback={
-                      <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-                        Loading graph…
-                      </div>
-                    }
-                  >
-                    <GraphExplorerPage cfg={cfg} />
-                  </Suspense>
-                }
-              />
-              <Route
-                path="/settings"
-                element={
-                  <SettingsPage
-                    cfg={cfg}
-                    setCfg={setCfg}
-                    extOptions={EXT_OPTIONS}
-                    onGeminiApiKeySaved={onGeminiApiKeySaved}
-                    onGeminiStoredKeyCleared={clearGeminiEmbedError}
-                  />
-                }
-              />
-              <Route
-                path="/review-tags"
-                element={<ReviewTagsPage sourceId={cfg.sourceId} />}
-              />
-            </Routes>
-          </div>
-        </EmbeddingStatusProvider>
+    <main className="relative h-screen w-full overflow-hidden bg-background text-foreground">
+      <div className="mx-auto flex h-full min-h-0 max-w-5xl flex-col px-6 py-8">
+        <AppHealthProvider>
+          <EmbeddingStatusProvider
+            embedding={embedding}
+            hasPendingEmbeds={hasPendingEmbeds}
+            embeddingPhase={embeddingPhase}
+            embedProgress={embedProgress}
+            lastEmbedError={lastEmbedError}
+            embedFailures={embedFailures}
+            ignoreEmbedFailure={ignoreEmbedFailure}
+            retryEmbedding={retryEmbedding}
+            cancelEmbedding={cancelEmbedding}
+          >
+            <RouterAppContent
+              cfg={cfg}
+              setCfg={setCfg}
+              shortcutsHelpOpen={shortcutsHelpOpen}
+              setShortcutsHelpOpen={setShortcutsHelpOpen}
+              clearGeminiEmbedError={clearGeminiEmbedError}
+              onGeminiApiKeySaved={onGeminiApiKeySaved}
+            />
+          </EmbeddingStatusProvider>
+        </AppHealthProvider>
       </div>
-      <KeyboardShortcutsHelp
-        open={shortcutsHelpOpen}
-        onOpenChange={setShortcutsHelpOpen}
-      />
     </main>
   );
 }

@@ -1,4 +1,4 @@
-/** Tauri/Rust command errors may be plain strings or wrapped in `.message`. */
+/** IPC errors may be plain strings or wrapped in `.message`. */
 export function invokeErrorText(e: unknown): string {
   if (
     e &&

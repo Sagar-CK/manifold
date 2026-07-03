@@ -1,7 +1,7 @@
 /// <reference lib="webworker" />
 
 import * as druid from "@saehrimnir/druidjs";
-import { decodePackedF32Base64 } from "@/lib/packedEmbeddings";
+import { decodePackedF32Base64 } from "@/lib/graph/packedEmbeddings";
 
 export type GraphLayoutAlgorithm = "pca" | "umap" | "tsne";
 

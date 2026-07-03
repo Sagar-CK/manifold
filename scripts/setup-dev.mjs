@@ -1,4 +1,4 @@
-import { access, copyFile, mkdir } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
@@ -21,42 +21,25 @@ function run(command, args) {
   });
 }
 
-async function ensureEnvLocal() {
-  const envExample = path.join(repoRoot, ".env.example");
-  const envLocal = path.join(repoRoot, ".env.local");
-  try {
-    await access(envLocal);
-    console.log("[setup:dev] .env.local already exists.");
-  } catch {
-    await copyFile(envExample, envLocal);
-    console.log("[setup:dev] Created .env.local from .env.example");
-  }
-}
-
 async function ensureResourceDirs() {
-  await mkdir(path.join(repoRoot, "src-tauri", "resources", "pdfium"), {
+  await mkdir(path.join(repoRoot, "resources", "pdfium"), {
     recursive: true,
   });
-  await mkdir(path.join(repoRoot, "src-tauri", "resources", "ffmpeg"), {
+  await mkdir(path.join(repoRoot, "resources", "ffmpeg"), {
     recursive: true,
   });
 }
 
 async function main() {
-  await ensureEnvLocal();
   await ensureResourceDirs();
-  // Qdrant runs in Docker for local dev (see README). Use `pnpm setup:binaries` for
-  // Qdrant + PDFium + FFmpeg (CI / production).
   await run(process.execPath, [
     "./scripts/setup-binaries.mjs",
     "--pdfium-only",
     "--ffmpeg-only",
   ]);
   console.log("\n[setup:dev] Complete.");
-  console.log(
-    "[setup:dev] Start Qdrant: pnpm qdrant:up   (or: docker compose up -d)",
-  );
-  console.log("[setup:dev] Then run: pnpm tauri dev");
+  console.log("[setup:dev] Start Qdrant: pnpm qdrant:up");
+  console.log("[setup:dev] Then run: pnpm dev");
 }
 
 main().catch((err) => {

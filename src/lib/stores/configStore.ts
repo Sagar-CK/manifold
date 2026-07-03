@@ -2,7 +2,7 @@ import {
   createDefaultLocalConfig,
   type LocalConfig,
   normalizeLocalConfig,
-} from "@/lib/localConfig";
+} from "@/lib/config/localConfig";
 import { createLocalStorageStore } from "@/lib/stores/localStorageStore";
 
 const KEY = "manifold:config:v1";

@@ -1,52 +1,76 @@
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { ArrowLeft } from "lucide-react";
-import { useTheme } from "next-themes";
-import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { ArrowLeft01Icon } from "@hugeicons/core-free-icons";
+import { type ReactNode, useEffect, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
+import { EmbeddingStatusPanel } from "@/components/app/EmbeddingStatusPanel";
+import { PageHeader } from "@/components/app/PageHeader";
+import { PageHeaderNav } from "@/components/app/PageHeaderNav";
 import { useEmbeddingStatus } from "@/context/EmbeddingStatusContext";
-import { useTagsState } from "@/lib/useTagsState";
-import { cn } from "@/lib/utils";
-import { EmbeddingStatusPanel } from "../components/EmbeddingStatusPanel";
-import { PageHeader } from "../components/PageHeader";
-import { SettingsAppearanceCard } from "../components/settings/SettingsAppearanceCard";
-import { SettingsClearIndexCard } from "../components/settings/SettingsClearIndexCard";
-import { SettingsEmbeddingImageCard } from "../components/settings/SettingsEmbeddingImageCard";
-import type { IncludeFolderBreakdown } from "../components/settings/SettingsFolderDialogs";
-import { SettingsFolderDialogs } from "../components/settings/SettingsFolderDialogs";
-import { SettingsGeminiApiKeyCard } from "../components/settings/SettingsGeminiApiKeyCard";
-import { SettingsPathsCard } from "../components/settings/SettingsPathsCard";
-import { SettingsSearchPreferencesCard } from "../components/settings/SettingsSearchPreferencesCard";
-import { SettingsTagsCard } from "../components/settings/SettingsTagsCard";
+import { SettingsClearIndexCard } from "@/features/settings/components/SettingsClearIndexCard";
+import { SettingsEmbeddingImageCard } from "@/features/settings/components/SettingsEmbeddingImageCard";
+import type { IncludeFolderBreakdown } from "@/features/settings/components/SettingsFolderDialogs";
+import { SettingsFolderDialogs } from "@/features/settings/components/SettingsFolderDialogs";
+import { SettingsGeminiApiKeyCard } from "@/features/settings/components/SettingsGeminiApiKeyCard";
+import { SettingsPathsCard } from "@/features/settings/components/SettingsPathsCard";
 import {
-  SEARCH_MODE_OPTIONS,
-  type SearchModeOption,
-} from "../components/settings/searchModeOptions";
-import { Button } from "../components/ui/button";
-import { ScrollArea } from "../components/ui/scroll-area";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "../components/ui/tooltip";
-import {
-  qdrantDeleteAllPoints,
-  qdrantDeletePointsForIncludePath,
-  scanFilesEstimate,
-} from "../lib/api/tauri";
-import { invokeErrorText } from "../lib/errors";
+  SettingsFileTypesCard,
+  SettingsSearchPreferencesCard,
+} from "@/features/settings/components/SettingsSearchPreferencesCard";
+import { SettingsTagsCard } from "@/features/settings/components/SettingsTagsCard";
 import {
   collapseIncludeFolders,
   type LocalConfig,
   type SupportedExt,
-} from "../lib/localConfig";
-import { navigateBackOrFallback } from "../lib/navigateBack";
-import { useIndexedPointCount } from "../lib/qdrantPointCount";
+} from "@/lib/config/localConfig";
+import { navigateToSearch } from "@/lib/navigation/navigateToSearch";
+import { useIndexedPointCount } from "@/lib/search/useIndexedPointCount";
+import { useHomeDir } from "@/lib/system/useHomeDir";
+import { useTagsState } from "@/lib/tags/useTagsState";
+import { cn } from "@/lib/utils";
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "../components/ui/accordion";
+import { Button } from "../components/ui/button";
+import { FieldGroup } from "../components/ui/field";
+import { HugeIcon } from "../components/ui/huge-icon";
+import { ScrollArea } from "../components/ui/scroll-area";
+import {
+  qdrantDeleteAllPoints,
+  qdrantDeletePointsForIncludePath,
+  scanFilesEstimate,
+  showOpenDirectoryDialog,
+} from "../lib/api/desktop";
+import { invokeErrorText } from "../lib/errors";
 import { removePathMappingsUnderRoot } from "../lib/tags";
-import { useHomeDir } from "../lib/useHomeDir";
 
 function parseScanCount(value: number | string): number {
   const n = typeof value === "string" ? Number.parseInt(value, 10) : value;
   return Number.isFinite(n) ? n : 0;
+}
+
+const SETTINGS_SECTION_IDS = ["general", "folders", "files", "search"] as const;
+
+function SettingsSection({
+  id,
+  title,
+  children,
+}: {
+  id: string;
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <AccordionItem value={id} id={id} className="scroll-mt-4">
+      <AccordionTrigger className="min-h-7 rounded-none border-b border-border/60 px-0 pb-1.5 pt-0 text-sm font-medium">
+        {title}
+      </AccordionTrigger>
+      <AccordionContent className="pb-0 pt-3 text-sm">
+        {children}
+      </AccordionContent>
+    </AccordionItem>
+  );
 }
 
 export function SettingsPage({
@@ -69,9 +93,12 @@ export function SettingsPage({
     embedProgress,
     lastEmbedError,
     embedFailures,
+    ignoreEmbedFailure,
+    retryEmbedding,
     cancelEmbedding,
   } = useEmbeddingStatus();
   const navigate = useNavigate();
+  const location = useLocation();
   const homePath = useHomeDir();
   const [clearingIndex, setClearingIndex] = useState(false);
   const [clearIndexError, setClearIndexError] = useState<string | null>(null);
@@ -99,20 +126,15 @@ export function SettingsPage({
     confirmDisableDefaultExcludesOpen,
     setConfirmDisableDefaultExcludesOpen,
   ] = useState(false);
-  const [tagsState, setTagsState] = useTagsState();
-  const [tagNameDraft, setTagNameDraft] = useState("");
-  const [tagColorDraft, setTagColorDraft] = useState("#6366f1");
-  const [tagCreateOpen, setTagCreateOpen] = useState(false);
+  const [, setTagsState] = useTagsState();
   const [topKDraft, setTopKDraft] = useState(() => String(cfg.topK));
-  const { theme, setTheme } = useTheme();
-  const [themeMounted, setThemeMounted] = useState(false);
+  const [openSettingsSections, setOpenSettingsSections] = useState<string[]>(
+    () => [...SETTINGS_SECTION_IDS],
+  );
   const liveIndexedCount =
     embedding || hasPendingEmbeds
       ? Math.max(embeddedCount ?? 0, embedProgress.processed)
       : embeddedCount;
-  const selectedSearchModeOption: SearchModeOption | null =
-    SEARCH_MODE_OPTIONS.find((option) => option.value === cfg.searchMode) ??
-    null;
   const indexingActive = embedding || hasPendingEmbeds;
   const embeddingFooterSupplemental =
     embedFailures.length > 0 ||
@@ -208,6 +230,7 @@ export function SettingsPage({
         exclude: cfg.exclude,
         extensions: cfg.extensions,
         useDefaultFolderExcludes: cfg.useDefaultFolderExcludes,
+        defaultFolderExcludeSegments: cfg.defaultFolderExcludeSegments,
       });
       setIncludeAddBreakdown({
         total: parseScanCount(res.total),
@@ -237,9 +260,7 @@ export function SettingsPage({
 
   async function pickFolder(label: string): Promise<string | null> {
     try {
-      const selection = await openDialog({
-        directory: true,
-        multiple: false,
+      const selection = await showOpenDirectoryDialog({
         title: label,
       });
       if (typeof selection === "string") return selection;
@@ -255,76 +276,73 @@ export function SettingsPage({
   }, [cfg.topK]);
 
   useEffect(() => {
-    setThemeMounted(true);
-  }, []);
+    if (!location.hash) return;
+    let targetId = location.hash.slice(1);
+    try {
+      targetId = decodeURIComponent(targetId);
+    } catch {
+      // Keep the raw hash if decoding fails.
+    }
+    if (targetId === "index" || targetId === "tags") targetId = "general";
+    setOpenSettingsSections((prev) =>
+      prev.includes(targetId) ? prev : [...prev, targetId],
+    );
+    window.requestAnimationFrame(() => {
+      document.getElementById(targetId)?.scrollIntoView({ block: "start" });
+    });
+  }, [location.hash]);
 
   return (
     <div className="flex h-full min-h-0 w-full min-w-0 flex-1 flex-col">
       <header className="shrink-0 px-4 pb-4 sm:px-5">
         <div className="relative">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="absolute left-0 top-0 text-muted-foreground"
-                aria-label="Back"
-                onClick={() => navigateBackOrFallback(navigate)}
-              >
-                <ArrowLeft className="h-4 w-4" aria-hidden="true" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="bottom">Back</TooltipContent>
-          </Tooltip>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="absolute left-0 top-0 text-muted-foreground"
+            aria-label="Search"
+            onClick={() => navigateToSearch(navigate)}
+          >
+            <HugeIcon icon={ArrowLeft01Icon} className="h-4 w-4" aria-hidden />
+          </Button>
+          <PageHeaderNav />
           <PageHeader heading="Settings" />
         </div>
       </header>
 
-      <ScrollArea className="min-h-0 h-full flex-1 overflow-hidden p-4">
-        {/* Horizontal padding on both sides so card ring/shadow and radii are not clipped by the viewport */}
+      <ScrollArea className="min-h-0 h-full flex-1 overflow-hidden">
         <section
           className={cn(
-            "flex min-w-0 flex-col gap-6 p-2",
+            "mx-auto flex w-full min-w-0 max-w-5xl flex-col px-4 py-2 sm:px-5 sm:py-4",
             !indexingActive && "min-h-full",
           )}
         >
-          <div className="grid min-w-0 gap-6 lg:grid-cols-2 lg:items-start">
-            <div className="flex min-w-0 flex-col gap-6">
-              <SettingsAppearanceCard
-                themeMounted={themeMounted}
-                theme={theme}
-                setTheme={setTheme}
-              />
+          <Accordion
+            type="multiple"
+            value={openSettingsSections}
+            onValueChange={setOpenSettingsSections}
+            className="gap-4 text-sm"
+          >
+            <SettingsSection id="general" title="General">
+              <FieldGroup className="gap-3">
+                <SettingsGeminiApiKeyCard
+                  onSaved={onGeminiApiKeySaved}
+                  onStoredKeyCleared={onGeminiStoredKeyCleared}
+                />
+                <SettingsClearIndexCard
+                  liveIndexedCount={liveIndexedCount}
+                  clearIndexError={clearIndexError}
+                  clearingIndex={clearingIndex}
+                  confirmClearOpen={confirmClearOpen}
+                  setConfirmClearOpen={setConfirmClearOpen}
+                  deleteAllVectors={deleteAllVectors}
+                />
+                <SettingsTagsCard cfg={cfg} updateConfig={updateConfig} />
+              </FieldGroup>
+            </SettingsSection>
 
-              <SettingsSearchPreferencesCard
-                cfg={cfg}
-                updateConfig={updateConfig}
-                extOptions={extOptions}
-                topKDraft={topKDraft}
-                setTopKDraft={setTopKDraft}
-                selectedSearchModeOption={selectedSearchModeOption}
-              />
-
-              <SettingsTagsCard
-                cfg={cfg}
-                updateConfig={updateConfig}
-                tagsState={tagsState}
-                tagCreateOpen={tagCreateOpen}
-                setTagCreateOpen={setTagCreateOpen}
-                tagNameDraft={tagNameDraft}
-                setTagNameDraft={setTagNameDraft}
-                tagColorDraft={tagColorDraft}
-                setTagColorDraft={setTagColorDraft}
-              />
-            </div>
-
-            <div className="flex min-w-0 flex-col gap-6">
-              <SettingsGeminiApiKeyCard
-                onSaved={onGeminiApiKeySaved}
-                onStoredKeyCleared={onGeminiStoredKeyCleared}
-              />
-
+            <SettingsSection id="folders" title="Folders">
               <SettingsPathsCard
                 cfg={cfg}
                 updateConfig={updateConfig}
@@ -336,22 +354,31 @@ export function SettingsPage({
                   setConfirmDisableDefaultExcludesOpen
                 }
               />
+            </SettingsSection>
 
-              <SettingsEmbeddingImageCard
+            <SettingsSection id="files" title="Files">
+              <FieldGroup className="gap-3">
+                <SettingsFileTypesCard
+                  cfg={cfg}
+                  updateConfig={updateConfig}
+                  extOptions={extOptions}
+                />
+                <SettingsEmbeddingImageCard
+                  cfg={cfg}
+                  updateConfig={updateConfig}
+                />
+              </FieldGroup>
+            </SettingsSection>
+
+            <SettingsSection id="search" title="Search">
+              <SettingsSearchPreferencesCard
                 cfg={cfg}
                 updateConfig={updateConfig}
+                topKDraft={topKDraft}
+                setTopKDraft={setTopKDraft}
               />
-            </div>
-          </div>
-
-          <SettingsClearIndexCard
-            liveIndexedCount={liveIndexedCount}
-            clearIndexError={clearIndexError}
-            clearingIndex={clearingIndex}
-            confirmClearOpen={confirmClearOpen}
-            setConfirmClearOpen={setConfirmClearOpen}
-            deleteAllVectors={deleteAllVectors}
-          />
+            </SettingsSection>
+          </Accordion>
 
           <SettingsFolderDialogs
             cfg={cfg}
@@ -393,8 +420,8 @@ export function SettingsPage({
       </ScrollArea>
       <div
         className={cn(
-          "shrink-0",
-          (indexingActive || embeddingFooterSupplemental) && "pt-2",
+          "shrink-0 border-t border-border/50 bg-background/90 backdrop-blur-sm supports-[backdrop-filter]:bg-background/75",
+          (indexingActive || embeddingFooterSupplemental) && "py-2",
         )}
       >
         <div className="flex min-h-0 items-center justify-center">
@@ -406,6 +433,8 @@ export function SettingsPage({
             total={embedProgress.total}
             lastEmbedError={lastEmbedError}
             embedFailures={embedFailures}
+            onIgnoreEmbedFailure={ignoreEmbedFailure}
+            onRetryEmbedding={retryEmbedding}
           />
         </div>
       </div>

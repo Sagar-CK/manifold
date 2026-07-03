@@ -213,9 +213,9 @@ async function main() {
     throw new Error(`No binary manifest target for platform ${key}`);
   }
 
-  const qdrantOut = path.join(repoRoot, "src-tauri", "resources", "qdrant");
-  const pdfiumOut = path.join(repoRoot, "src-tauri", "resources", "pdfium");
-  const ffmpegOut = path.join(repoRoot, "src-tauri", "resources", "ffmpeg");
+  const qdrantOut = path.join(repoRoot, "resources", "qdrant");
+  const pdfiumOut = path.join(repoRoot, "resources", "pdfium");
+  const ffmpegOut = path.join(repoRoot, "resources", "ffmpeg");
 
   if (installQdrant) {
     await installComponent("qdrant", target.qdrant, qdrantOut);

@@ -1,9 +1,10 @@
-import { ArrowLeft, CircleHelp } from "lucide-react";
+import { ArrowLeft01Icon, HelpCircleIcon } from "@hugeicons/core-free-icons";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ErrorMessage } from "@/components/ErrorMessage";
-import { PageHeader } from "@/components/PageHeader";
-import { TagFilterPill } from "@/components/TagFilterPill";
+import { AppAlert } from "@/components/app/AppAlert";
+import { PageHeader } from "@/components/app/PageHeader";
+import { PageHeaderNav } from "@/components/app/PageHeaderNav";
+import { TagFilterPill } from "@/components/tags/TagFilterPill";
 import { Button } from "@/components/ui/button";
 import {
   Combobox,
@@ -18,6 +19,7 @@ import {
   EmptyHeader,
   EmptyTitle,
 } from "@/components/ui/empty";
+import { HugeIcon } from "@/components/ui/huge-icon";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/ui/spinner";
@@ -26,8 +28,15 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { qdrantScrollGraph } from "@/lib/api/tauri";
+import { qdrantScrollGraph } from "@/lib/api/desktop";
+import type { LocalConfig } from "@/lib/config/localConfig";
 import { invokeErrorText } from "@/lib/errors";
+import { pruneIndexedPathIfMissing } from "@/lib/files/staleIndexedPaths";
+import {
+  isPreviewablePath,
+  useThumbnailsForPaths,
+} from "@/lib/files/useThumbnailsForPaths";
+import { type GraphLayoutAlgorithm, runGraphLayout } from "@/lib/graph/layout";
 import {
   adjustPanForZoomAtScreenPoint,
   buildSpatialGrid,
@@ -36,17 +45,9 @@ import {
   chooseGraphLodMode,
   collectVisibleGraphPoints,
   type GraphLodMode,
-} from "@/lib/graphExplorerRendering";
-import { type GraphLayoutAlgorithm, runGraphLayout } from "@/lib/graphLayout";
-import { graphPerfMark, graphPerfSessionStart } from "@/lib/graphPerfDebug";
-import type { LocalConfig } from "@/lib/localConfig";
-import { navigateBackOrFallback } from "@/lib/navigateBack";
-import { pruneIndexedPathIfMissing } from "@/lib/staleIndexedPaths";
-import { useTagsState } from "@/lib/useTagsState";
-import {
-  isPreviewablePath,
-  useThumbnailsForPaths,
-} from "@/lib/useThumbnailsForPaths";
+} from "@/lib/graph/rendering";
+import { navigateToSearch } from "@/lib/navigation/navigateToSearch";
+import { useTagsState } from "@/lib/tags/useTagsState";
 
 type ContentPoint = {
   path: string;
@@ -92,6 +93,10 @@ const THUMBNAIL_DEMAND_REFRESH_MS = 120;
 const MIN_GRAPH_SCALE = 0.25;
 const MAX_GRAPH_SCALE = 12;
 const GRAPH_NODE_GROWTH_EXPONENT = 0.5;
+const MIN_GRAPH_POINTS = 2;
+const INSUFFICIENT_FILES_TITLE = "Not enough files selected";
+const INSUFFICIENT_FILES_DESCRIPTION =
+  "The visualizer needs at least two indexed files. Increase the limit or remove tag filters.";
 
 const ALGORITHM_OPTIONS = [
   { value: "pca" as const, label: "PCA" },
@@ -226,6 +231,11 @@ function graphVisibilityPad(scale: number): number {
   return graphNodeScreenRadius(scale) + 10;
 }
 
+function isInsufficientGraphPointError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /^Need at least 2 points for /.test(message);
+}
+
 export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
   const navigate = useNavigate();
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -252,8 +262,6 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
     null,
   );
   const lastThumbPaintAtRef = useRef(0);
-  const firstMarkersMarkRef = useRef(false);
-  const firstThumbnailsMarkRef = useRef(false);
   const dragActiveRef = useRef(false);
   const dragRef = useRef<{
     active: boolean;
@@ -436,11 +444,6 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
     if (key === lastThumbnailDemandKeyRef.current) return;
     lastThumbnailDemandKeyRef.current = key;
     setThumbnailDemand(next);
-    graphPerfMark("visible_snapshot", {
-      visible_point_count: next.visiblePointCount,
-      requested_thumbnail_count: next.requestedPaths.length,
-      lod_mode: next.lodMode,
-    });
   }, [computeThumbnailDemand]);
 
   const refreshThumbnailDemand = useCallback(
@@ -513,13 +516,10 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
     const size = radius * 2;
     const markerRadius = 3 / sc;
     const tagRingExtra = 2.5 / sc;
-    let drewAnyPoint = false;
-    let drewActualThumbnail = false;
 
     for (const visiblePoint of visible) {
       const point = points[visiblePoint.index];
       if (!point) continue;
-      drewAnyPoint = true;
       const isSelected = point.path === selectedPath;
 
       if (lodMode === "markers" && !isSelected) {
@@ -559,10 +559,6 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
         size,
       );
 
-      if (hasLoadedSprite) {
-        drewActualThumbnail = true;
-      }
-
       if (isSelected) {
         ctx.strokeStyle = SELECTED_RING;
         ctx.lineWidth = 2.5 / sc;
@@ -579,25 +575,6 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
     }
 
     ctx.restore();
-
-    if (!firstMarkersMarkRef.current && drewAnyPoint) {
-      firstMarkersMarkRef.current = true;
-      graphPerfMark("time_to_first_markers", {
-        visible_point_count: visible.length,
-        requested_thumbnail_count:
-          thumbnailDemandRef.current.requestedPaths.length,
-        lod_mode: lodMode,
-      });
-    }
-    if (!firstThumbnailsMarkRef.current && drewActualThumbnail) {
-      firstThumbnailsMarkRef.current = true;
-      graphPerfMark("time_to_first_thumbnails", {
-        visible_point_count: visible.length,
-        requested_thumbnail_count:
-          thumbnailDemandRef.current.requestedPaths.length,
-        lod_mode: lodMode,
-      });
-    }
   }, [
     gridIndex,
     points,
@@ -617,6 +594,48 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
       drawRef.current();
     });
   }, []);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      const screenX = e.clientX - rect.left;
+      const screenY = e.clientY - rect.top;
+      const currentScale = scaleRef.current;
+      const delta = e.deltaY > 0 ? 0.92 : 1.08;
+      const nextScale = Math.min(
+        MAX_GRAPH_SCALE,
+        Math.max(MIN_GRAPH_SCALE, currentScale * delta),
+      );
+      if (nextScale === currentScale) return;
+      panRef.current = adjustPanForZoomAtScreenPoint(
+        viewportRef.current,
+        panRef.current.x,
+        panRef.current.y,
+        currentScale,
+        nextScale,
+        screenX,
+        screenY,
+      );
+      scaleRef.current = nextScale;
+      scheduleDraw();
+      refreshThumbnailDemand();
+      if (wheelScaleRafRef.current == null) {
+        wheelScaleRafRef.current = requestAnimationFrame(() => {
+          wheelScaleRafRef.current = null;
+          setPan({ ...panRef.current });
+          setScale(scaleRef.current);
+          refreshThumbnailDemand(true);
+        });
+      }
+    };
+
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", onWheel);
+  }, [refreshThumbnailDemand, scheduleDraw]);
 
   const scheduleDrawAfterThumb = useCallback(() => {
     const now = performance.now();
@@ -719,12 +738,6 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
       effectId: number,
     ) => {
       const gen = ++loadGenerationRef.current;
-      graphPerfSessionStart();
-      graphPerfMark("load_start", {
-        limit,
-        algo,
-        tag_filter_count: tagFilters.length,
-      });
       setLimitInput(String(limit));
       setError(null);
       setNoResults(false);
@@ -736,8 +749,6 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
       setSelectedPath(null);
       setThumbnailDemand(defaultThumbnailDemand());
       lastThumbnailDemandKeyRef.current = "";
-      firstMarkersMarkRef.current = false;
-      firstThumbnailsMarkRef.current = false;
       lastThumbPaintAtRef.current = 0;
       spriteGenerationRef.current += 1;
       if (thumbDrawTimeoutRef.current != null) {
@@ -755,28 +766,14 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
         if (gen !== loadGenerationRef.current) return;
         if (effectId !== graphEffectIdRef.current) return;
 
-        graphPerfMark("invoke_qdrant_scroll_graph_done", {
-          n: res.n,
-          d: res.d,
-          packed_base64_chars: res.packedEmbeddingsF32Base64.length,
-          limit,
-          algo,
-        });
-
-        if (res.n === 0) {
-          graphPerfMark("no_results");
+        if (res.n < MIN_GRAPH_POINTS) {
+          setPointCount(res.n);
           setNoResults(true);
           return;
         }
 
         setPointCount(res.n);
         setLayoutBusy(true);
-        graphPerfMark("worker_decode_start", { algo, n: res.n, d: res.d });
-        graphPerfMark("runGraphLayout_worker_start", {
-          algo,
-          n: res.n,
-          d: res.d,
-        });
         const layout = await runGraphLayout(
           res.packedEmbeddingsF32Base64,
           res.n,
@@ -785,15 +782,6 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
         );
         if (gen !== loadGenerationRef.current) return;
         if (effectId !== graphEffectIdRef.current) return;
-
-        graphPerfMark("worker_decode_done", {
-          decode_ms: Number(layout.metrics.decodeMs.toFixed(2)),
-          row_conversion_ms: Number(layout.metrics.rowConversionMs.toFixed(2)),
-        });
-        graphPerfMark("runGraphLayout_worker_done", {
-          layout_ms: Number(layout.metrics.layoutMs.toFixed(2)),
-          normalize_ms: Number(layout.metrics.normalizeMs.toFixed(2)),
-        });
 
         const next: LayoutPoint[] = res.points.map((point, index) => ({
           path: point.path,
@@ -805,7 +793,6 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
           ny: layout.y[index] ?? 0,
         }));
         setPoints(next);
-        graphPerfMark("setPoints_done", { layout_points: next.length });
         dragActiveRef.current = false;
         setPan({ x: 0, y: 0 });
         setScale(1);
@@ -814,16 +801,15 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
       } catch (e) {
         if (gen !== loadGenerationRef.current) return;
         if (e instanceof Error && e.message === "Graph layout superseded") {
-          graphPerfMark("run_superseded");
           return;
         }
-        graphPerfMark("load_error", {
-          message: e instanceof Error ? e.message : String(e),
-        });
+        if (isInsufficientGraphPointError(e)) {
+          setNoResults(true);
+          return;
+        }
         setError(invokeErrorText(e));
       } finally {
         if (gen === loadGenerationRef.current) {
-          graphPerfMark("load_pipeline_finally_ui_idle");
           setLoading(false);
           setLayoutBusy(false);
         }
@@ -908,29 +894,22 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
   return (
     <section className="flex h-full min-h-0 flex-col">
       <div className="relative shrink-0">
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="absolute left-0 top-0 text-muted-foreground"
-              aria-label="Back"
-              onClick={() => navigateBackOrFallback(navigate)}
-            >
-              <ArrowLeft className="h-4 w-4" aria-hidden="true" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom">Back</TooltipContent>
-        </Tooltip>
-        <PageHeader
-          heading="Graph explorer"
-          subtitle="visualize your network of files"
-        />
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="absolute left-0 top-0 text-muted-foreground"
+          aria-label="Search"
+          onClick={() => navigateToSearch(navigate)}
+        >
+          <HugeIcon icon={ArrowLeft01Icon} className="h-4 w-4" aria-hidden />
+        </Button>
+        <PageHeaderNav />
+        <PageHeader heading="File Visualizer" />
       </div>
 
       <div className="mb-3 flex flex-col gap-3">
-        <div className="flex flex-wrap items-start gap-x-4 gap-y-3">
+        <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
           <div className="flex flex-col gap-1 text-left">
             <Label htmlFor="graph-limit-input" className="app-label">
               Limit
@@ -946,7 +925,7 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
                 const n = parseLimitInput(limitInput);
                 setLimitInput(String(n));
               }}
-              className="h-9 w-24"
+              className="w-20 tabular-nums"
               aria-label="Point limit"
             />
           </div>
@@ -962,7 +941,11 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
                     className="absolute top-1/2 right-0 inline-flex size-3.5 -translate-y-1/2 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
                     aria-label="About layout algorithms"
                   >
-                    <CircleHelp className="size-3.5" aria-hidden="true" />
+                    <HugeIcon
+                      icon={HelpCircleIcon}
+                      className="size-3.5"
+                      aria-hidden
+                    />
                   </button>
                 </TooltipTrigger>
                 <TooltipContent
@@ -993,7 +976,7 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
                   readOnly
                   showClear={false}
                   aria-label="Layout algorithm"
-                  className="w-40"
+                  className="w-36"
                 />
                 <ComboboxContent>
                   <ComboboxList>
@@ -1007,13 +990,12 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
               </Combobox>
             </div>
           </div>
-          <div className="flex min-w-[12rem] max-w-full flex-1 flex-col gap-1 text-left">
-            <span className="app-label">Filter by tags (OR)</span>
-            {tagsState.tags.length === 0 ? (
-              <p className="text-xs leading-9 text-muted-foreground">
-                Define tags in Settings to filter this view.
-              </p>
-            ) : (
+          {tagsState.tags.length > 0 ? (
+            <div
+              className="flex min-h-7 min-w-[12rem] max-w-full flex-1 items-center text-left"
+              role="group"
+              aria-label="Tag Filters"
+            >
               <div className="flex flex-wrap gap-2">
                 {tagsState.tags.map((tag) => {
                   const pressed = tagFilterIds.includes(tag.id);
@@ -1028,8 +1010,8 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
                   );
                 })}
               </div>
-            )}
-          </div>
+            </div>
+          ) : null}
         </div>
       </div>
 
@@ -1050,19 +1032,15 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
           </div>
         ) : error ? (
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-4">
-            <ErrorMessage
-              variant="centered"
-              className="max-w-md"
-              message={error}
-            />
+            <AppAlert variant="centered" className="max-w-md" message={error} />
           </div>
         ) : noResults ? (
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-4">
             <Empty className="max-w-md border-none bg-transparent p-0">
               <EmptyHeader>
-                <EmptyTitle>No results for the current filters</EmptyTitle>
+                <EmptyTitle>{INSUFFICIENT_FILES_TITLE}</EmptyTitle>
                 <EmptyDescription>
-                  Try increasing the limit or removing some tag filters.
+                  {INSUFFICIENT_FILES_DESCRIPTION}
                 </EmptyDescription>
               </EmptyHeader>
             </Empty>
@@ -1108,39 +1086,6 @@ export function GraphExplorerPage({ cfg }: { cfg: LocalConfig }) {
             }
             if (dragRef.current?.active) {
               endPanDrag();
-            }
-          }}
-          onWheel={(e) => {
-            e.preventDefault();
-            const rect = e.currentTarget.getBoundingClientRect();
-            const screenX = e.clientX - rect.left;
-            const screenY = e.clientY - rect.top;
-            const currentScale = scaleRef.current;
-            const delta = e.deltaY > 0 ? 0.92 : 1.08;
-            const nextScale = Math.min(
-              MAX_GRAPH_SCALE,
-              Math.max(MIN_GRAPH_SCALE, currentScale * delta),
-            );
-            if (nextScale === currentScale) return;
-            panRef.current = adjustPanForZoomAtScreenPoint(
-              viewportRef.current,
-              panRef.current.x,
-              panRef.current.y,
-              currentScale,
-              nextScale,
-              screenX,
-              screenY,
-            );
-            scaleRef.current = nextScale;
-            scheduleDraw();
-            refreshThumbnailDemand();
-            if (wheelScaleRafRef.current == null) {
-              wheelScaleRafRef.current = requestAnimationFrame(() => {
-                wheelScaleRafRef.current = null;
-                setPan({ ...panRef.current });
-                setScale(scaleRef.current);
-                refreshThumbnailDemand(true);
-              });
             }
           }}
           onClick={(e) => {
