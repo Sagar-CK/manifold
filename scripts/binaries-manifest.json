@@ -1,7 +1,7 @@
 {
   "qdrantVersion": "v1.17.1",
   "pdfiumVersion": "chromium%2F7543",
-  "ffmpegVersion": "8.1",
+  "ffmpegVersion": "8.1.2",
   "targets": {
     "darwin-arm64": {
       "qdrant": {
@@ -103,16 +103,16 @@
         "outputBinaryName": "libpdfium.so"
       },
       "ffmpeg": {
-        "archiveUrl": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-04-07-13-13/ffmpeg-n8.1-7-ga3475e2554-linux64-lgpl-8.1.tar.xz",
-        "archiveSha256": "c8463921eae61720ad47df0674163a7945e6824c743dfca47ea6e33cc1d03819",
+        "archiveUrl": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-30-13-34/ffmpeg-n8.1.2-21-gce3c09c101-linux64-lgpl-8.1.tar.xz",
+        "archiveSha256": "92a85718296516045e3d08a971f346f111971a2f9cba7e8191e5454eb05e4305",
         "archiveType": "tar.xz",
         "outputs": [
           {
-            "binaryPathInArchive": "ffmpeg-n8.1-7-ga3475e2554-linux64-lgpl-8.1/bin/ffmpeg",
+            "binaryPathInArchive": "ffmpeg-n8.1.2-21-gce3c09c101-linux64-lgpl-8.1/bin/ffmpeg",
             "outputBinaryName": "ffmpeg"
           },
           {
-            "binaryPathInArchive": "ffmpeg-n8.1-7-ga3475e2554-linux64-lgpl-8.1/bin/ffprobe",
+            "binaryPathInArchive": "ffmpeg-n8.1.2-21-gce3c09c101-linux64-lgpl-8.1/bin/ffprobe",
             "outputBinaryName": "ffprobe"
           }
         ]
@@ -134,16 +134,16 @@
         "outputBinaryName": "pdfium.dll"
       },
       "ffmpeg": {
-        "archiveUrl": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-04-07-13-13/ffmpeg-n8.1-7-ga3475e2554-win64-lgpl-8.1.zip",
-        "archiveSha256": "064303b1d434452aea176a7764628e35f3be0bf37565aa45b6a8f914265ecd0e",
+        "archiveUrl": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-30-13-34/ffmpeg-n8.1.2-21-gce3c09c101-win64-lgpl-8.1.zip",
+        "archiveSha256": "3b9eceb438016b647e0755a51ce3a388cd4ed5679e2427cb83a01e1ae2cd0eba",
         "archiveType": "zip",
         "outputs": [
           {
-            "binaryPathInArchive": "ffmpeg-n8.1-7-ga3475e2554-win64-lgpl-8.1/bin/ffmpeg.exe",
+            "binaryPathInArchive": "ffmpeg-n8.1.2-21-gce3c09c101-win64-lgpl-8.1/bin/ffmpeg.exe",
             "outputBinaryName": "ffmpeg.exe"
           },
           {
-            "binaryPathInArchive": "ffmpeg-n8.1-7-ga3475e2554-win64-lgpl-8.1/bin/ffprobe.exe",
+            "binaryPathInArchive": "ffmpeg-n8.1.2-21-gce3c09c101-win64-lgpl-8.1/bin/ffprobe.exe",
             "outputBinaryName": "ffprobe.exe"
           }
         ]
