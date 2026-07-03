@@ -54,4 +54,17 @@ jobs:
             --draft \
             --title "Manifold ${GITHUB_REF_NAME}" \
             --notes "See the assets to download this version and install." || true
-          gh release upload "${GITHUB_REF_NAME}" release/* --clobber
+          assets=()
+          while IFS= read -r -d '' asset; do
+            assets+=("$asset")
+          done < <(find release -maxdepth 1 -type f \
+            ! -name 'builder-debug.yml' \
+            ! -name 'builder-effective-config.yaml' \
+            -print0)
+
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "No release assets found."
+            exit 1
+          fi
+
+          gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber

@@ -81,7 +81,7 @@ Artifacts are written to the `release/` directory (see `package.json` → `build
 This repository uses GitHub Actions to build installers and create a draft GitHub release. To trigger a release:
 
 1. Update the `version` in `package.json`.
-2. Push a version tag such as `v0.1.3` (`git tag v0.1.3 && git push origin v0.1.3`).
+2. Push a version tag such as `v0.1.5` (`git tag v0.1.5 && git push origin v0.1.5`).
 3. The release workflow runs `pnpm setup:binaries` then `pnpm dist` for macOS, Linux, and Windows, uploads workflow artifacts, and attaches the built assets to a draft release for that tag.
 
 For more on pinned binaries and paths, see [docs/runtime-binaries.md](docs/runtime-binaries.md).
